@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "adapter_id": "ai-collab-participant-driver",
+  "command": ["python3", "scripts/ai_collab_participant_driver.py"],
+  "working_directory": "."
+}

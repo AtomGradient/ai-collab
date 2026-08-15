@@ -1,0 +1,589 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ai-collab:workspace-environment:v1",
+  "title": "AI Collaboration Workspace and Environment adapter contract v1",
+  "oneOf": [
+    {"$ref": "#/$defs/adapter_descriptor"},
+    {"$ref": "#/$defs/workspace_environment_plan"},
+    {"$ref": "#/$defs/operation_journal"},
+    {"$ref": "#/$defs/workspace_environment_receipt"},
+    {"$ref": "#/$defs/workspace_environment_observation"}
+  ],
+  "$defs": {
+    "opaque_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "namespaced_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*(\\.[a-z][a-z0-9-]*)+$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "generation": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "nonnegative_integer": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "nullable_opaque_id": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/opaque_id"}
+      ]
+    },
+    "nullable_sha256": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/sha256"}
+      ]
+    },
+    "nullable_namespaced_id": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/namespaced_id"}
+      ]
+    },
+    "operation_fence": {
+      "type": "object",
+      "required": [
+        "base_receipt_digest",
+        "expected_ready_revision",
+        "workspace_id",
+        "workspace_binding_digest",
+        "environment_id",
+        "environment_binding_digest"
+      ],
+      "properties": {
+        "base_receipt_digest": {"$ref": "#/$defs/sha256"},
+        "expected_ready_revision": {"$ref": "#/$defs/generation"},
+        "workspace_id": {"$ref": "#/$defs/opaque_id"},
+        "workspace_binding_digest": {"$ref": "#/$defs/sha256"},
+        "environment_id": {"$ref": "#/$defs/opaque_id"},
+        "environment_binding_digest": {"$ref": "#/$defs/sha256"}
+      },
+      "additionalProperties": false
+    },
+    "nullable_operation_fence": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/operation_fence"}
+      ]
+    },
+    "logical_path": {
+      "type": "string",
+      "pattern": "^(\\.|[A-Za-z0-9][A-Za-z0-9._/-]{0,511})$"
+    },
+    "logical_ref": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$"
+    },
+    "scenario_ref": {
+      "type": "object",
+      "required": ["scenario_id", "scenario_generation"],
+      "properties": {
+        "scenario_id": {"$ref": "#/$defs/opaque_id"},
+        "scenario_generation": {"$ref": "#/$defs/generation"}
+      },
+      "additionalProperties": false
+    },
+    "adapter_ref": {
+      "type": "object",
+      "required": ["adapter_kind", "adapter_id", "contract_version"],
+      "properties": {
+        "adapter_kind": {"enum": ["workspace", "environment"]},
+        "adapter_id": {"$ref": "#/$defs/opaque_id"},
+        "contract_version": {"const": 1}
+      },
+      "additionalProperties": false
+    },
+    "adapter_descriptor": {
+      "type": "object",
+      "required": [
+        "adapter_contract_version",
+        "adapter",
+        "operations",
+        "project_payload_schema_digest",
+        "private_binding_format_digest",
+        "supports_resume",
+        "supports_repair",
+        "supports_destroy"
+      ],
+      "properties": {
+        "adapter_contract_version": {"const": 1},
+        "adapter": {"$ref": "#/$defs/adapter_ref"},
+        "operations": {
+          "type": "array",
+          "items": {"enum": ["plan", "provision", "status", "repair", "destroy"]},
+          "uniqueItems": true
+        },
+        "project_payload_schema_digest": {"$ref": "#/$defs/sha256"},
+        "private_binding_format_digest": {"$ref": "#/$defs/sha256"},
+        "supports_resume": {"type": "boolean"},
+        "supports_repair": {"type": "boolean"},
+        "supports_destroy": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "component_plan": {
+      "type": "object",
+      "required": [
+        "component_id",
+        "component_kind",
+        "classification",
+        "placement",
+        "logical_path",
+        "provision_order",
+        "dependency_component_ids",
+        "source_identity_digest",
+        "revision_kind",
+        "planned_revision",
+        "target_ref",
+        "materialization_mode",
+        "source_mutation_allowed",
+        "isolated_writable",
+        "shared_mutable_storage",
+        "adapter_plan_digest",
+        "estimated_bytes"
+      ],
+      "properties": {
+        "component_id": {"$ref": "#/$defs/opaque_id"},
+        "component_kind": {"$ref": "#/$defs/namespaced_id"},
+        "classification": {"enum": ["required", "optional"]},
+        "placement": {"enum": ["project_root", "project_child", "bundle_sibling"]},
+        "logical_path": {"$ref": "#/$defs/logical_path"},
+        "provision_order": {"$ref": "#/$defs/nonnegative_integer"},
+        "dependency_component_ids": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/opaque_id"},
+          "uniqueItems": true
+        },
+        "source_identity_digest": {"$ref": "#/$defs/sha256"},
+        "revision_kind": {"$ref": "#/$defs/namespaced_id"},
+        "planned_revision": {"$ref": "#/$defs/opaque_id"},
+        "target_ref": {"$ref": "#/$defs/logical_ref"},
+        "materialization_mode": {"$ref": "#/$defs/namespaced_id"},
+        "source_mutation_allowed": {"const": false},
+        "isolated_writable": {"const": true},
+        "shared_mutable_storage": {"const": false},
+        "adapter_plan_digest": {"$ref": "#/$defs/sha256"},
+        "estimated_bytes": {"$ref": "#/$defs/nonnegative_integer"}
+      },
+      "additionalProperties": false
+    },
+    "environment_plan": {
+      "type": "object",
+      "required": [
+        "environment_id",
+        "environment_kind",
+        "environment_spec_digest",
+        "dependency_lock_digest",
+        "source_bindings_digest",
+        "writable_scope",
+        "shared_mutable_dependencies",
+        "immutable_cache_reuse",
+        "adapter_plan_digest",
+        "estimated_bytes"
+      ],
+      "properties": {
+        "environment_id": {"$ref": "#/$defs/opaque_id"},
+        "environment_kind": {"$ref": "#/$defs/namespaced_id"},
+        "environment_spec_digest": {"$ref": "#/$defs/sha256"},
+        "dependency_lock_digest": {"$ref": "#/$defs/nullable_sha256"},
+        "source_bindings_digest": {"$ref": "#/$defs/sha256"},
+        "writable_scope": {"const": "scenario"},
+        "shared_mutable_dependencies": {"const": false},
+        "immutable_cache_reuse": {"type": "boolean"},
+        "adapter_plan_digest": {"$ref": "#/$defs/sha256"},
+        "estimated_bytes": {"$ref": "#/$defs/nonnegative_integer"}
+      },
+      "additionalProperties": false
+    },
+    "workspace_environment_plan": {
+      "type": "object",
+      "required": [
+        "plan_contract_version",
+        "plan_id",
+        "plan_generation",
+        "operation_id",
+        "scenario",
+        "project_key",
+        "project_descriptor_digest",
+        "repo_manifest_digest",
+        "workspace_adapter",
+        "environment_adapter",
+        "requested_component_ids",
+        "components",
+        "environment",
+        "source_wip_snapshot_digest",
+        "total_estimated_bytes",
+        "project_payload_digest"
+      ],
+      "properties": {
+        "plan_contract_version": {"const": 1},
+        "plan_id": {"$ref": "#/$defs/opaque_id"},
+        "plan_generation": {"$ref": "#/$defs/generation"},
+        "operation_id": {"$ref": "#/$defs/opaque_id"},
+        "scenario": {"$ref": "#/$defs/scenario_ref"},
+        "project_key": {"$ref": "#/$defs/opaque_id"},
+        "project_descriptor_digest": {"$ref": "#/$defs/sha256"},
+        "repo_manifest_digest": {"$ref": "#/$defs/sha256"},
+        "workspace_adapter": {"$ref": "#/$defs/adapter_ref"},
+        "environment_adapter": {"$ref": "#/$defs/adapter_ref"},
+        "requested_component_ids": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/opaque_id"},
+          "uniqueItems": true
+        },
+        "components": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/component_plan"}
+        },
+        "environment": {"$ref": "#/$defs/environment_plan"},
+        "source_wip_snapshot_digest": {"$ref": "#/$defs/sha256"},
+        "total_estimated_bytes": {"$ref": "#/$defs/nonnegative_integer"},
+        "project_payload_digest": {"$ref": "#/$defs/sha256"}
+      },
+      "additionalProperties": false
+    },
+    "journal_event": {
+      "type": "object",
+      "required": [
+        "sequence",
+        "phase",
+        "adapter_kind",
+        "step_id",
+        "target_id",
+        "state",
+        "evidence_digest",
+        "error_code"
+      ],
+      "properties": {
+        "sequence": {"$ref": "#/$defs/generation"},
+        "phase": {
+          "enum": ["planned", "workspace", "environment", "verify", "finalize", "repair", "rollback", "destroy"]
+        },
+        "adapter_kind": {"enum": ["workspace", "environment", "coordinator"]},
+        "step_id": {"$ref": "#/$defs/namespaced_id"},
+        "target_id": {"$ref": "#/$defs/opaque_id"},
+        "state": {"enum": ["planned", "started", "committed", "failed", "unknown"]},
+        "evidence_digest": {"$ref": "#/$defs/nullable_sha256"},
+        "error_code": {"$ref": "#/$defs/nullable_namespaced_id"}
+      },
+      "additionalProperties": false
+    },
+    "operation_journal": {
+      "type": "object",
+      "required": [
+        "journal_contract_version",
+        "operation_id",
+        "operation_kind",
+        "plan_digest",
+        "scenario",
+        "operation_fence",
+        "events"
+      ],
+      "properties": {
+        "journal_contract_version": {"const": 1},
+        "operation_id": {"$ref": "#/$defs/opaque_id"},
+        "operation_kind": {"enum": ["plan", "provision", "status", "repair", "destroy"]},
+        "plan_digest": {"$ref": "#/$defs/sha256"},
+        "scenario": {"$ref": "#/$defs/scenario_ref"},
+        "operation_fence": {"$ref": "#/$defs/nullable_operation_fence"},
+        "events": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/journal_event"}
+        }
+      },
+      "additionalProperties": false
+    },
+    "component_receipt": {
+      "type": "object",
+      "required": [
+        "component_id",
+        "component_kind",
+        "placement",
+        "logical_path",
+        "source_identity_digest",
+        "revision_kind",
+        "planned_revision",
+        "realized_revision",
+        "target_ref",
+        "component_binding_digest",
+        "content_digest",
+        "guard_digest",
+        "isolated_writable",
+        "shared_mutable_storage",
+        "clean_at_provision"
+      ],
+      "properties": {
+        "component_id": {"$ref": "#/$defs/opaque_id"},
+        "component_kind": {"$ref": "#/$defs/namespaced_id"},
+        "placement": {"enum": ["project_root", "project_child", "bundle_sibling"]},
+        "logical_path": {"$ref": "#/$defs/logical_path"},
+        "source_identity_digest": {"$ref": "#/$defs/sha256"},
+        "revision_kind": {"$ref": "#/$defs/namespaced_id"},
+        "planned_revision": {"$ref": "#/$defs/opaque_id"},
+        "realized_revision": {"$ref": "#/$defs/opaque_id"},
+        "target_ref": {"$ref": "#/$defs/logical_ref"},
+        "component_binding_digest": {"$ref": "#/$defs/sha256"},
+        "content_digest": {"$ref": "#/$defs/sha256"},
+        "guard_digest": {"$ref": "#/$defs/nullable_sha256"},
+        "isolated_writable": {"const": true},
+        "shared_mutable_storage": {"const": false},
+        "clean_at_provision": {"const": true}
+      },
+      "additionalProperties": false
+    },
+    "environment_receipt": {
+      "type": "object",
+      "required": [
+        "environment_id",
+        "environment_kind",
+        "environment_binding_digest",
+        "environment_spec_digest",
+        "dependency_lock_digest",
+        "source_bindings_digest",
+        "content_digest",
+        "isolated_writable",
+        "shared_mutable_dependencies",
+        "immutable_cache_only",
+        "realized_bytes"
+      ],
+      "properties": {
+        "environment_id": {"$ref": "#/$defs/opaque_id"},
+        "environment_kind": {"$ref": "#/$defs/namespaced_id"},
+        "environment_binding_digest": {"$ref": "#/$defs/sha256"},
+        "environment_spec_digest": {"$ref": "#/$defs/sha256"},
+        "dependency_lock_digest": {"$ref": "#/$defs/nullable_sha256"},
+        "source_bindings_digest": {"$ref": "#/$defs/sha256"},
+        "content_digest": {"$ref": "#/$defs/sha256"},
+        "isolated_writable": {"const": true},
+        "shared_mutable_dependencies": {"const": false},
+        "immutable_cache_only": {"const": true},
+        "realized_bytes": {"$ref": "#/$defs/nonnegative_integer"}
+      },
+      "additionalProperties": false
+    },
+    "finalization_receipt": {
+      "type": "object",
+      "required": [
+        "staging_binding_digest",
+        "atomic_publish",
+        "expected_registry_revision",
+        "committed_ready_revision"
+      ],
+      "properties": {
+        "staging_binding_digest": {"$ref": "#/$defs/sha256"},
+        "atomic_publish": {"const": true},
+        "expected_registry_revision": {"$ref": "#/$defs/nonnegative_integer"},
+        "committed_ready_revision": {"$ref": "#/$defs/generation"}
+      },
+      "additionalProperties": false
+    },
+    "workspace_environment_receipt": {
+      "type": "object",
+      "required": [
+        "receipt_contract_version",
+        "receipt_id",
+        "plan_digest",
+        "operation_id",
+        "base_receipt_digest",
+        "scenario",
+        "project_key",
+        "workspace_adapter",
+        "environment_adapter",
+        "workspace_id",
+        "workspace_binding_digest",
+        "components",
+        "environment",
+        "journal_digest",
+        "source_wip_before_digest",
+        "source_wip_after_digest",
+        "finalization",
+        "state",
+        "residual_owned_resources",
+        "project_payload_digest"
+      ],
+      "properties": {
+        "receipt_contract_version": {"const": 1},
+        "receipt_id": {"$ref": "#/$defs/opaque_id"},
+        "plan_digest": {"$ref": "#/$defs/sha256"},
+        "operation_id": {"$ref": "#/$defs/opaque_id"},
+        "base_receipt_digest": {"$ref": "#/$defs/nullable_sha256"},
+        "scenario": {"$ref": "#/$defs/scenario_ref"},
+        "project_key": {"$ref": "#/$defs/opaque_id"},
+        "workspace_adapter": {"$ref": "#/$defs/adapter_ref"},
+        "environment_adapter": {"$ref": "#/$defs/adapter_ref"},
+        "workspace_id": {"$ref": "#/$defs/opaque_id"},
+        "workspace_binding_digest": {"$ref": "#/$defs/sha256"},
+        "components": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/component_receipt"}
+        },
+        "environment": {"$ref": "#/$defs/environment_receipt"},
+        "journal_digest": {"$ref": "#/$defs/sha256"},
+        "source_wip_before_digest": {"$ref": "#/$defs/sha256"},
+        "source_wip_after_digest": {"$ref": "#/$defs/sha256"},
+        "finalization": {"$ref": "#/$defs/finalization_receipt"},
+        "state": {"const": "ready"},
+        "residual_owned_resources": {"const": 0},
+        "project_payload_digest": {"$ref": "#/$defs/sha256"}
+      },
+      "additionalProperties": false
+    },
+    "component_observation": {
+      "type": "object",
+      "required": [
+        "component_id",
+        "component_binding_digest",
+        "realized_revision",
+        "content_digest",
+        "dirty",
+        "ownership_digest"
+      ],
+      "properties": {
+        "component_id": {"$ref": "#/$defs/opaque_id"},
+        "component_binding_digest": {"$ref": "#/$defs/sha256"},
+        "realized_revision": {"$ref": "#/$defs/opaque_id"},
+        "content_digest": {"$ref": "#/$defs/sha256"},
+        "dirty": {"type": "boolean"},
+        "ownership_digest": {"$ref": "#/$defs/sha256"}
+      },
+      "additionalProperties": false
+    },
+    "environment_observation": {
+      "type": "object",
+      "required": [
+        "environment_id",
+        "environment_binding_digest",
+        "environment_spec_digest",
+        "source_bindings_digest",
+        "content_digest"
+      ],
+      "properties": {
+        "environment_id": {"$ref": "#/$defs/opaque_id"},
+        "environment_binding_digest": {"$ref": "#/$defs/sha256"},
+        "environment_spec_digest": {"$ref": "#/$defs/sha256"},
+        "source_bindings_digest": {"$ref": "#/$defs/sha256"},
+        "content_digest": {"$ref": "#/$defs/sha256"}
+      },
+      "additionalProperties": false
+    },
+    "nullable_environment_observation": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/environment_observation"}
+      ]
+    },
+    "workspace_environment_observation": {
+      "type": "object",
+      "required": [
+        "observation_contract_version",
+        "operation_id",
+        "operation_kind",
+        "journal_digest",
+        "plan_digest",
+        "receipt_digest",
+        "scenario",
+        "workspace_id",
+        "workspace_binding_digest",
+        "components",
+        "environment",
+        "state",
+        "drift_codes",
+        "wip_summary_digest",
+        "ownership_summary_digest"
+      ],
+      "properties": {
+        "observation_contract_version": {"const": 1},
+        "operation_id": {"$ref": "#/$defs/opaque_id"},
+        "operation_kind": {"enum": ["status", "destroy"]},
+        "journal_digest": {"$ref": "#/$defs/sha256"},
+        "plan_digest": {"$ref": "#/$defs/sha256"},
+        "receipt_digest": {"$ref": "#/$defs/sha256"},
+        "scenario": {"$ref": "#/$defs/scenario_ref"},
+        "workspace_id": {"$ref": "#/$defs/nullable_opaque_id"},
+        "workspace_binding_digest": {"$ref": "#/$defs/nullable_sha256"},
+        "components": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/component_observation"}
+        },
+        "environment": {"$ref": "#/$defs/nullable_environment_observation"},
+        "state": {"enum": ["aligned", "degraded", "missing"]},
+        "drift_codes": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/namespaced_id"},
+          "uniqueItems": true
+        },
+        "wip_summary_digest": {"$ref": "#/$defs/sha256"},
+        "ownership_summary_digest": {"$ref": "#/$defs/sha256"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "x-ai-collab": {
+    "schema_version": 1,
+    "contract_id": "ai-collab-workspace-environment-v1",
+    "product_contract_version": "3.2",
+    "dependencies": {
+      "project_descriptor_schema_version": 1,
+      "repo_manifest_schema_version": 1,
+      "host_ipc_contract_id": "ai-collab-host-ipc-v1",
+      "state_contract_id": "ai-collab-scenario-participant-state-v1"
+    },
+    "operations": ["plan", "provision", "status", "repair", "destroy"],
+    "plan_protocol": {
+      "planning_is_read_only": true,
+      "plan_is_generation_scoped_and_immutable": true,
+      "descriptor_and_manifest_digests_are_pinned": true,
+      "required_components_cannot_be_omitted": true,
+      "unmanaged_components_cannot_be_materialized": true,
+      "source_revision_is_exact_and_receipt_must_match": true,
+      "source_mutation_is_forbidden": true,
+      "physical_machine_paths_are_private_adapter_data": true,
+      "project_specific_payloads_are_digest_bound": true
+    },
+    "provision_protocol": {
+      "workspace_components_are_isolated_writable_copies": true,
+      "shared_mutable_component_storage_is_forbidden": true,
+      "environment_is_scenario_writable_and_isolated": true,
+      "only_immutable_environment_cache_may_be_shared": true,
+      "journal_is_append_only_and_restartable": true,
+      "status_repair_and_destroy_are_new_receipt_fenced_operations": true,
+      "operation_intent_is_digest_bound_before_execution": true,
+      "failure_or_unknown_cannot_finalize_ready": true,
+      "all_components_and_environment_verify_before_atomic_publish": true,
+      "source_wip_before_and_after_must_match": true,
+      "automatic_commit_push_rebase_or_merge_is_forbidden": true
+    },
+    "status_protocol": {
+      "every_observation_joins_a_completed_status_or_destroy_journal": true,
+      "aligned_requires_exact_binding_revision_and_environment": true,
+      "dirty_wip_is_observed_not_destroyed": true,
+      "drift_is_structured_and_fail_closed": true,
+      "repair_and_destroy_require_new_fenced_operations": true
+    },
+    "invariants": {
+      "product_core_does_not_branch_on_scm_or_environment_tool": true,
+      "adapter_identity_is_versioned_and_project_declared": true,
+      "one_scenario_owns_one_workspace_and_environment_binding": true,
+      "same_scenario_participants_share_workspace_not_identity": true,
+      "receipt_contains_no_absolute_path_or_private_binding": true,
+      "plan_or_receipt_never_claims_real_execution_by_structure_alone": true
+    },
+    "deferred_surfaces": [
+      "real-workspace-and-environment-adapter-execution",
+      "physical-inventory-and-path-reconciliation",
+      "project-specific-scm-materialization-and-git-guards",
+      "project-specific-environment-creation-and-lock-resolution",
+      "host-storage-transaction-and-recovery-implementation",
+      "permission-and-high-risk-confirmation-matrix",
+      "gate-registry-fingerprint-wiring-and-rebuild"
+    ]
+  }
+}

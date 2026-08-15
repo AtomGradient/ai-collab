@@ -1,0 +1,624 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ai-collab:participant-drivers:v2",
+  "title": "AI Collaboration participant driver contract suite v2",
+  "oneOf": [
+    {"$ref": "#/$defs/driver_registry"},
+    {"$ref": "#/$defs/runtime_driver_descriptor"},
+    {"$ref": "#/$defs/presentation_driver_descriptor"},
+    {"$ref": "#/$defs/runtime_launch_spec"},
+    {"$ref": "#/$defs/runtime_ready_ack"},
+    {"$ref": "#/$defs/presentation_create_ack"}
+  ],
+  "$defs": {
+    "opaque_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "namespaced_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*(\\.[a-z][a-z0-9-]*)+$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "generation": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "nullable_namespaced_id": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/namespaced_id"}
+      ]
+    },
+    "nullable_opaque_id": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/opaque_id"}
+      ]
+    },
+    "nullable_sha256": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/sha256"}
+      ]
+    },
+    "model_binding": {
+      "type": "object",
+      "required": [
+        "provider_profile_ref",
+        "model_ref",
+        "inference_profile_ref"
+      ],
+      "properties": {
+        "provider_profile_ref": {"$ref": "#/$defs/namespaced_id"},
+        "model_ref": {"$ref": "#/$defs/namespaced_id"},
+        "inference_profile_ref": {"$ref": "#/$defs/nullable_namespaced_id"}
+      },
+      "additionalProperties": false
+    },
+    "nullable_model_binding": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/model_binding"}
+      ]
+    },
+    "runtime_driver_descriptor": {
+      "type": "object",
+      "required": [
+        "driver_kind",
+        "driver_id",
+        "contract_version",
+        "implementation_ref",
+        "interaction_modes",
+        "lifecycle_operations",
+        "continuity_modes",
+        "supports_harness_process_binding",
+        "supports_ready_ack",
+        "supports_delivery_ack",
+        "supports_session_drift_signal",
+        "supports_vendor_session_identity",
+        "vendor_lifecycle_surface",
+        "optional_vendor_lifecycle_operations",
+        "retention_modes",
+        "repair_modes",
+        "error_namespace",
+        "redaction_profile_ref"
+      ],
+      "properties": {
+        "driver_kind": {"const": "runtime"},
+        "driver_id": {"$ref": "#/$defs/namespaced_id"},
+        "contract_version": {"const": 2},
+        "implementation_ref": {"$ref": "#/$defs/namespaced_id"},
+        "interaction_modes": {
+          "type": "array",
+          "items": {"enum": ["tui", "headless"]},
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "lifecycle_operations": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "create",
+              "start",
+              "stop",
+              "health",
+              "delivery_ack",
+              "session_drift",
+              "repair"
+            ]
+          },
+          "minItems": 7,
+          "uniqueItems": true
+        },
+        "continuity_modes": {
+          "type": "array",
+          "items": {"enum": ["explicit_recreate", "exact_resume"]},
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "supports_harness_process_binding": {"const": true},
+        "supports_ready_ack": {"const": true},
+        "supports_delivery_ack": {"const": true},
+        "supports_session_drift_signal": {"const": true},
+        "supports_vendor_session_identity": {"type": "boolean"},
+        "vendor_lifecycle_surface": {"$ref": "#/$defs/nullable_namespaced_id"},
+        "optional_vendor_lifecycle_operations": {
+          "type": "array",
+          "items": {
+            "enum": ["vendor_create", "vendor_resume", "vendor_adopt", "vendor_bind"]
+          },
+          "uniqueItems": true
+        },
+        "retention_modes": {
+          "type": "array",
+          "items": {"enum": ["none", "harness_context", "vendor_binding"]},
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "repair_modes": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "recreate_generation",
+              "rebind_owned_process",
+              "refresh_vendor_binding"
+            ]
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "error_namespace": {"$ref": "#/$defs/namespaced_id"},
+        "redaction_profile_ref": {"$ref": "#/$defs/namespaced_id"}
+      },
+      "additionalProperties": false
+    },
+    "presentation_driver_descriptor": {
+      "type": "object",
+      "required": [
+        "driver_kind",
+        "driver_id",
+        "contract_version",
+        "implementation_ref",
+        "interaction_modes",
+        "lifecycle_operations",
+        "supports_stable_window_identity",
+        "supports_stable_session_identity",
+        "supports_exact_close",
+        "supports_geometry",
+        "supports_display_topology",
+        "permission_model",
+        "error_namespace",
+        "redaction_profile_ref"
+      ],
+      "properties": {
+        "driver_kind": {"const": "presentation"},
+        "driver_id": {"$ref": "#/$defs/namespaced_id"},
+        "contract_version": {"const": 1},
+        "implementation_ref": {"$ref": "#/$defs/namespaced_id"},
+        "interaction_modes": {
+          "type": "array",
+          "items": {"const": "tui"},
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "lifecycle_operations": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "permission_probe",
+              "create_top_level",
+              "focus",
+              "close_exact",
+              "health",
+              "capture_geometry",
+              "restore_geometry"
+            ]
+          },
+          "minItems": 7,
+          "uniqueItems": true
+        },
+        "supports_stable_window_identity": {"const": true},
+        "supports_stable_session_identity": {"const": true},
+        "supports_exact_close": {"const": true},
+        "supports_geometry": {"const": true},
+        "supports_display_topology": {"const": true},
+        "permission_model": {"const": "platform-plugin"},
+        "error_namespace": {"$ref": "#/$defs/namespaced_id"},
+        "redaction_profile_ref": {"$ref": "#/$defs/namespaced_id"}
+      },
+      "additionalProperties": false
+    },
+    "runtime_launch_spec": {
+      "type": "object",
+      "required": [
+        "driver_id",
+        "driver_contract_version",
+        "interaction_mode",
+        "continuity_mode",
+        "runtime_profile_ref",
+        "model_binding",
+        "continuity_binding_ref"
+      ],
+      "properties": {
+        "driver_id": {"$ref": "#/$defs/namespaced_id"},
+        "driver_contract_version": {"const": 2},
+        "interaction_mode": {"enum": ["tui", "headless"]},
+        "continuity_mode": {"enum": ["explicit_recreate", "exact_resume"]},
+        "runtime_profile_ref": {"$ref": "#/$defs/nullable_namespaced_id"},
+        "model_binding": {"$ref": "#/$defs/nullable_model_binding"},
+        "continuity_binding_ref": {"$ref": "#/$defs/nullable_opaque_id"}
+      },
+      "additionalProperties": false
+    },
+    "driver_call_context": {
+      "type": "object",
+      "required": [
+        "scenario_id",
+        "participant_id",
+        "participant_generation",
+        "operation_id",
+        "operation_generation",
+        "driver_registry_digest",
+        "capability_snapshot_digest"
+      ],
+      "properties": {
+        "scenario_id": {"$ref": "#/$defs/opaque_id"},
+        "participant_id": {"$ref": "#/$defs/opaque_id"},
+        "participant_generation": {"$ref": "#/$defs/generation"},
+        "operation_id": {"$ref": "#/$defs/opaque_id"},
+        "operation_generation": {"$ref": "#/$defs/generation"},
+        "driver_registry_digest": {"$ref": "#/$defs/sha256"},
+        "capability_snapshot_digest": {"$ref": "#/$defs/sha256"}
+      },
+      "additionalProperties": false
+    },
+    "runtime_create_request": {
+      "type": "object",
+      "required": ["context", "launch_spec"],
+      "properties": {
+        "context": {"$ref": "#/$defs/driver_call_context"},
+        "launch_spec": {"$ref": "#/$defs/runtime_launch_spec"}
+      },
+      "additionalProperties": false
+    },
+    "prepared_runtime_launch": {
+      "type": "object",
+      "required": [
+        "context",
+        "driver_id",
+        "runtime_instance_id",
+        "private_launch_handle_ref"
+      ],
+      "properties": {
+        "context": {"$ref": "#/$defs/driver_call_context"},
+        "driver_id": {"$ref": "#/$defs/namespaced_id"},
+        "runtime_instance_id": {"$ref": "#/$defs/opaque_id"},
+        "private_launch_handle_ref": {"$ref": "#/$defs/opaque_id"}
+      },
+      "additionalProperties": false
+    },
+    "runtime_process_binding": {
+      "type": "object",
+      "required": [
+        "scenario_id",
+        "participant_id",
+        "participant_generation",
+        "driver_id",
+        "runtime_instance_id",
+        "runtime_binding_id",
+        "process_instance_id",
+        "process_identity_sha256",
+        "continuity_mode",
+        "vendor_session_identity_sha256",
+        "private_driver_binding_ref",
+        "capability_snapshot_digest"
+      ],
+      "properties": {
+        "scenario_id": {"$ref": "#/$defs/opaque_id"},
+        "participant_id": {"$ref": "#/$defs/opaque_id"},
+        "participant_generation": {"$ref": "#/$defs/generation"},
+        "driver_id": {"$ref": "#/$defs/namespaced_id"},
+        "runtime_instance_id": {"$ref": "#/$defs/opaque_id"},
+        "runtime_binding_id": {"$ref": "#/$defs/opaque_id"},
+        "process_instance_id": {"$ref": "#/$defs/opaque_id"},
+        "process_identity_sha256": {"$ref": "#/$defs/sha256"},
+        "continuity_mode": {"enum": ["explicit_recreate", "exact_resume"]},
+        "vendor_session_identity_sha256": {"$ref": "#/$defs/nullable_sha256"},
+        "private_driver_binding_ref": {"$ref": "#/$defs/opaque_id"},
+        "capability_snapshot_digest": {"$ref": "#/$defs/sha256"}
+      },
+      "additionalProperties": false
+    },
+    "runtime_ready_ack": {
+      "type": "object",
+      "required": ["context", "binding", "ready"],
+      "properties": {
+        "context": {"$ref": "#/$defs/driver_call_context"},
+        "binding": {"$ref": "#/$defs/runtime_process_binding"},
+        "ready": {"const": true}
+      },
+      "additionalProperties": false
+    },
+    "runtime_binding_request": {
+      "type": "object",
+      "required": ["context", "binding_ref"],
+      "properties": {
+        "context": {"$ref": "#/$defs/driver_call_context"},
+        "binding_ref": {"$ref": "#/$defs/opaque_id"}
+      },
+      "additionalProperties": false
+    },
+    "runtime_health_observation": {
+      "type": "object",
+      "required": [
+        "context",
+        "runtime_instance_id",
+        "health",
+        "observed_process_identity_sha256"
+      ],
+      "properties": {
+        "context": {"$ref": "#/$defs/driver_call_context"},
+        "runtime_instance_id": {"$ref": "#/$defs/opaque_id"},
+        "health": {"enum": ["ready", "stopped", "degraded", "unknown"]},
+        "observed_process_identity_sha256": {"$ref": "#/$defs/nullable_sha256"}
+      },
+      "additionalProperties": false
+    },
+    "runtime_delivery_ack": {
+      "type": "object",
+      "required": [
+        "context",
+        "runtime_instance_id",
+        "delivery_id",
+        "delivery_sequence"
+      ],
+      "properties": {
+        "context": {"$ref": "#/$defs/driver_call_context"},
+        "runtime_instance_id": {"$ref": "#/$defs/opaque_id"},
+        "delivery_id": {"$ref": "#/$defs/opaque_id"},
+        "delivery_sequence": {"$ref": "#/$defs/generation"}
+      },
+      "additionalProperties": false
+    },
+    "runtime_session_drift_signal": {
+      "type": "object",
+      "required": [
+        "context",
+        "runtime_instance_id",
+        "drift",
+        "observed_binding_sha256"
+      ],
+      "properties": {
+        "context": {"$ref": "#/$defs/driver_call_context"},
+        "runtime_instance_id": {"$ref": "#/$defs/opaque_id"},
+        "drift": {"enum": ["none", "process", "vendor_session", "unknown"]},
+        "observed_binding_sha256": {"$ref": "#/$defs/nullable_sha256"}
+      },
+      "additionalProperties": false
+    },
+    "runtime_repair_request": {
+      "type": "object",
+      "required": ["context", "binding_ref", "repair_mode"],
+      "properties": {
+        "context": {"$ref": "#/$defs/driver_call_context"},
+        "binding_ref": {"$ref": "#/$defs/opaque_id"},
+        "repair_mode": {
+          "enum": [
+            "recreate_generation",
+            "rebind_owned_process",
+            "refresh_vendor_binding"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "geometry": {
+      "type": "object",
+      "required": ["x", "y", "width", "height"],
+      "properties": {
+        "x": {"type": "integer"},
+        "y": {"type": "integer"},
+        "width": {"type": "integer", "minimum": 1},
+        "height": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": false
+    },
+    "nullable_geometry": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/geometry"}
+      ]
+    },
+    "presentation_create_request": {
+      "type": "object",
+      "required": [
+        "context",
+        "presentation_driver_id",
+        "runtime_binding_id",
+        "restore_geometry",
+        "display_topology_fingerprint"
+      ],
+      "properties": {
+        "context": {"$ref": "#/$defs/driver_call_context"},
+        "presentation_driver_id": {"$ref": "#/$defs/namespaced_id"},
+        "runtime_binding_id": {"$ref": "#/$defs/opaque_id"},
+        "restore_geometry": {"$ref": "#/$defs/nullable_geometry"},
+        "display_topology_fingerprint": {"$ref": "#/$defs/sha256"}
+      },
+      "additionalProperties": false
+    },
+    "presentation_binding": {
+      "type": "object",
+      "required": [
+        "scenario_id",
+        "participant_id",
+        "participant_generation",
+        "driver_id",
+        "presentation_instance_id",
+        "runtime_binding_id",
+        "window_identity_sha256",
+        "session_identity_sha256",
+        "private_driver_binding_ref",
+        "geometry",
+        "display_topology_fingerprint",
+        "capability_snapshot_digest"
+      ],
+      "properties": {
+        "scenario_id": {"$ref": "#/$defs/opaque_id"},
+        "participant_id": {"$ref": "#/$defs/opaque_id"},
+        "participant_generation": {"$ref": "#/$defs/generation"},
+        "driver_id": {"$ref": "#/$defs/namespaced_id"},
+        "presentation_instance_id": {"$ref": "#/$defs/opaque_id"},
+        "runtime_binding_id": {"$ref": "#/$defs/opaque_id"},
+        "window_identity_sha256": {"$ref": "#/$defs/sha256"},
+        "session_identity_sha256": {"$ref": "#/$defs/sha256"},
+        "private_driver_binding_ref": {"$ref": "#/$defs/opaque_id"},
+        "geometry": {"$ref": "#/$defs/geometry"},
+        "display_topology_fingerprint": {"$ref": "#/$defs/sha256"},
+        "capability_snapshot_digest": {"$ref": "#/$defs/sha256"}
+      },
+      "additionalProperties": false
+    },
+    "presentation_create_ack": {
+      "type": "object",
+      "required": ["context", "binding", "geometry_restore_outcome", "created"],
+      "properties": {
+        "context": {"$ref": "#/$defs/driver_call_context"},
+        "binding": {"$ref": "#/$defs/presentation_binding"},
+        "geometry_restore_outcome": {
+          "enum": ["not_requested", "applied_exact", "applied_adjusted"]
+        },
+        "created": {"const": true}
+      },
+      "additionalProperties": false
+    },
+    "presentation_action_request": {
+      "type": "object",
+      "required": ["context", "binding_ref", "action", "restore_geometry"],
+      "properties": {
+        "context": {"$ref": "#/$defs/driver_call_context"},
+        "binding_ref": {"$ref": "#/$defs/opaque_id"},
+        "action": {
+          "enum": ["focus", "close_exact", "health", "capture_geometry", "restore_geometry"]
+        },
+        "restore_geometry": {"$ref": "#/$defs/nullable_geometry"}
+      },
+      "additionalProperties": false
+    },
+    "presentation_health_observation": {
+      "type": "object",
+      "required": [
+        "context",
+        "presentation_instance_id",
+        "health",
+        "observed_window_identity_sha256",
+        "observed_session_identity_sha256",
+        "display_topology_fingerprint"
+      ],
+      "properties": {
+        "context": {"$ref": "#/$defs/driver_call_context"},
+        "presentation_instance_id": {"$ref": "#/$defs/opaque_id"},
+        "health": {"enum": ["ready", "closed", "degraded", "unknown"]},
+        "observed_window_identity_sha256": {"$ref": "#/$defs/nullable_sha256"},
+        "observed_session_identity_sha256": {"$ref": "#/$defs/nullable_sha256"},
+        "display_topology_fingerprint": {"$ref": "#/$defs/sha256"}
+      },
+      "additionalProperties": false
+    },
+    "driver_registry": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "participant_driver_contract_version",
+        "runtime_drivers",
+        "presentation_drivers"
+      ],
+      "properties": {
+        "schema_version": {"const": 1},
+        "participant_driver_contract_version": {"const": 2},
+        "runtime_drivers": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/runtime_driver_descriptor"},
+          "uniqueItems": true
+        },
+        "presentation_drivers": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/presentation_driver_descriptor"},
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "x-ai-collab": {
+    "schema_version": 1,
+    "contract_id": "ai-collab-participant-drivers-v2",
+    "product_contract_version": "3.2",
+    "participant_driver_contract_version": 2,
+    "registry": {
+      "schema_ref": "#/$defs/driver_registry",
+      "digest": "sha256-canonical-json",
+      "runtime_lookup_key": ["driver_id", "contract_version"],
+      "presentation_lookup_key": ["driver_id", "contract_version"],
+      "dispatch": "registry-and-capability-only",
+      "empty_registry_is_valid": true,
+      "population_is_implementation-owned": true
+    },
+    "runtime_interface": {
+      "create": ["#/$defs/runtime_create_request", "#/$defs/prepared_runtime_launch"],
+      "start": ["#/$defs/prepared_runtime_launch", "#/$defs/runtime_ready_ack"],
+      "stop": ["#/$defs/runtime_binding_request", "#/$defs/runtime_health_observation"],
+      "health": ["#/$defs/runtime_binding_request", "#/$defs/runtime_health_observation"],
+      "delivery_ack": ["#/$defs/runtime_delivery_ack"],
+      "session_drift": ["#/$defs/runtime_session_drift_signal"],
+      "repair": ["#/$defs/runtime_repair_request", "#/$defs/runtime_health_observation"]
+    },
+    "presentation_interface": {
+      "permission_probe": ["platform-plugin", "structured-error"],
+      "create_top_level": ["#/$defs/presentation_create_request", "#/$defs/presentation_create_ack"],
+      "focus": ["#/$defs/presentation_action_request", "#/$defs/presentation_health_observation"],
+      "close_exact": ["#/$defs/presentation_action_request", "#/$defs/presentation_health_observation"],
+      "health": ["#/$defs/presentation_action_request", "#/$defs/presentation_health_observation"],
+      "capture_geometry": ["#/$defs/presentation_action_request", "#/$defs/presentation_health_observation"],
+      "restore_geometry": ["#/$defs/presentation_action_request", "#/$defs/presentation_health_observation"]
+    },
+    "data_classes": {
+      "public_redacted": [
+        "process_identity_sha256",
+        "vendor_session_identity_sha256",
+        "window_identity_sha256",
+        "session_identity_sha256",
+        "display_topology_fingerprint"
+      ],
+      "host_private_non_loggable": [
+        "private_launch_handle_ref",
+        "private_driver_binding_ref",
+        "runtime_binding_id",
+        "continuity_binding_ref"
+      ],
+      "forbidden": [
+        "credential",
+        "credential_ref",
+        "api_key",
+        "token",
+        "raw_vendor_session_id",
+        "raw_window_id",
+        "raw_session_id"
+      ]
+    },
+    "invariants": {
+      "driver_dispatch_has_no_product_name_branch": true,
+      "explicit_recreate_is_required_runtime_baseline": true,
+      "exact_resume_requires_declared_vendor_session_identity": true,
+      "unsupported_continuity_rejected_before_desired_state_mutation": true,
+      "vendor_session_identity_is_optional_and_never_participant_identity": true,
+      "runtime_binding_is_harness_process_and_generation_scoped": true,
+      "model_binding_is_non_secret_and_immutable_per_generation": true,
+      "model_change_requires_new_participant_generation": true,
+      "ready_ack_matches_context_driver_runtime_and_process_binding": true,
+      "runtime_create_start_exchange_is_exactly_joined": true,
+      "driver_failure_isolated_to_bound_participants": true,
+      "tui_has_one_exact_top_level_window_per_participant": true,
+      "headless_has_no_presentation_binding": true,
+      "presentation_is_optional_projection_not_identity": true,
+      "presentation_actions_are_operation_and_participant_generation_fenced": true,
+      "presentation_create_exchange_is_exactly_joined": true,
+      "presentation_identity_is_stable_not_position_based": true,
+      "accessibility_ui_scripting_is_not_a_required_capability": true,
+      "private_bindings_never_enter_logs_receipts_mailbox_or_normal_ui": true,
+      "registry_population_does_not_change_core_contract": true
+    },
+    "deferred_surfaces": [
+      "scenario-participant-durable-state-machine",
+      "participant-lifecycle-operation-registry",
+      "collaboration-policy-routing",
+      "platform-driver-implementation",
+      "vendor-driver-population",
+      "permission-and-high-risk-confirmation-matrix"
+    ]
+  }
+}

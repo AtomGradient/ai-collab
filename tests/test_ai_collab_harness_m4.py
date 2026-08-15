@@ -1,0 +1,1950 @@
+# SPDX-License-Identifier: LicenseRef-AtomGradient-Proprietary
+# Copyright (c) 2026 AtomGradient. All rights reserved.
+# 版权所有 (c) 2026 质子梯度（北京）科技有限公司。保留所有权利。
+
+from __future__ import annotations
+
+import asyncio
+import copy
+import hashlib
+import json
+import re
+import shutil
+import stat
+import subprocess
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPTS = ROOT / "scripts"
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
+
+from ai_collab.delivery import DeliveryCoordinator  # noqa: E402
+from ai_collab.protocol import canonical_json_sha256  # noqa: E402
+import ai_collab_participant_driver as participant_driver  # noqa: E402
+import validate_ai_collab_policy_delivery_contract as frozen  # noqa: E402
+
+
+def _participant(participant_id: str) -> dict[str, Any]:
+    return {
+        "scenario_id": "scenario-m4",
+        "participant_id": participant_id,
+        "participant_generation": 1,
+        "state_revision": 3,
+        "desired_state": "running",
+        "observed_state": "ready",
+        "interaction_mode": "tui",
+        "launch_spec_digest": "a" * 64,
+        "runtime_binding_id": f"runtime-{participant_id}",
+        "presentation_binding_id": f"presentation-{participant_id}",
+        "active_operation_id": None,
+        "degraded": None,
+        "journal_head_sequence": 10,
+    }
+
+
+def _ref(value: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "scenario_id": value["scenario_id"],
+        "participant_id": value["participant_id"],
+        "participant_generation": value["participant_generation"],
+    }
+
+
+def test_product_m4_values_conform_to_frozen_f_contract() -> None:
+    contract, state_contract, _ = frozen.validate_contract(repo_root=ROOT)
+    sender = _participant("sender")
+    receiver = _participant("receiver")
+    participants = [sender, receiver]
+    pack = {
+        "policy_contract_version": 1,
+        "policy_id": "policy.m4-dogfood",
+        "policy_version": 1,
+        "scenario_id": "scenario-m4",
+        "default_effect": "deny",
+        "assignments": [],
+        "retry_profiles": [
+            {"profile_id": "retry-m4", "max_attempts": 2, "backoff_ms": [0, 100]}
+        ],
+        "route_rules": [
+            {
+                "rule_id": "m4-exact-route",
+                "sender": {"kind": "participant", "participant": _ref(sender)},
+                "receiver": {"kind": "participant", "participant": _ref(receiver)},
+                "message_kind": "collaboration.request",
+                "effect": "allow",
+                "retry_profile_id": "retry-m4",
+            }
+        ],
+    }
+    request = {
+        "request_id": "route-m4",
+        "message_id": "message-m4",
+        "scenario_id": "scenario-m4",
+        "sender": _ref(sender),
+        "receiver_intent": {"kind": "participant", "participant": _ref(receiver)},
+        "message_kind": "collaboration.request",
+        "payload_digest": "b" * 64,
+        "policy_snapshot": {
+            "policy_id": pack["policy_id"],
+            "policy_version": 1,
+            "policy_digest": canonical_json_sha256(pack),
+        },
+    }
+    decision, targets, profile = DeliveryCoordinator._resolve_route(  # noqa: SLF001
+        pack, request, participants
+    )
+    frozen.validate_route_decision(
+        pack,
+        request,
+        decision,
+        participants,
+        contract=contract,
+        state_contract=state_contract,
+    )
+    queued = DeliveryCoordinator._enqueue_record(  # noqa: SLF001
+        "delivery-m4", request, decision, sender, targets[0], profile
+    )
+    frozen.validate_delivery_enqueue(
+        queued,
+        pack,
+        request,
+        decision,
+        participants,
+        contract=contract,
+        state_contract=state_contract,
+    )
+    attempted = copy.deepcopy(queued)
+    DeliveryCoordinator._append_event(  # noqa: SLF001
+        attempted,
+        event="attempt_started",
+        attempt_number=1,
+        backoff_ms=0,
+        transport_attempt_id="transport-m4",
+        evidence_digest=None,
+        error_code=None,
+    )
+    frozen.validate_delivery_transition(
+        trigger="attempt", before=queued, after=attempted, contract=contract
+    )
+    delivery_ack = {
+        "ack_kind": "delivered",
+        "delivery_id": attempted["delivery_id"],
+        "message_id": attempted["message_id"],
+        "target": attempted["target"],
+        "payload_digest": attempted["payload_digest"],
+        "attempt_number": 1,
+        "transport_attempt_id": "transport-m4",
+    }
+    delivered = copy.deepcopy(attempted)
+    DeliveryCoordinator._accept_delivery(delivered, delivery_ack)  # noqa: SLF001
+    frozen.validate_delivery_transition(
+        trigger="matching_delivery_ack",
+        before=attempted,
+        after=delivered,
+        contract=contract,
+        ack=delivery_ack,
+    )
+    consumption_ack = {
+        "ack_kind": "consumed",
+        "delivery_id": delivered["delivery_id"],
+        "message_id": delivered["message_id"],
+        "target": delivered["target"],
+        "payload_digest": delivered["payload_digest"],
+        "attempt_number": 1,
+        "transport_attempt_id": "transport-m4",
+        "delivery_ack_digest": delivered["events"][-1]["evidence_digest"],
+    }
+    consumed = copy.deepcopy(delivered)
+    DeliveryCoordinator._accept_consumption(consumed, consumption_ack)  # noqa: SLF001
+    frozen.validate_delivery_transition(
+        trigger="matching_consumption_ack",
+        before=delivered,
+        after=consumed,
+        contract=contract,
+        ack=consumption_ack,
+    )
+    assert consumed["state"] == "consumed"
+
+
+def test_runtime_profiles_keep_generic_baseline_and_enable_vendor_identity_adapters() -> None:
+    profiles = participant_driver._runtime_profiles()  # noqa: SLF001
+    assert set(profiles) == {
+        "runtime-profile.inert",
+        "runtime-profile.codex-dogfood",
+        "runtime-profile.claude-dogfood",
+    }
+    assert profiles["runtime-profile.inert"]["accepts_typed_delivery"] is False
+    assert profiles["runtime-profile.inert"]["vendor_lifecycle"] is None
+    for profile_id in (
+        "runtime-profile.codex-dogfood",
+        "runtime-profile.claude-dogfood",
+    ):
+        resolved = participant_driver.resolve(
+            {
+                "launch_spec": {
+                    "driver_id": "runtime.generic-process",
+                    "driver_contract_version": 2,
+                    "interaction_mode": "tui",
+                    "continuity_mode": "explicit_recreate",
+                    "runtime_profile_ref": profile_id,
+                    "model_binding": None,
+                    "continuity_binding_ref": None,
+                },
+                "presentation_driver_id": "presentation.iterm2",
+            }
+        )
+        assert resolved["runtime_descriptor"]["supports_vendor_session_identity"] is True
+        assert "exact_resume" in resolved["runtime_descriptor"]["continuity_modes"]
+        assert profiles[profile_id]["vendor_lifecycle"]["adapter_id"].startswith(
+            "vendor-lifecycle."
+        )
+    product_source = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (ROOT / "src" / "ai_collab").glob("*.py")
+    ).lower()
+    assert "codex" not in product_source
+    assert "claude" not in product_source
+
+
+def test_participant_templates_are_driver_data_not_host_vendor_logic() -> None:
+    result = participant_driver.list_templates({})
+    assert {item["template_id"] for item in result["templates"]} == {
+        "runtime-profile.inert",
+        "runtime-profile.codex-dogfood",
+        "runtime-profile.claude-dogfood",
+    }
+    for item in result["templates"]:
+        launch_spec = item["launch_spec"]
+        assert launch_spec["driver_id"] == "runtime.generic-process"
+        assert launch_spec["runtime_profile_ref"] == item["template_id"]
+        assert (launch_spec["interaction_mode"] == "tui") == (
+            item["presentation_driver_id"] == "presentation.iterm2"
+        )
+
+
+@pytest.mark.parametrize(
+    ("automation_status", "authorized", "socket_ready", "expected", "remediation"),
+    (
+        ("authorized", True, True, "granted", None),
+        ("denied", False, True, "denied", "system-settings.automation"),
+        (
+            "not_determined_no_prompt",
+            False,
+            True,
+            "not_determined",
+            "system-settings.automation",
+        ),
+        (
+            "authorized",
+            True,
+            False,
+            "unavailable",
+            "iterm-presentation.enable-python-api",
+        ),
+    ),
+)
+def test_presentation_permission_probe_is_no_prompt_and_actionable(
+    monkeypatch: Any,
+    automation_status: str,
+    authorized: bool,
+    socket_ready: bool,
+    expected: str,
+    remediation: str | None,
+) -> None:
+    monkeypatch.setattr(
+        participant_driver,
+        "automation_permission_status",
+        lambda _bundle: {
+            "status": automation_status,
+            "authorized": authorized,
+            "prompt_requested": False,
+        },
+    )
+    monkeypatch.setattr(
+        participant_driver,
+        "authentication_bypass_status",
+        lambda: {"cookie_authentication_required": True},
+    )
+    monkeypatch.setattr(
+        participant_driver,
+        "private_unix_socket_status",
+        lambda: {
+            "present": socket_ready,
+            "is_unix_socket": socket_ready,
+            "owned_by_current_user": socket_ready,
+            "local_only_ready": socket_ready,
+        },
+    )
+    observation = participant_driver.permission_probe({})[
+        "permission_observations"
+    ][0]
+    assert observation["status"] == expected
+    assert observation["remediation_ref"] == remediation
+    assert observation["prompt_requested"] is False
+    assert len(observation["evidence_digest"]) == 64
+
+
+def test_presentation_permission_probe_rejects_authentication_bypass(
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(
+        participant_driver,
+        "automation_permission_status",
+        lambda _bundle: {
+            "status": "authorized",
+            "authorized": True,
+            "prompt_requested": False,
+        },
+    )
+    monkeypatch.setattr(
+        participant_driver,
+        "authentication_bypass_status",
+        lambda: {"cookie_authentication_required": False},
+    )
+    monkeypatch.setattr(
+        participant_driver,
+        "private_unix_socket_status",
+        lambda: {
+            "present": True,
+            "is_unix_socket": True,
+            "owned_by_current_user": True,
+            "local_only_ready": True,
+        },
+    )
+    observation = participant_driver.permission_probe({})[
+        "permission_observations"
+    ][0]
+    assert observation["status"] == "restricted"
+    assert observation["provider_error_code"] == (
+        "iterm-presentation.authentication-bypass-present"
+    )
+
+
+def test_presentation_focus_restores_exact_owned_window_for_current_topology(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    topology_fingerprint = "a" * 64
+    expected_geometry = {"x": 10, "y": 20, "width": 900, "height": 700}
+
+    class Window:
+        window_id = "window-1"
+
+        def __init__(self) -> None:
+            self.frame = SimpleNamespace(
+                origin=SimpleNamespace(x=1, y=2),
+                size=SimpleNamespace(width=600, height=400),
+            )
+            session = SimpleNamespace(
+                session_id="session-1",
+                async_get_variable=lambda _name: _async_value("123"),
+            )
+            self.tabs = [SimpleNamespace(sessions=[session], all_sessions=[session])]
+            self.activated = False
+
+        async def async_get_variable(self, _name: str) -> dict[str, Any]:
+            return {"owner": "exact"}
+
+        async def async_get_frame(self) -> Any:
+            return self.frame
+
+        async def async_set_frame(self, value: Any) -> None:
+            self.frame = value
+
+        async def async_activate(self) -> None:
+            self.activated = True
+
+    class App:
+        def __init__(self, window: Window) -> None:
+            self.window = window
+            self.activated = False
+
+        def get_window_by_id(self, value: str) -> Window | None:
+            return self.window if value == self.window.window_id else None
+
+        async def async_activate(self) -> None:
+            self.activated = True
+
+    window = Window()
+    app = App(window)
+
+    async def async_create() -> object:
+        return object()
+
+    async def async_get_app(_connection: object) -> App:
+        return app
+
+    def point(x: int, y: int) -> Any:
+        return SimpleNamespace(x=x, y=y)
+
+    def size(width: int, height: int) -> Any:
+        return SimpleNamespace(width=width, height=height)
+
+    def frame(origin: Any, dimensions: Any) -> Any:
+        return SimpleNamespace(origin=origin, size=dimensions)
+
+    module = SimpleNamespace(
+        Connection=SimpleNamespace(async_create=async_create),
+        async_get_app=async_get_app,
+        util=SimpleNamespace(Point=point, Size=size, Frame=frame),
+    )
+    state = {
+        "schema_version": 1,
+        "status": "ready",
+        "interaction_mode": "tui",
+        "participant_generation": 3,
+        "presentation_instance_id": "presentation-1",
+        "runtime_binding_id": "runtime-1",
+        "window_id": "window-1",
+        "session_id": "session-1",
+        "owner_marker": {"owner": "exact"},
+        "display_topology_fingerprint": topology_fingerprint,
+        "geometry": {"x": 1, "y": 2, "width": 600, "height": 400},
+        "geometry_by_topology": {topology_fingerprint: expected_geometry},
+        "pid": 123,
+        "pgid": 123,
+    }
+    written: dict[str, Any] = {}
+    monkeypatch.setattr(
+        participant_driver, "_topology", lambda: ({}, topology_fingerprint)
+    )
+    monkeypatch.setattr(
+        participant_driver, "_validate_owned_foreground_job", lambda *_: None
+    )
+    monkeypatch.setattr(
+        participant_driver,
+        "_write_private",
+        lambda _path, value: written.update(copy.deepcopy(value)),
+    )
+
+    result = asyncio.run(
+        participant_driver._presentation_action_async(  # noqa: SLF001
+            module, tmp_path, state, action="focus"
+        )
+    )["presentation"]
+
+    assert result["focused"] is True
+    assert result["restore_outcome"] == "applied_exact"
+    assert result["geometry"] == expected_geometry
+    assert result["display_topology_fingerprint"] == topology_fingerprint
+    assert window.activated is True
+    assert app.activated is True
+    assert written["geometry_by_topology"][topology_fingerprint] == expected_geometry
+
+    changed_topology = "b" * 64
+    current_geometry = {"x": 30, "y": 40, "width": 1000, "height": 720}
+    window.frame = frame(
+        point(current_geometry["x"], current_geometry["y"]),
+        size(current_geometry["width"], current_geometry["height"]),
+    )
+    monkeypatch.setattr(
+        participant_driver, "_topology", lambda: ({}, changed_topology)
+    )
+    changed = asyncio.run(
+        participant_driver._presentation_action_async(  # noqa: SLF001
+            module, tmp_path, state, action="focus"
+        )
+    )["presentation"]
+    assert changed["restore_outcome"] == "not_available"
+    assert changed["geometry"] == current_geometry
+    assert written["geometry_by_topology"][changed_topology] == current_geometry
+
+
+async def _async_value(value: Any) -> Any:
+    return value
+
+
+def test_dogfood_profiles_match_normal_local_permission_modes() -> None:
+    profiles = participant_driver._runtime_profiles()  # noqa: SLF001
+    assert profiles["runtime-profile.claude-dogfood"]["arguments"] == [
+        "--dangerously-skip-permissions",
+        "--system-prompt",
+        ".",
+    ]
+    assert profiles["runtime-profile.codex-dogfood"]["arguments"] == [
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--no-alt-screen",
+    ]
+
+
+def test_foreground_job_accepts_exact_owned_descendant(monkeypatch: Any) -> None:
+    relationships = {
+        3003: {"parent_pid": 3002, "process_group_id": 3001},
+        3002: {"parent_pid": 3001, "process_group_id": 3001},
+        3001: {"parent_pid": 100, "process_group_id": 3001},
+    }
+    monkeypatch.setattr(
+        participant_driver,
+        "_process_relationship",
+        lambda pid: relationships[pid],
+    )
+    participant_driver._validate_owned_foreground_job(  # noqa: SLF001
+        3003, {"pid": 3001, "pgid": 3001}
+    )
+
+
+def test_foreground_job_rejects_same_group_non_descendant(monkeypatch: Any) -> None:
+    relationships = {
+        4003: {"parent_pid": 4002, "process_group_id": 3001},
+        4002: {"parent_pid": 100, "process_group_id": 3001},
+        100: {"parent_pid": 1, "process_group_id": 3001},
+    }
+    monkeypatch.setattr(
+        participant_driver,
+        "_process_relationship",
+        lambda pid: relationships[pid],
+    )
+    try:
+        participant_driver._validate_owned_foreground_job(  # noqa: SLF001
+            4003, {"pid": 3001, "pgid": 3001}
+        )
+    except participant_driver.DriverError as exc:
+        assert str(exc) == "iTerm foreground job is not an owned descendant"
+    else:  # pragma: no cover - fail-closed assertion
+        raise AssertionError("same-group non-descendant foreground job was accepted")
+
+
+def test_sender_accepts_owned_descendant_in_new_process_group(
+    monkeypatch: Any,
+) -> None:
+    relationships = {
+        5003: {"parent_pid": 5002, "process_group_id": 5003},
+        5002: {"parent_pid": 5001, "process_group_id": 5002},
+        5001: {"parent_pid": 100, "process_group_id": 5000},
+    }
+    monkeypatch.setattr(
+        participant_driver,
+        "_process_relationship",
+        lambda pid: relationships[pid],
+    )
+    participant_driver._validate_owned_descendant_process(  # noqa: SLF001
+        5003, {"pid": 5001, "pgid": 5000}
+    )
+
+
+def test_sender_rejects_same_group_non_descendant(monkeypatch: Any) -> None:
+    relationships = {
+        6003: {"parent_pid": 6002, "process_group_id": 5000},
+        6002: {"parent_pid": 100, "process_group_id": 5000},
+        100: {"parent_pid": 1, "process_group_id": 5000},
+    }
+    monkeypatch.setattr(
+        participant_driver,
+        "_process_relationship",
+        lambda pid: relationships[pid],
+    )
+    try:
+        participant_driver._validate_owned_descendant_process(  # noqa: SLF001
+            6003, {"pid": 5001, "pgid": 5000}
+        )
+    except participant_driver.DriverError as exc:
+        assert str(exc) == "participant sender process is not an owned descendant"
+    else:  # pragma: no cover - fail-closed assertion
+        raise AssertionError("same-group non-descendant sender was accepted")
+
+
+def test_generic_runtime_environment_includes_scoped_client_and_proxy_only(
+    tmp_path: Path, monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(
+        participant_driver,
+        "_runtime_argv",
+        lambda launch_spec: ("/owner/runtime/bin/launcher", "--flag"),
+    )
+    monkeypatch.setenv("https_proxy", "http://proxy.invalid:8080")
+    monkeypatch.setenv("CODEX_THREAD_ID", "must-not-cross-boundary")
+    context = tmp_path / "participant-context.json"
+    context.write_text("{}\n", encoding="utf-8")
+    context.chmod(0o600)
+    client_pythonpath = tmp_path / "client-pythonpath"
+    client_pythonpath.mkdir(mode=0o700)
+    collaboration_context = tmp_path / "participant-collaboration.json"
+    collaboration_context.write_text("{}\n", encoding="utf-8")
+    collaboration_context.chmod(0o600)
+    participant_client = {
+        "context_path": str(context),
+        "client_executable": str(Path(sys.executable).resolve()),
+        "client_pythonpath": str(client_pythonpath),
+        "collaboration_context_path": str(collaboration_context),
+    }
+    environment = participant_driver._runtime_environment(  # noqa: SLF001
+        {}, participant_client
+    )
+    search_path = environment["PATH"].split(":")
+    assert search_path[0] == str(participant_driver.PINGAGENT_BIN)
+    assert search_path[1] == "/owner/runtime/bin"
+    assert environment["LANG"] == "en_US.UTF-8"
+    assert environment["https_proxy"] == "http://proxy.invalid:8080"
+    assert environment["AI_COLLAB_HARNESS_CONTEXT"] == str(context)
+    assert (
+        environment["AI_COLLAB_HARNESS_CLIENT_EXECUTABLE"]
+        == participant_client["client_executable"]
+    )
+    assert (
+        environment["AI_COLLAB_HARNESS_CLIENT_PYTHONPATH"]
+        == str(client_pythonpath)
+    )
+    assert environment["AI_COLLAB_HARNESS_COLLABORATION_CONTEXT"] == str(
+        collaboration_context
+    )
+    assert "CODEX_THREAD_ID" not in environment
+
+
+def test_authorize_sender_returns_only_redacted_owned_chain_evidence(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    private_root = tmp_path / "participant-private"
+    private_root.mkdir(mode=0o700)
+    state = {
+        "status": "ready",
+        "interaction_mode": "headless",
+        "scenario_id": "scenario-self",
+        "participant_id": "participant-self",
+        "participant_generation": 2,
+        "runtime_binding_id": "runtime-self",
+        "presentation_instance_id": None,
+        "process_identity_sha256": "a" * 64,
+        "pgid": 4100,
+        "pid": 4100,
+    }
+    observed: list[tuple[int, int]] = []
+    monkeypatch.setattr(participant_driver, "_read_private", lambda path: state)
+    monkeypatch.setattr(
+        participant_driver, "_validate_process_state", lambda value: None
+    )
+
+    def validate_descendant(peer_pid: int, value: dict[str, Any]) -> None:
+        observed.append((peer_pid, value["pid"]))
+
+    monkeypatch.setattr(
+        participant_driver, "_validate_owned_descendant_process", validate_descendant
+    )
+    monkeypatch.setattr(
+        participant_driver,
+        "_process_observation",
+        lambda pid: {
+            "pid": pid,
+            "pgid": 4100,
+            "ps": "redacted in public result",
+            "identity_sha256": "b" * 64,
+        },
+    )
+
+    result = participant_driver.authorize_sender(
+        {
+            "peer_pid": 4102,
+            "runtime_ready_ack": {
+                "binding": {"runtime_binding_id": "runtime-self"}
+            },
+            "presentation_create_ack": None,
+            "private_root": str(private_root),
+        }
+    )
+
+    assert observed == [(4102, 4100)]
+    assert result == {
+        "authorized": True,
+        "sender": {
+            "scenario_id": "scenario-self",
+            "participant_id": "participant-self",
+            "participant_generation": 2,
+        },
+        "runtime_binding_id": "runtime-self",
+        "process_chain_evidence_sha256": result[
+            "process_chain_evidence_sha256"
+        ],
+    }
+    assert len(result["process_chain_evidence_sha256"]) == 64
+    assert "pid" not in json.dumps(result)
+
+
+def test_authorize_tui_sender_checks_exact_session_as_owned_descendant(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    private_root = tmp_path / "participant-private"
+    private_root.mkdir(mode=0o700)
+    state = {
+        "status": "ready",
+        "interaction_mode": "tui",
+        "scenario_id": "scenario-self",
+        "participant_id": "participant-self",
+        "participant_generation": 2,
+        "runtime_binding_id": "runtime-self",
+        "presentation_instance_id": "presentation-self",
+        "process_identity_sha256": "a" * 64,
+        "pgid": 4100,
+        "pid": 4100,
+    }
+    exact_calls: list[tuple[object, dict[str, Any], bool]] = []
+    module = object()
+    monkeypatch.setattr(participant_driver, "_read_private", lambda path: state)
+    monkeypatch.setattr(
+        participant_driver, "_validate_process_state", lambda value: None
+    )
+    monkeypatch.setattr(
+        participant_driver,
+        "_validate_owned_descendant_process",
+        lambda peer_pid, value: None,
+    )
+    monkeypatch.setattr(
+        participant_driver, "_ensure_iterm_module", lambda root: module
+    )
+
+    async def exact_session(
+        found_module: object,
+        found_state: dict[str, Any],
+        *,
+        require_foreground_process_group: bool = True,
+    ) -> tuple[object, object, object, int]:
+        exact_calls.append(
+            (found_module, found_state, require_foreground_process_group)
+        )
+        return object(), object(), object(), 4102
+
+    monkeypatch.setattr(participant_driver, "_exact_session", exact_session)
+    monkeypatch.setattr(
+        participant_driver,
+        "_process_observation",
+        lambda pid: {
+            "pid": pid,
+            "pgid": 4102,
+            "ps": "redacted in public result",
+            "identity_sha256": "b" * 64,
+        },
+    )
+
+    result = participant_driver.authorize_sender(
+        {
+            "peer_pid": 4102,
+            "runtime_ready_ack": {
+                "binding": {"runtime_binding_id": "runtime-self"}
+            },
+            "presentation_create_ack": {
+                "binding": {"presentation_instance_id": "presentation-self"}
+            },
+            "private_root": str(private_root),
+        }
+    )
+
+    assert result["authorized"] is True
+    assert exact_calls == [(module, state, False)]
+
+
+def test_authorize_tui_sender_retries_only_closed_iterm_transport(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    private_root = tmp_path / "participant-private"
+    private_root.mkdir(mode=0o700)
+    state = {
+        "status": "ready",
+        "interaction_mode": "tui",
+        "scenario_id": "scenario-self",
+        "participant_id": "participant-self",
+        "participant_generation": 2,
+        "runtime_binding_id": "runtime-self",
+        "presentation_instance_id": "presentation-self",
+        "process_identity_sha256": "a" * 64,
+        "pgid": 4100,
+        "pid": 4100,
+    }
+    module = object()
+    monkeypatch.setattr(participant_driver, "_read_private", lambda path: state)
+    monkeypatch.setattr(
+        participant_driver, "_validate_process_state", lambda value: None
+    )
+    monkeypatch.setattr(
+        participant_driver,
+        "_validate_owned_descendant_process",
+        lambda peer_pid, value: None,
+    )
+    monkeypatch.setattr(
+        participant_driver, "_ensure_iterm_module", lambda root: module
+    )
+    monkeypatch.setattr(participant_driver, "SENDER_SESSION_RETRY_SECONDS", 0)
+    connection_closed = type(
+        "ConnectionClosedError",
+        (Exception,),
+        {"__module__": "websockets.exceptions"},
+    )
+    exact_calls = 0
+
+    async def exact_session(
+        found_module: object,
+        found_state: dict[str, Any],
+        *,
+        require_foreground_process_group: bool = True,
+    ) -> tuple[object, object, object, int]:
+        nonlocal exact_calls
+        assert found_module is module
+        assert found_state is state
+        assert require_foreground_process_group is False
+        exact_calls += 1
+        if exact_calls < 3:
+            raise connection_closed("injected loopback handoff")
+        return object(), object(), object(), 4102
+
+    monkeypatch.setattr(participant_driver, "_exact_session", exact_session)
+    monkeypatch.setattr(
+        participant_driver,
+        "_process_observation",
+        lambda pid: {
+            "pid": pid,
+            "pgid": 4102,
+            "ps": "redacted in public result",
+            "identity_sha256": "b" * 64,
+        },
+    )
+
+    result = participant_driver.authorize_sender(
+        {
+            "peer_pid": 4102,
+            "runtime_ready_ack": {
+                "binding": {"runtime_binding_id": "runtime-self"}
+            },
+            "presentation_create_ack": {
+                "binding": {"presentation_instance_id": "presentation-self"}
+            },
+            "private_root": str(private_root),
+        }
+    )
+
+    assert result["authorized"] is True
+    assert exact_calls == 3
+
+
+def test_authorize_tui_sender_does_not_retry_binding_drift(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    private_root = tmp_path / "participant-private"
+    private_root.mkdir(mode=0o700)
+    state = {
+        "status": "ready",
+        "interaction_mode": "tui",
+        "scenario_id": "scenario-self",
+        "participant_id": "participant-self",
+        "participant_generation": 2,
+        "runtime_binding_id": "runtime-self",
+        "presentation_instance_id": "presentation-self",
+        "process_identity_sha256": "a" * 64,
+        "pgid": 4100,
+        "pid": 4100,
+    }
+    monkeypatch.setattr(participant_driver, "_read_private", lambda path: state)
+    monkeypatch.setattr(
+        participant_driver, "_validate_process_state", lambda value: None
+    )
+    monkeypatch.setattr(
+        participant_driver,
+        "_validate_owned_descendant_process",
+        lambda peer_pid, value: None,
+    )
+    monkeypatch.setattr(
+        participant_driver, "_ensure_iterm_module", lambda root: object()
+    )
+    exact_calls = 0
+
+    async def exact_session(*args: Any, **kwargs: Any) -> tuple[object, ...]:
+        nonlocal exact_calls
+        exact_calls += 1
+        raise participant_driver.DriverError("owned iTerm delivery topology drifted")
+
+    monkeypatch.setattr(participant_driver, "_exact_session", exact_session)
+
+    with pytest.raises(
+        participant_driver.DriverError,
+        match="owned iTerm delivery topology drifted",
+    ):
+        participant_driver.authorize_sender(
+            {
+                "peer_pid": 4102,
+                "runtime_ready_ack": {
+                    "binding": {"runtime_binding_id": "runtime-self"}
+                },
+                "presentation_create_ack": {
+                    "binding": {"presentation_instance_id": "presentation-self"}
+                },
+                "private_root": str(private_root),
+            }
+        )
+
+    assert exact_calls == 1
+    assert json.loads(
+        (private_root / "sender-auth-diagnostic.json").read_text(encoding="utf-8")
+    ) == {
+        "schema_version": 1,
+        "outcome": "rejected",
+        "stage": "exact-session",
+        "reason_code": "iterm.topology-drift",
+    }
+
+
+def test_authorize_sender_records_private_peer_process_failure(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    private_root = tmp_path / "participant-private"
+    private_root.mkdir(mode=0o700)
+    state = {
+        "status": "ready",
+        "interaction_mode": "headless",
+        "scenario_id": "scenario-self",
+        "participant_id": "participant-self",
+        "participant_generation": 2,
+        "runtime_binding_id": "runtime-self",
+        "presentation_instance_id": None,
+        "process_identity_sha256": "a" * 64,
+        "pgid": 4100,
+        "pid": 4100,
+    }
+    monkeypatch.setattr(participant_driver, "_read_private", lambda path: state)
+    monkeypatch.setattr(
+        participant_driver, "_validate_process_state", lambda value: None
+    )
+
+    def reject_descendant(peer_pid: int, value: dict[str, Any]) -> None:
+        raise participant_driver.DriverError(
+            "participant sender process is not an owned descendant"
+        )
+
+    monkeypatch.setattr(
+        participant_driver, "_validate_owned_descendant_process", reject_descendant
+    )
+
+    with pytest.raises(
+        participant_driver.DriverError,
+        match="participant sender process is not an owned descendant",
+    ):
+        participant_driver.authorize_sender(
+            {
+                "peer_pid": 4102,
+                "runtime_ready_ack": {
+                    "binding": {"runtime_binding_id": "runtime-self"}
+                },
+                "presentation_create_ack": None,
+                "private_root": str(private_root),
+            }
+        )
+
+    diagnostic = private_root / "sender-auth-diagnostic.json"
+    assert stat.S_IMODE(diagnostic.stat().st_mode) == 0o600
+    assert json.loads(diagnostic.read_text(encoding="utf-8")) == {
+        "schema_version": 1,
+        "outcome": "rejected",
+        "stage": "peer-process",
+        "reason_code": "process.not-owned-descendant",
+    }
+    assert "pid" not in diagnostic.read_text(encoding="utf-8")
+    assert str(private_root) not in diagnostic.read_text(encoding="utf-8")
+
+
+def test_iterm_dependency_env_rebuilds_incomplete_venv_with_symlinks(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    private_root = tmp_path / "participant-private"
+    private_root.mkdir(mode=0o700)
+    lock_digest = "a" * 64
+    environment = private_root / f"iterm-python-{lock_digest[:16]}" / "venv"
+    environment.mkdir(parents=True)
+    incomplete = environment / "incomplete"
+    incomplete.write_text("failed bootstrap", encoding="utf-8")
+    builder_options: list[dict[str, Any]] = []
+
+    class _Builder:
+        def __init__(self, **options: Any) -> None:
+            builder_options.append(options)
+
+        def create(self, target: Path) -> None:
+            assert Path(target) == environment
+            assert incomplete.is_file()
+            shutil.rmtree(target)
+            (
+                Path(target)
+                / "lib"
+                / f"python{sys.version_info.major}.{sys.version_info.minor}"
+                / "site-packages"
+            ).mkdir(parents=True)
+            (Path(target) / "bin").mkdir()
+            (Path(target) / "bin" / "python").write_text("fixture", encoding="utf-8")
+
+    class _Completed:
+        returncode = 0
+
+    monkeypatch.setattr(participant_driver, "_load_lock", lambda: ([], lock_digest))
+    monkeypatch.setattr(participant_driver.venv, "EnvBuilder", _Builder)
+    monkeypatch.setattr(participant_driver.subprocess, "run", lambda *args, **kwargs: _Completed())
+    iterm_module = object()
+    monkeypatch.setitem(sys.modules, "iterm2", iterm_module)
+
+    site_packages = (
+        environment
+        / "lib"
+        / f"python{sys.version_info.major}.{sys.version_info.minor}"
+        / "site-packages"
+    )
+    try:
+        assert (
+            participant_driver._ensure_iterm_module(private_root)  # noqa: SLF001
+            is iterm_module
+        )
+    finally:
+        if str(site_packages) in sys.path:
+            sys.path.remove(str(site_packages))
+
+    assert builder_options == [
+        {"with_pip": True, "clear": True, "symlinks": True}
+    ]
+    assert not incomplete.exists()
+    assert (environment.parent / "ready.json").is_file()
+
+
+def test_startup_process_wait_uses_declared_gate_timeout() -> None:
+    assert (
+        participant_driver._startup_process_wait_seconds(  # noqa: SLF001
+            {"startup_gate": {"timeout_seconds": 60}}
+        )
+        == 60.0
+    )
+    assert (
+        participant_driver._startup_process_wait_seconds(  # noqa: SLF001
+            {"startup_gate": None}
+        )
+        == participant_driver.PROCESS_WAIT_SECONDS
+    )
+
+
+def test_launch_failure_diagnostic_is_bounded_and_owner_private(
+    tmp_path: Path,
+) -> None:
+    private_root = tmp_path / "participant-private"
+    private_root.mkdir(mode=0o700)
+
+    participant_driver._record_launch_failure(  # noqa: SLF001
+        private_root,
+        stage="initial-process",
+        exc=participant_driver.DriverError(
+            "iTerm runtime process did not become ready"
+        ),
+        cleanup_outcome="close-requested",
+    )
+
+    diagnostic = private_root / "launch-diagnostic.json"
+    assert stat.S_IMODE(diagnostic.stat().st_mode) == 0o600
+    assert json.loads(diagnostic.read_text(encoding="utf-8")) == {
+        "schema_version": 1,
+        "outcome": "rejected",
+        "stage": "initial-process",
+        "reason_code": "process.readiness-timeout",
+        "cleanup_outcome": "close-requested",
+    }
+    assert str(private_root) not in diagnostic.read_text(encoding="utf-8")
+
+
+def test_pre_window_launch_failure_is_diagnosed(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    private_root = tmp_path / "participant-private"
+    private_root.mkdir(mode=0o700)
+
+    async def fail_connect(module: Any) -> tuple[Any, Any]:
+        raise participant_driver.DriverError("injected pre-window failure")
+
+    monkeypatch.setattr(
+        participant_driver, "_connect_iterm_application", fail_connect
+    )
+    with pytest.raises(
+        participant_driver.DriverError, match="injected pre-window failure"
+    ):
+        asyncio.run(
+            participant_driver._iterm_start_async(  # noqa: SLF001
+                object(),
+                private_root,
+                tmp_path,
+                {},
+                {},
+                {},
+                {},
+            )
+        )
+
+    diagnostic = json.loads(
+        (private_root / "launch-diagnostic.json").read_text(encoding="utf-8")
+    )
+    assert diagnostic["stage"] == "iterm-connect"
+    assert diagnostic["cleanup_outcome"] == "not-required"
+
+
+def test_iterm_pre_window_connection_retries_closed_transport(
+    monkeypatch: Any,
+) -> None:
+    connection_closed = type(
+        "ConnectionClosedError",
+        (Exception,),
+        {"__module__": "websockets.exceptions"},
+    )
+    attempts = 0
+    connections: list[object] = []
+
+    class Connection:
+        @staticmethod
+        async def async_create() -> object:
+            connection = object()
+            connections.append(connection)
+            return connection
+
+    async def async_get_app(connection: object) -> object:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise connection_closed("injected closed transport")
+        return object()
+
+    module = type(
+        "ItermModule",
+        (),
+        {"Connection": Connection, "async_get_app": async_get_app},
+    )
+    monkeypatch.setattr(participant_driver, "SENDER_SESSION_RETRY_SECONDS", 0)
+
+    connection, app = asyncio.run(
+        participant_driver._connect_iterm_application(module)  # noqa: SLF001
+    )
+
+    assert connection is connections[-1]
+    assert app is not None
+    assert attempts == 2
+
+
+def _repair_payload(private_root: Path) -> dict[str, Any]:
+    context = {
+        "scenario_id": "scenario-repair",
+        "participant_id": "participant-repair",
+        "participant_generation": 1,
+        "operation_id": "operation-repair",
+        "operation_generation": 4,
+        "driver_registry_digest": "a" * 64,
+        "capability_snapshot_digest": "b" * 64,
+    }
+    return {
+        "context": context,
+        "next_participant_generation": 2,
+        "launch_spec": {
+            "driver_id": "runtime.generic-process",
+            "driver_contract_version": 2,
+            "interaction_mode": "tui",
+            "continuity_mode": "explicit_recreate",
+            "runtime_profile_ref": "runtime-profile.inert",
+            "model_binding": None,
+            "continuity_binding_ref": None,
+        },
+        "resolved_driver": {
+            "driver_registry_digest": context["driver_registry_digest"],
+            "capability_snapshot_digest": context[
+                "capability_snapshot_digest"
+            ],
+        },
+        "runtime_ready_ack": None,
+        "presentation_create_ack": None,
+        "degraded": {
+            "reason": "launch_failed",
+            "cleanup_pending": True,
+            "owned_resource_evidence_sha256": "c" * 64,
+            "repair_action": "participant.recover",
+        },
+        "private_root": str(private_root),
+    }
+
+
+def test_repair_rotates_pre_binding_failure_without_deleting_private_evidence(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    private_root = tmp_path / "participant-private"
+    private_root.mkdir(mode=0o700)
+    lock_digest = "c" * 64
+    incomplete = private_root / f"iterm-python-{lock_digest[:16]}" / "venv"
+    incomplete.mkdir(parents=True)
+    (incomplete / "failure-marker").write_text("retained", encoding="utf-8")
+    monkeypatch.setattr(participant_driver, "_load_lock", lambda: ([], lock_digest))
+
+    result = participant_driver.repair(_repair_payload(private_root))
+
+    assert result["recovered"] is True
+    assert result["recovery_class"] == "pre_binding_absent"
+    assert result["previous_participant_generation"] == 1
+    assert result["next_participant_generation"] == 2
+    assert result["external_resources_absent"] is True
+    assert result["private_generation_retained"] is True
+    assert len(result["owned_resource_evidence_sha256"]) == 64
+    assert (incomplete / "failure-marker").read_text(encoding="utf-8") == "retained"
+
+
+def test_repair_fails_closed_when_pre_binding_absence_is_not_provable(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    private_root = tmp_path / "participant-private"
+    private_root.mkdir(mode=0o700)
+    lock_digest = "d" * 64
+    ready = private_root / f"iterm-python-{lock_digest[:16]}" / "ready.json"
+    ready.parent.mkdir(parents=True)
+    ready.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(participant_driver, "_load_lock", lambda: ([], lock_digest))
+
+    try:
+        participant_driver.repair(_repair_payload(private_root))
+    except participant_driver.DriverError as exc:
+        assert str(exc) == "repair cannot prove pre-binding resource absence"
+    else:  # pragma: no cover - fail-closed assertion
+        raise AssertionError("ambiguous pre-binding recovery was accepted")
+
+
+def test_repair_accepts_diagnosed_pre_window_failure_after_dependency_ready(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    private_root = tmp_path / "participant-private"
+    private_root.mkdir(mode=0o700)
+    lock_digest = "e" * 64
+    ready = private_root / f"iterm-python-{lock_digest[:16]}" / "ready.json"
+    ready.parent.mkdir(parents=True)
+    ready.write_text("{}", encoding="utf-8")
+    participant_driver._record_launch_failure(  # noqa: SLF001
+        private_root,
+        stage="iterm-connect",
+        exc=participant_driver.DriverError("iTerm application state is unavailable"),
+        cleanup_outcome="not-required",
+    )
+    monkeypatch.setattr(participant_driver, "_load_lock", lambda: ([], lock_digest))
+
+    result = participant_driver.repair(_repair_payload(private_root))
+
+    assert result["recovered"] is True
+    assert result["recovery_class"] == "pre_binding_absent"
+
+
+def test_repair_gracefully_stops_only_exact_published_binding(tmp_path: Path) -> None:
+    private_root = tmp_path / "participant-private"
+    private_root.mkdir(mode=0o700)
+    payload = _repair_payload(private_root)
+    state = {
+        "schema_version": 1,
+        "status": "stopped",
+        "scenario_id": payload["context"]["scenario_id"],
+        "participant_id": payload["context"]["participant_id"],
+        "participant_generation": 1,
+        "runtime_binding_id": "runtime-binding-repair",
+        "presentation_instance_id": "presentation-repair",
+        "stop_evidence_sha256": "e" * 64,
+    }
+    participant_driver._write_private(  # noqa: SLF001
+        participant_driver._state_path(private_root), state  # noqa: SLF001
+    )
+    payload["runtime_ready_ack"] = {
+        "binding": {"runtime_binding_id": "runtime-binding-repair"}
+    }
+    payload["presentation_create_ack"] = {
+        "binding": {"presentation_instance_id": "presentation-repair"}
+    }
+
+    result = participant_driver.repair(payload)
+
+    assert result["recovery_class"] == "exact_binding_stopped"
+    assert result["external_resources_absent"] is True
+    assert participant_driver._state_path(private_root).is_file()  # noqa: SLF001
+
+
+def test_repair_accepts_exact_durable_cleanup_evidence_without_public_binding(
+    tmp_path: Path,
+) -> None:
+    private_root = tmp_path / "participant-private"
+    private_root.mkdir(mode=0o700)
+    payload = _repair_payload(private_root)
+    payload["degraded"].update(
+        {
+            "cleanup_pending": False,
+            "owned_resource_evidence_sha256": "e" * 64,
+        }
+    )
+    participant_driver._write_private(  # noqa: SLF001
+        participant_driver._state_path(private_root),  # noqa: SLF001
+        {
+            "schema_version": 1,
+            "status": "stopped",
+            "scenario_id": payload["context"]["scenario_id"],
+            "participant_id": payload["context"]["participant_id"],
+            "participant_generation": 1,
+            "runtime_binding_id": "runtime-binding-repair",
+            "presentation_instance_id": "presentation-repair",
+            "stop_evidence_sha256": "e" * 64,
+        },
+    )
+
+    result = participant_driver.repair(payload)
+
+    assert result["recovery_class"] == "exact_binding_stopped"
+    assert result["private_generation_retained"] is True
+
+
+class _ScreenLine:
+    def __init__(self, value: str) -> None:
+        self.string = value
+
+
+class _Screen:
+    def __init__(self, value: str) -> None:
+        self._lines = value.splitlines()
+        self.number_of_lines = len(self._lines)
+
+    def line(self, index: int) -> _ScreenLine:
+        return _ScreenLine(self._lines[index])
+
+
+class _StartupSession:
+    def __init__(self, screens: list[str]) -> None:
+        self._screens = list(screens)
+        self._last = screens[-1]
+        self.sent: list[tuple[str, bool]] = []
+
+    async def async_get_screen_contents(self) -> _Screen:
+        if self._screens:
+            self._last = self._screens.pop(0)
+        return _Screen(self._last)
+
+    async def async_send_text(
+        self, value: str, *, suppress_broadcast: bool
+    ) -> None:
+        self.sent.append((value, suppress_broadcast))
+
+
+def test_startup_trust_gate_accepts_only_exact_workspace_and_waits_for_ready(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    workspace = tmp_path / "Harness Workspace"
+    workspace.mkdir()
+    profile = participant_driver._runtime_profiles()[  # noqa: SLF001
+        "runtime-profile.claude-dogfood"
+    ]
+    prompt = (
+        f"Accessing workspace:\n{workspace}\nQuick safety check: Is this trusted?\n"
+        "1. Yes, I trust this folder\n2. No, exit"
+    )
+    ready = "Claude Code v2.1.227\n❯"
+    session = _StartupSession(
+        [prompt, ready, ready, ready, ready]
+    )
+    monkeypatch.setattr(participant_driver, "STARTUP_POLL_SECONDS", 0)
+    monkeypatch.setattr(participant_driver, "_process_cwd", lambda pid: workspace)
+    evidence = asyncio.run(
+        participant_driver._wait_startup_ready(  # noqa: SLF001
+            session, profile, workspace, 1234
+        )
+    )
+    assert session.sent == [("1", True), ("\r", True)]
+    assert evidence["outcome"] == "accepted"
+    assert evidence["scope"] == "harness_verified_workspace"
+    assert evidence["workspace_identity_sha256"] == participant_driver.digest(
+        {"workspace_path": str(workspace.resolve())}
+    )
+
+
+def test_startup_trust_gate_fails_closed_on_workspace_mismatch(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    workspace = tmp_path / "expected"
+    workspace.mkdir()
+    profile = participant_driver._runtime_profiles()[  # noqa: SLF001
+        "runtime-profile.codex-dogfood"
+    ]
+    prompt = (
+        "You are in /private/tmp/not-the-workspace\n"
+        "Do you trust the contents of this directory?\n"
+        "1. Yes, continue\n2. No, quit"
+    )
+    session = _StartupSession([prompt])
+    monkeypatch.setattr(
+        participant_driver, "_process_cwd", lambda pid: tmp_path / "different"
+    )
+    try:
+        asyncio.run(
+            participant_driver._wait_startup_ready(  # noqa: SLF001
+                session, profile, workspace, 1234
+            )
+        )
+    except participant_driver.DriverError as exc:
+        assert str(exc) == "startup trust gate workspace differs"
+    else:  # pragma: no cover - fail-closed assertion
+        raise AssertionError("mismatched startup trust workspace was accepted")
+    assert session.sent == []
+
+
+def test_startup_gate_does_not_type_when_workspace_is_already_trusted(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    workspace = tmp_path / "trusted"
+    workspace.mkdir()
+    profile = participant_driver._runtime_profiles()[  # noqa: SLF001
+        "runtime-profile.codex-dogfood"
+    ]
+    ready = ">_ OpenAI Codex (v0.147.0)\n›"
+    session = _StartupSession([ready, ready, ready, ready])
+    monkeypatch.setattr(participant_driver, "STARTUP_POLL_SECONDS", 0)
+    evidence = asyncio.run(
+        participant_driver._wait_startup_ready(  # noqa: SLF001
+            session, profile, workspace, 1234
+        )
+    )
+    assert session.sent == []
+    assert evidence["outcome"] == "already_satisfied"
+
+
+@pytest.mark.parametrize(
+    ("profile_id", "restored_screen"),
+    [
+        (
+            "runtime-profile.codex-dogfood",
+            "› Earlier employee prompt\n"
+            "• Earlier response restored from the exact conversation.\n"
+            "› Improve documentation in @filename\n"
+            "gpt-5.6-luna medium · ~/workspace/bundle/EdgeStudio",
+        ),
+        (
+            "runtime-profile.claude-dogfood",
+            "⏺ Earlier response restored from the exact conversation.\n"
+            "────────────────────────────────────────────────\n"
+            "❯ \n"
+            "────────────────────────────────────────────────\n"
+            "⏵⏵ bypass permissions on",
+        ),
+    ],
+)
+def test_startup_gate_accepts_stable_restored_input_without_transient_banner(
+    tmp_path: Path,
+    monkeypatch: Any,
+    profile_id: str,
+    restored_screen: str,
+) -> None:
+    workspace = tmp_path / "trusted"
+    workspace.mkdir()
+    profile = participant_driver._runtime_profiles()[profile_id]  # noqa: SLF001
+    session = _StartupSession([restored_screen] * 4)
+    monkeypatch.setattr(participant_driver, "STARTUP_POLL_SECONDS", 0)
+
+    evidence = asyncio.run(
+        participant_driver._wait_startup_ready(  # noqa: SLF001
+            session, profile, workspace, 1234
+        )
+    )
+
+    assert session.sent == []
+    assert evidence["outcome"] == "already_satisfied"
+
+
+@pytest.mark.parametrize(
+    ("profile_id", "menu_screen"),
+    [
+        (
+            "runtime-profile.codex-dogfood",
+            "Choose working directory to resume this session\n"
+            "› 1. Use session directory (/workspace/old)\n"
+            "  2. Use current directory (/workspace/new)",
+        ),
+        (
+            "runtime-profile.claude-dogfood",
+            "Select an option\n❯ 1. Continue\n  2. Exit",
+        ),
+    ],
+)
+def test_restored_input_ready_pattern_rejects_numbered_choice_menus(
+    profile_id: str,
+    menu_screen: str,
+) -> None:
+    profile = participant_driver._runtime_profiles()[profile_id]  # noqa: SLF001
+
+    assert re.search(profile["startup_gate"]["ready_pattern"], menu_screen) is None
+
+
+class _CloseWindow:
+    def __init__(self) -> None:
+        self.close_calls: list[bool] = []
+
+    async def async_close(self, *, force: bool) -> None:
+        self.close_calls.append(force)
+
+
+def test_requested_tui_close_does_not_interpret_screen_content(
+    monkeypatch: Any,
+) -> None:
+    window = _CloseWindow()
+
+    async def exact_session(
+        module: Any, state: dict[str, Any]
+    ) -> tuple[Any, Any, Any, int]:
+        return _AbsentApp(), window, object(), 5678
+
+    monkeypatch.setattr(participant_driver, "_exact_session", exact_session)
+    class _AbsentApp:
+        def get_window_by_id(self, window_id: str) -> None:
+            return None
+
+    class _Module:
+        pass
+
+    monkeypatch.setattr(participant_driver, "_exact_session", exact_session)
+    monkeypatch.setattr(
+        participant_driver,
+        "_wait_process_absent_bounded",
+        lambda pid, timeout: True,
+    )
+    classification, drain_requested, progress_count, closed = asyncio.run(
+        participant_driver._safe_tui_close_async(  # noqa: SLF001
+            _Module(), {"pid": 1234, "window_id": "owned"}, 150
+        )
+    )
+    assert classification == "requested"
+    assert drain_requested is False
+    assert progress_count == 0
+    assert closed is True
+    assert window.close_calls == [True]
+
+
+def test_requested_tui_close_reports_timeout_when_exact_process_remains(
+    monkeypatch: Any,
+) -> None:
+    window = _CloseWindow()
+
+    async def exact_session(
+        module: Any, state: dict[str, Any]
+    ) -> tuple[Any, Any, Any, int]:
+        return _AbsentApp(), window, object(), 5678
+
+    class _AbsentApp:
+        def get_window_by_id(self, window_id: str) -> None:
+            return None
+
+    class _Module:
+        pass
+
+    monkeypatch.setattr(participant_driver, "_exact_session", exact_session)
+    monkeypatch.setattr(
+        participant_driver, "_wait_process_absent_bounded", lambda pid, timeout: False
+    )
+    monkeypatch.setattr(
+        participant_driver,
+        "_terminate_gracefully_exact",
+        lambda state: (_ for _ in ()).throw(
+            participant_driver.DriverError("owned process remained after graceful stop")
+        ),
+    )
+    classification, drain_requested, _, closed = asyncio.run(
+        participant_driver._safe_tui_close_async(  # noqa: SLF001
+            _Module(), {"pid": 1234, "window_id": "owned"}, 1
+        )
+    )
+    assert classification == "timeout"
+    assert drain_requested is False
+    assert closed is False
+    assert window.close_calls == [True]
+
+
+def test_requested_tui_close_requires_foreground_process_absence(
+    monkeypatch: Any,
+) -> None:
+    window = _CloseWindow()
+
+    async def exact_session(
+        module: Any, state: dict[str, Any]
+    ) -> tuple[Any, Any, Any, int]:
+        return _AbsentApp(), window, object(), 5678
+
+    class _AbsentApp:
+        def get_window_by_id(self, window_id: str) -> None:
+            return None
+
+    class _Module:
+        pass
+
+    monkeypatch.setattr(participant_driver, "_exact_session", exact_session)
+    observed: list[int] = []
+
+    def wait_absent(pid: int, timeout: float) -> bool:
+        observed.append(pid)
+        return pid == 1234
+
+    monkeypatch.setattr(
+        participant_driver, "_wait_process_absent_bounded", wait_absent
+    )
+    monkeypatch.setattr(
+        participant_driver, "_terminate_gracefully_exact", lambda state: None
+    )
+
+    result = asyncio.run(
+        participant_driver._safe_tui_close_async(  # noqa: SLF001
+            _Module(), {"pid": 1234, "window_id": "owned"}, 1
+        )
+    )
+
+    assert result == ("timeout", False, 0, False)
+    assert 1234 in observed
+    assert 5678 in observed
+
+
+def test_requested_tui_close_reports_timeout_when_exact_window_remains(
+    monkeypatch: Any,
+) -> None:
+    window = _CloseWindow()
+
+    async def exact_session(
+        module: Any, state: dict[str, Any]
+    ) -> tuple[Any, Any, Any, int]:
+        return _PresentApp(), window, object(), 5678
+
+    class _PresentApp:
+        def get_window_by_id(self, window_id: str) -> object:
+            return object()
+
+    class _Module:
+        pass
+
+    monkeypatch.setattr(participant_driver, "_exact_session", exact_session)
+    classification, drain_requested, progress_count, closed = asyncio.run(
+        participant_driver._safe_tui_close_async(  # noqa: SLF001
+            _Module(), {"pid": 1234, "window_id": "owned"}, 1
+        )
+    )
+    assert classification == "timeout"
+    assert drain_requested is False
+    assert progress_count == 0
+    assert closed is False
+    assert window.close_calls == [True]
+
+
+def test_requested_tui_close_retries_same_exact_binding_once(
+    monkeypatch: Any,
+) -> None:
+    window = _CloseWindow()
+    attempts = 0
+
+    async def exact_session(
+        module: Any, state: dict[str, Any]
+    ) -> tuple[Any, Any, Any, int]:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("transient iTerm RPC failure")
+        return _AbsentApp(), window, object(), 5678
+
+    class _AbsentApp:
+        def get_window_by_id(self, window_id: str) -> None:
+            return None
+
+    class _Module:
+        pass
+
+    monkeypatch.setattr(participant_driver, "_exact_session", exact_session)
+    monkeypatch.setattr(
+        participant_driver,
+        "_wait_process_absent_bounded",
+        lambda pid, timeout: True,
+    )
+
+    result = asyncio.run(
+        participant_driver._safe_tui_close_async(  # noqa: SLF001
+            _Module(), {"pid": 1234, "window_id": "owned"}, 150
+        )
+    )
+
+    assert attempts == 2
+    assert window.close_calls == [True]
+    assert result == ("requested", False, 0, True)
+
+
+def test_root_driver_accepts_only_exact_pingagent_transport_evidence(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    executable = tmp_path / "ai-harness-transport"
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o700)
+    monkeypatch.setattr(participant_driver, "PINGAGENT_TRANSPORT", executable)
+    state = {"session_id": "session-m4"}
+    record = {
+        "delivery_id": "delivery-m4",
+        "payload_digest": "c" * 64,
+        "events": [
+            {
+                "event": "attempt_started",
+                "transport_attempt_id": "transport-m4",
+            }
+        ],
+    }
+    evidence = {
+        "transport_contract_version": 1,
+        "delivery_id": "delivery-m4",
+        "transport_attempt_id": "transport-m4",
+        "payload_digest": "c" * 64,
+        "session_identity_sha256": hashlib.sha256(b"session-m4").hexdigest(),
+        "injection_confirmed": True,
+    }
+
+    def completed(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        request = json.loads(kwargs["input"])
+        assert request["session_id"] == "session-m4"
+        assert "role" not in request
+        result = {
+            **evidence,
+            "transport_evidence_digest": participant_driver.digest(evidence),
+        }
+        return subprocess.CompletedProcess(args[0], 0, json.dumps(result).encode(), b"")
+
+    monkeypatch.setattr(participant_driver.subprocess, "run", completed)
+    assert participant_driver._pingagent_deliver(  # noqa: SLF001
+        state, record, "typed notification"
+    )["transport_evidence_digest"] == participant_driver.digest(evidence)
+
+    def stale(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        result = {
+            **evidence,
+            "transport_attempt_id": "wrong-attempt",
+            "transport_evidence_digest": participant_driver.digest(evidence),
+        }
+        return subprocess.CompletedProcess(args[0], 0, json.dumps(result).encode(), b"")
+
+    monkeypatch.setattr(participant_driver.subprocess, "run", stale)
+    try:
+        participant_driver._pingagent_deliver(state, record, "typed notification")  # noqa: SLF001
+    except participant_driver.DriverError:
+        pass
+    else:  # pragma: no cover - fail-closed assertion
+        raise AssertionError("stale PingAgent evidence was accepted")
+
+
+def test_delivery_notification_does_not_create_terminal_reply_loops() -> None:
+    record = {
+        "delivery_id": "delivery-terminal",
+        "target": {"sender": {"participant_id": "reviewer"}},
+    }
+    for message_kind in (
+        "collaboration.request",
+        "collaboration.question",
+        "collaboration.review-request",
+        "collaboration.pushback",
+    ):
+        request = participant_driver._delivery_notification(  # noqa: SLF001
+            record,
+            message_kind,
+            "Review fixed SHA.",
+            "a" * 48,
+        )
+        assert "Treat the payload as a peer request" in request
+        assert "ai-ping reviewer --reply-to delivery-terminal" in request
+
+    for message_kind in (
+        "collaboration.response",
+        "collaboration.review-response",
+        "collaboration.notice",
+        "collaboration.done",
+    ):
+        terminal = participant_driver._delivery_notification(  # noqa: SLF001
+            record,
+            message_kind,
+            "P0=0 P1=0",
+            "b" * 48,
+        )
+        assert "terminal/informational" in terminal
+        assert "do not send a Harness-tracked receipt" in terminal
+        assert "ai-ping reviewer" not in terminal
+
+
+@pytest.mark.parametrize(
+    ("profile_id", "provider"),
+    [
+        ("runtime-profile.codex-dogfood", "codex"),
+        ("runtime-profile.claude-dogfood", "claude"),
+    ],
+)
+def test_vendor_session_hook_captures_and_reuses_exact_identity(
+    tmp_path: Path,
+    monkeypatch: Any,
+    profile_id: str,
+    provider: str,
+) -> None:
+    private_root = tmp_path / "private"
+    private_root.mkdir(mode=0o700)
+    auth_context = tmp_path / "participant-auth.json"
+    auth_context.write_text("{}\n", encoding="utf-8")
+    auth_context.chmod(0o600)
+    client_pythonpath = tmp_path / "client-pythonpath"
+    client_pythonpath.mkdir(mode=0o700)
+    unsigned = {
+        "schema_version": 1,
+        "context_revision": 7,
+        "scenario": {
+            "project_instance_id": "project-one",
+            "scenario_id": "scenario-one",
+            "scenario_generation": 1,
+        },
+        "participant": {
+            "participant_id": "analyst",
+            "participant_generation": 1,
+            "assignments": [
+                {"attribute": "collaboration.role", "task_id": "analysis"}
+            ],
+        },
+        "peers": [
+            {
+                "participant_id": "reviewer",
+                "participant_generation": 1,
+                "assignments": ["collaboration.role:review"],
+            }
+        ],
+        "policy": {
+            "policy_id": "policy.one",
+            "policy_version": 1,
+            "policy_digest": "c" * 64,
+        },
+        "allowed_outbound": [
+            {
+                "message_kind": "collaboration.review-request",
+                "receiver_label": "reviewer",
+            }
+        ],
+        "reply_semantics": {
+            "reply_expected_kinds": ["collaboration.review-request"],
+            "terminal_kinds": ["collaboration.review-response"],
+            "preserve_reply_to": True,
+            "machine_ack_is_silent": True,
+        },
+    }
+    collaboration_context = tmp_path / "participant-collaboration.json"
+    collaboration_context.write_text(
+        json.dumps(
+            {
+                **unsigned,
+                "context_digest": participant_driver.digest(unsigned),
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    collaboration_context.chmod(0o600)
+    participant_client = {
+        "context_path": str(auth_context),
+        "client_executable": str(Path(sys.executable).resolve()),
+        "client_pythonpath": str(client_pythonpath),
+        "collaboration_context_path": str(collaboration_context),
+    }
+    launch_spec = {
+        "runtime_profile_ref": profile_id,
+        "continuity_mode": "exact_resume",
+        "continuity_binding_ref": "vendor-session-slot:primary",
+    }
+    monkeypatch.setattr(
+        participant_driver,
+        "_runtime_argv",
+        lambda value: ("/usr/bin/true",),
+    )
+
+    argv, actual_provider, expected_session_id, resumed = (
+        participant_driver._prepare_runtime_launch(  # noqa: SLF001
+            private_root, launch_spec, participant_client
+        )
+    )
+    assert actual_provider == provider
+    assert resumed is False
+    collaboration_prompt = participant_driver._collaboration_prompt_path(  # noqa: SLF001
+        private_root
+    ).read_text(encoding="utf-8")
+    assert "reached through Harness ai-ping" in collaboration_prompt
+    assert "not provider-native agent discovery or messaging" in collaboration_prompt
+    assert "A successful ai-ping Host result is authoritative" in collaboration_prompt
+    session_id = expected_session_id or "11111111-1111-4111-8111-111111111111"
+    initial_identity_digest = participant_driver._verify_vendor_session(  # noqa: SLF001
+        private_root,
+        launch_spec,
+        provider,
+        expected_session_id,
+        False,
+    )
+    assert initial_identity_digest == (
+        None
+        if provider == "codex"
+        else hashlib.sha256(session_id.encode()).hexdigest()
+    )
+    environment = participant_driver._runtime_environment(  # noqa: SLF001
+        launch_spec, participant_client, private_root
+    )
+    hook = subprocess.run(
+        (sys.executable, str(participant_driver._vendor_hook_path(private_root))),  # noqa: SLF001
+        input=json.dumps(
+            {
+                "session_id": session_id,
+                "source": "startup",
+            }
+        ),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=environment,
+        check=False,
+    )
+    assert hook.returncode == 0, hook.stderr
+    if provider == "codex":
+        assert "additionalContext" in hook.stdout
+        assert "--dangerously-bypass-hook-trust" in argv
+    else:
+        assert hook.stdout == ""
+        assert "--append-system-prompt-file" in argv
+    state = {
+        "vendor_provider": provider,
+        "expected_vendor_session_id": expected_session_id,
+        "vendor_resume_requested": False,
+        "vendor_session_identity_sha256": None,
+    }
+    identity_digest = participant_driver._refresh_vendor_session_binding(  # noqa: SLF001
+        private_root, launch_spec, state
+    )
+    assert identity_digest == hashlib.sha256(session_id.encode()).hexdigest()
+    assert state["vendor_session_identity_sha256"] == identity_digest
+
+    resumed_argv, _, resumed_session_id, resumed = (
+        participant_driver._prepare_runtime_launch(  # noqa: SLF001
+            private_root, launch_spec, participant_client
+        )
+    )
+    assert resumed is True
+    assert resumed_session_id == session_id
+    if provider == "codex":
+        assert resumed_argv[-2:] == ("resume", session_id)
+    else:
+        assert resumed_argv[-2:] == ("--resume", session_id)
+    assert participant_driver._verify_vendor_session(  # noqa: SLF001
+        private_root,
+        launch_spec,
+        provider,
+        resumed_session_id,
+        True,
+    ) == hashlib.sha256(session_id.encode()).hexdigest()
+
+    resumed_hook = subprocess.run(
+        (sys.executable, str(participant_driver._vendor_hook_path(private_root))),  # noqa: SLF001
+        input=json.dumps(
+            {
+                "session_id": session_id,
+                "source": "resume",
+            }
+        ),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=environment,
+        check=False,
+    )
+    assert resumed_hook.returncode == 0, resumed_hook.stderr
+    assert participant_driver._verify_vendor_session(  # noqa: SLF001
+        private_root,
+        launch_spec,
+        provider,
+        resumed_session_id,
+        True,
+    ) == hashlib.sha256(session_id.encode()).hexdigest()

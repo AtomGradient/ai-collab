@@ -1,0 +1,10 @@
+.DS_Store
+.build/
+.pytest_cache/
+.venv/
+*.egg-info/
+__pycache__/
+*.py[cod]
+Build/
+DerivedData/
+AICollab.xcodeproj/

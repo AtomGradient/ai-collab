@@ -1,0 +1,517 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ai-collab:permission-confirmation:v1",
+  "title": "AI Collaboration permission and high-risk confirmation contract v1",
+  "oneOf": [
+    {"$ref": "#/$defs/permission_confirmation_matrix"},
+    {"$ref": "#/$defs/permission_snapshot"},
+    {"$ref": "#/$defs/confirmation_challenge"},
+    {"$ref": "#/$defs/confirmation_decision"},
+    {"$ref": "#/$defs/confirmation_authorization"},
+    {"$ref": "#/$defs/confirmation_consumption"}
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "namespaced_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*(\\.[a-z][a-z0-9-]*)+$"
+    },
+    "opaque_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "epoch_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "nullable_epoch_ms": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/epoch_ms"}
+      ]
+    },
+    "nullable_sha256": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/sha256"}
+      ]
+    },
+    "nullable_namespaced_id": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/namespaced_id"}
+      ]
+    },
+    "typed_digest_ref": {
+      "type": "object",
+      "required": ["schema_digest", "value_digest"],
+      "properties": {
+        "schema_digest": {"$ref": "#/$defs/sha256"},
+        "value_digest": {"$ref": "#/$defs/sha256"}
+      },
+      "additionalProperties": false
+    },
+    "nullable_typed_digest_ref": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/typed_digest_ref"}
+      ]
+    },
+    "scope_membership_evidence": {
+      "type": "object",
+      "required": [
+        "scope_constraint_digest",
+        "scope_constraint_schema_digest",
+        "operation_request_digest",
+        "target_digest",
+        "fence_digest",
+        "evidence_digest"
+      ],
+      "properties": {
+        "scope_constraint_digest": {"$ref": "#/$defs/sha256"},
+        "scope_constraint_schema_digest": {"$ref": "#/$defs/sha256"},
+        "operation_request_digest": {"$ref": "#/$defs/sha256"},
+        "target_digest": {"$ref": "#/$defs/sha256"},
+        "fence_digest": {"$ref": "#/$defs/sha256"},
+        "evidence_digest": {"$ref": "#/$defs/sha256"}
+      },
+      "additionalProperties": false
+    },
+    "nullable_scope_membership_evidence": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/scope_membership_evidence"}
+      ]
+    },
+    "permission_id_list": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/namespaced_id"},
+      "uniqueItems": true
+    },
+    "permission_descriptor": {
+      "type": "object",
+      "required": [
+        "permission_id",
+        "category",
+        "provider_kind",
+        "provider_ref",
+        "subject_scope",
+        "probe_schema_digest",
+        "user_mediation",
+        "secret_handling",
+        "revocable",
+        "max_observation_age_ms"
+      ],
+      "properties": {
+        "permission_id": {"$ref": "#/$defs/namespaced_id"},
+        "category": {
+          "enum": [
+            "background_execution",
+            "presentation_control",
+            "project_storage",
+            "external_service",
+            "local_sensitive_storage"
+          ]
+        },
+        "provider_kind": {
+          "enum": ["platform_plugin", "project_adapter", "credential_provider"]
+        },
+        "provider_ref": {"$ref": "#/$defs/namespaced_id"},
+        "subject_scope": {
+          "enum": ["host", "project", "driver", "adapter", "operation"]
+        },
+        "probe_schema_digest": {"$ref": "#/$defs/sha256"},
+        "user_mediation": {
+          "enum": ["not_applicable", "system_managed", "user_initiated"]
+        },
+        "secret_handling": {"enum": ["none", "opaque_reference_only"]},
+        "revocable": {"const": true},
+        "max_observation_age_ms": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "permission_descriptor_list": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/permission_descriptor"}
+    },
+    "permission_catalog": {
+      "type": "object",
+      "required": ["catalog_contract_version", "catalog_id", "permissions"],
+      "properties": {
+        "catalog_contract_version": {"const": 1},
+        "catalog_id": {"$ref": "#/$defs/namespaced_id"},
+        "permissions": {"$ref": "#/$defs/permission_descriptor_list"}
+      },
+      "additionalProperties": false
+    },
+    "permission_observation": {
+      "type": "object",
+      "required": [
+        "observation_id",
+        "permission_id",
+        "permission_descriptor_digest",
+        "subject_digest",
+        "status",
+        "observed_at_epoch_ms",
+        "valid_until_epoch_ms",
+        "evidence_digest",
+        "provider_error_code",
+        "remediation_ref"
+      ],
+      "properties": {
+        "observation_id": {"$ref": "#/$defs/opaque_id"},
+        "permission_id": {"$ref": "#/$defs/namespaced_id"},
+        "permission_descriptor_digest": {"$ref": "#/$defs/sha256"},
+        "subject_digest": {"$ref": "#/$defs/sha256"},
+        "status": {
+          "enum": [
+            "granted",
+            "denied",
+            "not_determined",
+            "restricted",
+            "unavailable",
+            "unknown"
+          ]
+        },
+        "observed_at_epoch_ms": {"$ref": "#/$defs/epoch_ms"},
+        "valid_until_epoch_ms": {"$ref": "#/$defs/nullable_epoch_ms"},
+        "evidence_digest": {"$ref": "#/$defs/sha256"},
+        "provider_error_code": {"$ref": "#/$defs/nullable_namespaced_id"},
+        "remediation_ref": {"$ref": "#/$defs/nullable_namespaced_id"}
+      },
+      "additionalProperties": false
+    },
+    "permission_observation_list": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/permission_observation"}
+    },
+    "permission_snapshot": {
+      "type": "object",
+      "required": [
+        "snapshot_contract_version",
+        "snapshot_id",
+        "matrix_digest",
+        "operation_descriptor_digest",
+        "operation_request_digest",
+        "target_digest",
+        "fence_digest",
+        "captured_at_epoch_ms",
+        "observations"
+      ],
+      "properties": {
+        "snapshot_contract_version": {"const": 1},
+        "snapshot_id": {"$ref": "#/$defs/opaque_id"},
+        "matrix_digest": {"$ref": "#/$defs/sha256"},
+        "operation_descriptor_digest": {"$ref": "#/$defs/sha256"},
+        "operation_request_digest": {"$ref": "#/$defs/sha256"},
+        "target_digest": {"$ref": "#/$defs/sha256"},
+        "fence_digest": {"$ref": "#/$defs/sha256"},
+        "captured_at_epoch_ms": {"$ref": "#/$defs/epoch_ms"},
+        "observations": {"$ref": "#/$defs/permission_observation_list"}
+      },
+      "additionalProperties": false
+    },
+    "confirmation_policy": {
+      "type": "object",
+      "required": [
+        "policy_id",
+        "authorization_scope",
+        "presenter_requirement",
+        "interaction_mode",
+        "max_uses",
+        "max_duration_ms",
+        "requires_effect_preview",
+        "requires_current_permission_snapshot_per_use",
+        "scope_constraint_schema_digest"
+      ],
+      "properties": {
+        "policy_id": {"$ref": "#/$defs/namespaced_id"},
+        "authorization_scope": {
+          "enum": ["exact_request", "bounded_operation_target"]
+        },
+        "presenter_requirement": {"const": "trusted_local_app"},
+        "interaction_mode": {"const": "explicit_user_action"},
+        "max_uses": {"type": "integer", "minimum": 1},
+        "max_duration_ms": {"type": "integer", "minimum": 1},
+        "requires_effect_preview": {"type": "boolean"},
+        "requires_current_permission_snapshot_per_use": {"const": true},
+        "scope_constraint_schema_digest": {"$ref": "#/$defs/nullable_sha256"}
+      },
+      "additionalProperties": false
+    },
+    "confirmation_policy_list": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/confirmation_policy"}
+    },
+    "operation_security_binding": {
+      "type": "object",
+      "required": [
+        "operation_id",
+        "operation_schema_version",
+        "operation_descriptor_digest",
+        "mutation_class",
+        "target_scope",
+        "required_capability",
+        "required_permission_ids",
+        "risk_class",
+        "confirmation_policy_ref",
+        "effect_preview_schema_digest"
+      ],
+      "properties": {
+        "operation_id": {"$ref": "#/$defs/namespaced_id"},
+        "operation_schema_version": {"type": "integer", "minimum": 1},
+        "operation_descriptor_digest": {"$ref": "#/$defs/sha256"},
+        "mutation_class": {
+          "enum": ["read_only", "durable_state", "external_effect", "destructive"]
+        },
+        "target_scope": {
+          "enum": ["host", "project", "scenario", "participant", "operation"]
+        },
+        "required_capability": {"$ref": "#/$defs/namespaced_id"},
+        "required_permission_ids": {"$ref": "#/$defs/permission_id_list"},
+        "risk_class": {"enum": ["routine", "elevated", "high"]},
+        "confirmation_policy_ref": {"$ref": "#/$defs/nullable_namespaced_id"},
+        "effect_preview_schema_digest": {"$ref": "#/$defs/nullable_sha256"}
+      },
+      "additionalProperties": false
+    },
+    "operation_security_binding_list": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/operation_security_binding"}
+    },
+    "permission_confirmation_matrix": {
+      "type": "object",
+      "required": [
+        "matrix_contract_version",
+        "matrix_id",
+        "matrix_revision",
+        "host_ipc_contract_digest",
+        "operation_registry_digest",
+        "permission_catalog",
+        "permission_catalog_digest",
+        "confirmation_policies",
+        "confirmation_policy_set_digest",
+        "operation_bindings"
+      ],
+      "properties": {
+        "matrix_contract_version": {"const": 1},
+        "matrix_id": {"$ref": "#/$defs/namespaced_id"},
+        "matrix_revision": {"type": "integer", "minimum": 1},
+        "host_ipc_contract_digest": {"$ref": "#/$defs/sha256"},
+        "operation_registry_digest": {"$ref": "#/$defs/sha256"},
+        "permission_catalog": {"$ref": "#/$defs/permission_catalog"},
+        "permission_catalog_digest": {"$ref": "#/$defs/sha256"},
+        "confirmation_policies": {"$ref": "#/$defs/confirmation_policy_list"},
+        "confirmation_policy_set_digest": {"$ref": "#/$defs/sha256"},
+        "operation_bindings": {"$ref": "#/$defs/operation_security_binding_list"}
+      },
+      "additionalProperties": false
+    },
+    "confirmation_challenge": {
+      "type": "object",
+      "required": [
+        "challenge_contract_version",
+        "challenge_id",
+        "matrix_digest",
+        "policy_id",
+        "policy_digest",
+        "authorization_scope",
+        "operation_registry_digest",
+        "operation_descriptor_digest",
+        "operation_request_digest",
+        "target_digest",
+        "fence_digest",
+        "permission_snapshot_digest",
+        "effect_preview",
+        "scope_constraint_digest",
+        "issued_at_epoch_ms",
+        "expires_at_epoch_ms"
+      ],
+      "properties": {
+        "challenge_contract_version": {"const": 1},
+        "challenge_id": {"$ref": "#/$defs/opaque_id"},
+        "matrix_digest": {"$ref": "#/$defs/sha256"},
+        "policy_id": {"$ref": "#/$defs/namespaced_id"},
+        "policy_digest": {"$ref": "#/$defs/sha256"},
+        "authorization_scope": {
+          "enum": ["exact_request", "bounded_operation_target"]
+        },
+        "operation_registry_digest": {"$ref": "#/$defs/sha256"},
+        "operation_descriptor_digest": {"$ref": "#/$defs/sha256"},
+        "operation_request_digest": {"$ref": "#/$defs/sha256"},
+        "target_digest": {"$ref": "#/$defs/sha256"},
+        "fence_digest": {"$ref": "#/$defs/sha256"},
+        "permission_snapshot_digest": {"$ref": "#/$defs/sha256"},
+        "effect_preview": {"$ref": "#/$defs/nullable_typed_digest_ref"},
+        "scope_constraint_digest": {"$ref": "#/$defs/nullable_sha256"},
+        "issued_at_epoch_ms": {"$ref": "#/$defs/epoch_ms"},
+        "expires_at_epoch_ms": {"$ref": "#/$defs/epoch_ms"}
+      },
+      "additionalProperties": false
+    },
+    "confirmation_decision": {
+      "type": "object",
+      "required": [
+        "decision_contract_version",
+        "decision_id",
+        "challenge_digest",
+        "outcome",
+        "decided_at_epoch_ms",
+        "actor_scope",
+        "presenter_instance_digest",
+        "reason_code"
+      ],
+      "properties": {
+        "decision_contract_version": {"const": 1},
+        "decision_id": {"$ref": "#/$defs/opaque_id"},
+        "challenge_digest": {"$ref": "#/$defs/sha256"},
+        "outcome": {"enum": ["approved", "denied"]},
+        "decided_at_epoch_ms": {"$ref": "#/$defs/epoch_ms"},
+        "actor_scope": {"const": "current_user"},
+        "presenter_instance_digest": {"$ref": "#/$defs/sha256"},
+        "reason_code": {"$ref": "#/$defs/nullable_namespaced_id"}
+      },
+      "additionalProperties": false
+    },
+    "confirmation_authorization": {
+      "type": "object",
+      "required": [
+        "authorization_contract_version",
+        "authorization_id",
+        "matrix_digest",
+        "policy_id",
+        "policy_digest",
+        "challenge_digest",
+        "decision_digest",
+        "authorization_scope",
+        "authorized_scope_digest",
+        "operation_registry_digest",
+        "operation_descriptor_digest",
+        "target_digest",
+        "issued_at_epoch_ms",
+        "expires_at_epoch_ms",
+        "max_uses"
+      ],
+      "properties": {
+        "authorization_contract_version": {"const": 1},
+        "authorization_id": {"$ref": "#/$defs/opaque_id"},
+        "matrix_digest": {"$ref": "#/$defs/sha256"},
+        "policy_id": {"$ref": "#/$defs/namespaced_id"},
+        "policy_digest": {"$ref": "#/$defs/sha256"},
+        "challenge_digest": {"$ref": "#/$defs/sha256"},
+        "decision_digest": {"$ref": "#/$defs/sha256"},
+        "authorization_scope": {
+          "enum": ["exact_request", "bounded_operation_target"]
+        },
+        "authorized_scope_digest": {"$ref": "#/$defs/sha256"},
+        "operation_registry_digest": {"$ref": "#/$defs/sha256"},
+        "operation_descriptor_digest": {"$ref": "#/$defs/sha256"},
+        "target_digest": {"$ref": "#/$defs/sha256"},
+        "issued_at_epoch_ms": {"$ref": "#/$defs/epoch_ms"},
+        "expires_at_epoch_ms": {"$ref": "#/$defs/epoch_ms"},
+        "max_uses": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": false
+    },
+    "confirmation_consumption": {
+      "type": "object",
+      "required": [
+        "consumption_contract_version",
+        "consumption_id",
+        "matrix_digest",
+        "authorization_digest",
+        "use_index",
+        "previous_consumption_digest",
+        "operation_registry_digest",
+        "operation_descriptor_digest",
+        "operation_request_digest",
+        "target_digest",
+        "fence_digest",
+        "permission_snapshot_digest",
+        "effect_preview",
+        "scope_membership_evidence",
+        "consumed_at_epoch_ms"
+      ],
+      "properties": {
+        "consumption_contract_version": {"const": 1},
+        "consumption_id": {"$ref": "#/$defs/opaque_id"},
+        "matrix_digest": {"$ref": "#/$defs/sha256"},
+        "authorization_digest": {"$ref": "#/$defs/sha256"},
+        "use_index": {"type": "integer", "minimum": 1},
+        "previous_consumption_digest": {"$ref": "#/$defs/nullable_sha256"},
+        "operation_registry_digest": {"$ref": "#/$defs/sha256"},
+        "operation_descriptor_digest": {"$ref": "#/$defs/sha256"},
+        "operation_request_digest": {"$ref": "#/$defs/sha256"},
+        "target_digest": {"$ref": "#/$defs/sha256"},
+        "fence_digest": {"$ref": "#/$defs/sha256"},
+        "permission_snapshot_digest": {"$ref": "#/$defs/sha256"},
+        "effect_preview": {"$ref": "#/$defs/nullable_typed_digest_ref"},
+        "scope_membership_evidence": {
+          "$ref": "#/$defs/nullable_scope_membership_evidence"
+        },
+        "consumed_at_epoch_ms": {"$ref": "#/$defs/epoch_ms"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "x-ai-collab": {
+    "schema_version": 1,
+    "contract_id": "ai-collab-permission-confirmation-v1",
+    "product_contract_version": "3.2",
+    "root_artifacts": [
+      "permission_confirmation_matrix",
+      "permission_snapshot",
+      "confirmation_challenge",
+      "confirmation_decision",
+      "confirmation_authorization",
+      "confirmation_consumption"
+    ],
+    "dependencies": {
+      "host_ipc_contract_id": "ai-collab-host-ipc-v1",
+      "operation_descriptor_schema_ref": "#/$defs/operation_descriptor"
+    },
+    "admission_order": [
+      "peer-and-owner",
+      "operation-registry-and-payload-schema",
+      "capability-target-and-generation-fences",
+      "current-permission-snapshot",
+      "current-matrix-and-confirmation-policy",
+      "atomic-authorization-consumption",
+      "durable-or-external-mutation"
+    ],
+    "invariants": {
+      "permission_and_capability_are_separate_checks": true,
+      "permission_status_is_observed_not_inferred_from_prior_success": true,
+      "only_current_exactly_scoped_granted_observations_admit_use": true,
+      "denied_not_determined_restricted_unavailable_and_unknown_fail_closed": true,
+      "system_permission_request_is_user_mediated_not_simulated": true,
+      "raw_credentials_paths_pii_and_provider_payloads_are_forbidden": true,
+      "operation_binding_exactly_joins_the_host_ipc_descriptor": true,
+      "unknown_permissions_policies_and_operations_fail_closed": true,
+      "high_risk_and_destructive_operations_require_explicit_confirmation": true,
+      "destructive_authorization_is_exact_request_single_use": true,
+      "bounded_authorization_is_forbidden_for_high_risk_operations": true,
+      "effect_preview_is_schema_validated_before_trusted_display": true,
+      "bounded_scope_membership_is_independently_validated_per_use": true,
+      "challenge_binds_current_matrix_operation_target_fence_permissions_and_effect": true,
+      "denial_and_expiry_never_create_authorization": true,
+      "approval_never_broadens_capability_permission_target_or_effect_scope": true,
+      "every_use_rechecks_current_permissions_and_generation_fences": true,
+      "authorization_replay_cross_target_or_cross_generation_fails_closed": true,
+      "authorization_is_atomically_consumed_before_target_mutation": true,
+      "consumption_receipt_is_not_operation_success_evidence": true
+    },
+    "deferred_surfaces": [
+      "platform-permission-probe-and-system-prompt-implementation",
+      "trusted-local-app-confirmation-ui",
+      "phase4-force-stop-resource-break-destroy-and-repair-mechanics",
+      "host-operation-registry-population",
+      "host-durable-atomic-authorization-consumption",
+      "permission-and-high-risk-acceptance-witnesses",
+      "one-shot-fingerprint-cutover-and-ordered-evidence-rebuild"
+    ]
+  }
+}

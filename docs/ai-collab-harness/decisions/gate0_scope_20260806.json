@@ -1,0 +1,64 @@
+{
+  "schema_version": "user_scope_decision_v1",
+  "gate_id": "DOD-SCOPE-001",
+  "decision": "approved",
+  "source": "user_decision",
+  "decided_on": "2026-08-06",
+  "approved_scope": {
+    "platform": "local_macos",
+    "surfaces": [
+      "app_feasibility_prototype",
+      "host_feasibility_prototype",
+      "cli_feasibility_prototype"
+    ],
+    "participant_cardinality": "dynamic_n",
+    "product_participant_limit": null,
+    "interactive_presentation": "one_top_level_iterm2_window_per_participant",
+    "headless_presentation": "no_window",
+    "initial_witness_runtime_drivers": [
+      "codex",
+      "claude"
+    ],
+    "future_runtime_driver_examples": [
+      "hermes",
+      "qwen",
+      "deepseek"
+    ],
+    "future_examples_are_non_exhaustive": true,
+    "host_product_name_branching_forbidden": true,
+    "model_binding_immutable_per_runtime_generation": true,
+    "representative_scenarios": [
+      "cross_repository_implementation_and_review",
+      "dynamic_third_participant",
+      "crash_restart_exact_recovery",
+      "delivery_or_permission_failure",
+      "safe_close_and_rollback"
+    ]
+  },
+  "benefit_goal": {
+    "target": "replace_manual_window_workspace_registration_and_message_orchestration",
+    "phase_minus_1_measurement_only": true,
+    "improvement_claim_allowed": false
+  },
+  "resource_budget": {
+    "concurrent_disposable_scenarios_max": 1,
+    "phase_minus_1_running_participant_witness_max": 3,
+    "incremental_disk_gib_max": 100,
+    "witness_max_is_not_a_product_cardinality_limit": true
+  },
+  "exclusions": [
+    "independent_product_repository_creation",
+    "canonical_workspace_migration",
+    "new_paid_cloud_service",
+    "retrain_or_redeploy",
+    "automatic_commit_push_rebase_merge_or_wip_discard"
+  ],
+  "stop_conditions": [
+    "participant_or_runtime_identity_ambiguity",
+    "wip_loss_or_canonical_workspace_mutation_risk",
+    "wrong_remote_ref_or_main_branch_risk",
+    "exact_resume_or_explicit_recreate_contract_failure",
+    "unauthorized_action_or_permission_security_issue",
+    "resource_budget_exceeded"
+  ]
+}

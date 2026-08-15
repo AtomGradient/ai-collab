@@ -1,0 +1,230 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ai-collab:gate-registry:v2",
+  "title": "AI Collaboration composed gate registry loader and projection contract v2",
+  "oneOf": [
+    {"$ref": "#/$defs/registry_snapshot"},
+    {"$ref": "#/$defs/gate_projection"},
+    {"$ref": "#/$defs/phase_projection"}
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "gate_id": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+$"
+    },
+    "lower_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*$"
+    },
+    "registry_id": {
+      "type": "string",
+      "pattern": "^ai-collab-scenario-harness-[a-z][a-z0-9-]{0,63}-v[1-9][0-9]*\\.[0-9]+-[0-9]{8}$"
+    },
+    "nullable_lower_id": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/lower_id"}
+      ]
+    },
+    "nullable_nonnegative_integer": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "integer", "minimum": 0}
+      ]
+    },
+    "gate_id_list": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/gate_id"},
+      "uniqueItems": true
+    },
+    "sha256_list": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/sha256"}
+    },
+    "named_count": {
+      "type": "object",
+      "required": ["name", "count"],
+      "properties": {
+        "name": {"$ref": "#/$defs/lower_id"},
+        "count": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "named_count_list": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/named_count"}
+    },
+    "phase_projection": {
+      "type": "object",
+      "required": [
+        "phase_projection_contract_version",
+        "registry_id",
+        "registry_digest",
+        "canonical_registry_digest",
+        "phase_id",
+        "phase_index",
+        "gate_ids",
+        "required_gate_ids",
+        "gate_definition_digests"
+      ],
+      "properties": {
+        "phase_projection_contract_version": {"const": 1},
+        "registry_id": {"$ref": "#/$defs/registry_id"},
+        "registry_digest": {"$ref": "#/$defs/sha256"},
+        "canonical_registry_digest": {"$ref": "#/$defs/sha256"},
+        "phase_id": {"$ref": "#/$defs/lower_id"},
+        "phase_index": {"type": "integer", "minimum": 0},
+        "gate_ids": {"$ref": "#/$defs/gate_id_list"},
+        "required_gate_ids": {"$ref": "#/$defs/gate_id_list"},
+        "gate_definition_digests": {"$ref": "#/$defs/sha256_list"}
+      },
+      "additionalProperties": false
+    },
+    "phase_projection_list": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/phase_projection"}
+    },
+    "gate_projection": {
+      "type": "object",
+      "required": [
+        "gate_projection_contract_version",
+        "registry_id",
+        "registry_schema_version",
+        "registry_digest_policy",
+        "registry_digest",
+        "canonical_registry_digest",
+        "gate_id",
+        "group",
+        "phase_id",
+        "required",
+        "evidence_class",
+        "evaluation",
+        "producer",
+        "verifier",
+        "decision_schema",
+        "max_age_seconds",
+        "depends_on",
+        "transitive_dependencies",
+        "related_gates",
+        "verifier_params_digest",
+        "gate_definition_digest"
+      ],
+      "properties": {
+        "gate_projection_contract_version": {"const": 1},
+        "registry_id": {"$ref": "#/$defs/registry_id"},
+        "registry_schema_version": {"const": 2},
+        "registry_digest_policy": {"const": "whole-source-sha256"},
+        "registry_digest": {"$ref": "#/$defs/sha256"},
+        "canonical_registry_digest": {"$ref": "#/$defs/sha256"},
+        "gate_id": {"$ref": "#/$defs/gate_id"},
+        "group": {"$ref": "#/$defs/lower_id"},
+        "phase_id": {"$ref": "#/$defs/lower_id"},
+        "required": {"type": "boolean"},
+        "evidence_class": {"enum": ["cacheable", "revocable", "derived"]},
+        "evaluation": {"enum": ["verifier", "aggregate", "decision"]},
+        "producer": {"$ref": "#/$defs/nullable_lower_id"},
+        "verifier": {"$ref": "#/$defs/nullable_lower_id"},
+        "decision_schema": {"$ref": "#/$defs/nullable_lower_id"},
+        "max_age_seconds": {"$ref": "#/$defs/nullable_nonnegative_integer"},
+        "depends_on": {"$ref": "#/$defs/gate_id_list"},
+        "transitive_dependencies": {"$ref": "#/$defs/gate_id_list"},
+        "related_gates": {"$ref": "#/$defs/gate_id_list"},
+        "verifier_params_digest": {"$ref": "#/$defs/sha256"},
+        "gate_definition_digest": {"$ref": "#/$defs/sha256"}
+      },
+      "additionalProperties": false
+    },
+    "registry_snapshot": {
+      "type": "object",
+      "required": [
+        "snapshot_contract_version",
+        "registry_id",
+        "source_schema_version",
+        "product_contract_version",
+        "registry_digest_policy",
+        "source_sha256",
+        "canonical_registry_digest",
+        "receipt_contract_digest",
+        "delivery_contract_digest",
+        "workflow_digest",
+        "gate_graph_digest",
+        "docs_projection_reference_digest",
+        "phase_order",
+        "gate_count",
+        "required_gate_count",
+        "group_counts",
+        "class_counts",
+        "evaluation_counts",
+        "phase_projections",
+        "inventory_observed",
+        "state_mutated"
+      ],
+      "properties": {
+        "snapshot_contract_version": {"const": 1},
+        "registry_id": {"$ref": "#/$defs/registry_id"},
+        "source_schema_version": {"const": 2},
+        "product_contract_version": {"const": "3.2"},
+        "registry_digest_policy": {"const": "whole-source-sha256"},
+        "source_sha256": {"$ref": "#/$defs/sha256"},
+        "canonical_registry_digest": {"$ref": "#/$defs/sha256"},
+        "receipt_contract_digest": {"$ref": "#/$defs/sha256"},
+        "delivery_contract_digest": {"$ref": "#/$defs/sha256"},
+        "workflow_digest": {"$ref": "#/$defs/sha256"},
+        "gate_graph_digest": {"$ref": "#/$defs/sha256"},
+        "docs_projection_reference_digest": {"$ref": "#/$defs/sha256"},
+        "phase_order": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/lower_id"},
+          "uniqueItems": true
+        },
+        "gate_count": {"type": "integer", "minimum": 1},
+        "required_gate_count": {"type": "integer", "minimum": 0},
+        "group_counts": {"$ref": "#/$defs/named_count_list"},
+        "class_counts": {"$ref": "#/$defs/named_count_list"},
+        "evaluation_counts": {"$ref": "#/$defs/named_count_list"},
+        "phase_projections": {"$ref": "#/$defs/phase_projection_list"},
+        "inventory_observed": {"const": false},
+        "state_mutated": {"const": false}
+      },
+      "additionalProperties": false
+    }
+  },
+  "x-ai-collab": {
+    "schema_version": 2,
+    "contract_id": "ai-collab-gate-registry-v2",
+    "product_contract_version": "3.2",
+    "source_format": "constrained-yaml",
+    "root_artifacts": ["registry_snapshot", "gate_projection", "phase_projection"],
+    "digest_contract": {
+      "fingerprint_registry_digest_is_exact_whole_source_sha256": true,
+      "canonical_registry_digest_is_semantic_comparison_only": true,
+      "gate_definition_digest_is_projection_identity_only": true,
+      "no_sliced_digest_migration_in_this_contract_slice": true
+    },
+    "loader_invariants": {
+      "aliases_anchors_tags_and_duplicate_mapping_keys_are_rejected": true,
+      "unknown_or_missing_fields_fail_closed": true,
+      "every_gate_id_is_unique_and_declared": true,
+      "dependencies_and_related_gates_are_declared_and_non_self": true,
+      "dependency_graph_is_acyclic_and_never_points_to_later_phase": true,
+      "every_gate_maps_to_exactly_one_workflow_phase": true,
+      "reporting_group_and_workflow_phase_remain_distinct_fields": true,
+      "must_precede_rules_reference_declared_groups_and_hold_by_phase": true,
+      "derived_aggregate_and_revocable_live_semantics_are_explicit": true,
+      "delivery_states_match_policy_delivery_contract": true,
+      "projections_contain_no_passed_or_current_status_claim": true
+    },
+    "deferred_surfaces": [
+      "existing-verifier-loader-and-fingerprint-wiring",
+      "machine-state-current-view-and-immutable-evidence-loading",
+      "gate-current-status-and-dependency-freshness-evaluation",
+      "one-shot-fingerprint-cutover-and-ordered-evidence-rebuild",
+      "permission-and-high-risk-confirmation-matrix",
+      "host-storage-transaction-and-recovery-implementation"
+    ]
+  }
+}

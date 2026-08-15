@@ -1,0 +1,68 @@
+name: AICollab
+options:
+  bundleIdPrefix: com.atomgradient
+  deploymentTarget:
+    macOS: "14.0"
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+targets:
+  AICollabHostAgent:
+    type: tool
+    platform: macOS
+    sources:
+      - path: HostAgent
+    dependencies:
+      - sdk: CFNetwork.framework
+    settings:
+      base:
+        PRODUCT_NAME: AICollabHostAgent
+        PRODUCT_BUNDLE_IDENTIFIER: com.atomgradient.aicollab.host-agent
+        CODE_SIGN_STYLE: Automatic
+  AICollab:
+    type: application
+    platform: macOS
+    sources:
+      - path: App
+      - path: LaunchAgents/com.atomgradient.aicollab.host.plist
+        buildPhase:
+          copyFiles:
+            destination: wrapper
+            subpath: Contents/Library/LaunchAgents
+    dependencies:
+      - target: AICollabHostAgent
+        embed: true
+        codeSign: true
+        copy:
+          destination: wrapper
+          subpath: Contents/Library/LaunchServices
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.atomgradient.aicollab
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: AI Collab
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
+        ENABLE_APP_SANDBOX: NO
+        CODE_SIGN_STYLE: Automatic
+  AICollabTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests
+    dependencies:
+      - target: AICollab
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.atomgradient.aicollab.tests
+        GENERATE_INFOPLIST_FILE: YES
+schemes:
+  AICollab:
+    build:
+      targets:
+        AICollab: all
+        AICollabHostAgent: all
+        AICollabTests: [test]
+    test:
+      targets:
+        - AICollabTests

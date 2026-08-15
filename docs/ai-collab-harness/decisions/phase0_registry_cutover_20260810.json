@@ -1,0 +1,34 @@
+{
+  "schema_version": "phase0_registry_cutover_decision_v1",
+  "decision_id": "PHASE0-REGISTRY-CUTOVER-20260810",
+  "decision": "approved",
+  "source": "user_decision",
+  "decided_on": "2026-08-10",
+  "approved_execution": {
+    "workstream": "registry_dependency_normalization",
+    "registry_change": "declare_exact_recorded_direct_dependency_evidence",
+    "affected_gate_count": 11,
+    "verifier_contract_mirrors_required": true,
+    "implementation_location": "isolated_worktree_branch",
+    "fixed_pushed_commit_peer_review_required": true,
+    "peer_review_admission": "P0=0_and_P1=0",
+    "main_promotion": "fast_forward_only_after_admission",
+    "fingerprint_policy": "preserve_whole_registry_digest",
+    "ordered_rebuild": {
+      "immutable_evidence_count": 13,
+      "derived_current_view_count": 1,
+      "layer_count": 9
+    },
+    "preserve_historical_immutable_evidence": true,
+    "failure_policy": {
+      "stop_immediately": true,
+      "automatic_main_rollback": false
+    }
+  },
+  "not_authorized": [
+    "per_gate_or_sliced_digest_migration",
+    "independent_product_repository_creation",
+    "canonical_workspace_migration",
+    "acceptance_or_release_claim"
+  ]
+}

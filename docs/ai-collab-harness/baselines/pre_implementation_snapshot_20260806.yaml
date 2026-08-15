@@ -1,0 +1,336 @@
+schema_version: 1
+snapshot_id: ai-collab-harness-pre-implementation-20260806
+captured_at: "2026-08-06T14:45:26+0800"
+source: user_decision
+source_date: "2026-08-06"
+purpose: seal_the_reviewed_pre_implementation_state_before_harness_code_changes
+status: recoverable_snapshot_verified
+
+privacy_contract:
+  logical_paths_only: true
+  contains_secret: false
+  contains_pii: false
+  contains_full_runtime_or_session_identity: false
+  contains_private_payload: false
+
+recording_contract:
+  captured_source_head: bbe64e29b5b0d40baa80f30622ac17ac78bb504a
+  captured_source_repo: EdgeStudio
+  snapshot_recording_commit: commit_containing_this_manifest
+  note: the recording commit adds baseline metadata only; captured_source_head remains the reviewed v3.1 design state
+
+repository_invariants:
+  declared_repository_count: 15
+  all_clean: true
+  all_on_declared_branch: true
+  all_upstream_ahead: 0
+  all_upstream_behind: 0
+  all_object_format: sha1
+  any_shallow: false
+  any_alternates: false
+  any_submodules: false
+  any_git_lfs: false
+
+repositories:
+  - name: EdgeStudio
+    logical_path: .
+    origin: git@github.com:AtomGradient/EdgeStudio.git
+    branch: main
+    upstream: origin/main
+    head: bbe64e29b5b0d40baa80f30622ac17ac78bb504a
+    ahead: 0
+    behind: 0
+    clean: true
+    ignored_entries: 605
+  - name: onboarding
+    logical_path: onboarding
+    origin: git@github.com:AtomGradient/onboarding.git
+    branch: main
+    upstream: origin/main
+    head: cfb6c1f144afbdb9c71316cb6506e7a68668862a
+    ahead: 0
+    behind: 0
+    clean: true
+    ignored_entries: 2
+  - name: edge-studio-dev
+    logical_path: edge-studio-dev
+    origin: git@github.com:AtomGradient/edge-studio-dev.git
+    branch: main
+    upstream: origin/main
+    head: a3eff5c02786f089147271bf92e86570d1df0948
+    ahead: 0
+    behind: 0
+    clean: true
+    ignored_entries: 22
+  - name: edge-studio
+    logical_path: edge-studio
+    origin: git@github.com:AtomGradient/edge-studio.git
+    branch: main
+    upstream: origin/main
+    head: 8eb274eacb2d3b52d0905cec713402bcf4c4537a
+    ahead: 0
+    behind: 0
+    clean: true
+    ignored_entries: 0
+  - name: edge-engine
+    logical_path: edge-engine
+    origin: git@github.com:AtomGradient/edge-engine.git
+    branch: main
+    upstream: origin/main
+    head: 9b288c7bd824a8743002e7fd4b88736f49496093
+    ahead: 0
+    behind: 0
+    clean: true
+    ignored_entries: 7
+  - name: edge-kit
+    logical_path: edge-kit
+    origin: git@github.com:AtomGradient/edge-kit.git
+    branch: main
+    upstream: origin/main
+    head: 060b398192ff58a992ceaebf8c6961a7563d4a2a
+    ahead: 0
+    behind: 0
+    clean: true
+    ignored_entries: 10
+  - name: edge-halo
+    logical_path: edge-halo
+    origin: git@github.com:AtomGradient/edge-halo.git
+    branch: main
+    upstream: origin/main
+    head: 9e990744d3b891c902baa2a7903c1b9b918f1d0d
+    ahead: 0
+    behind: 0
+    clean: true
+    ignored_entries: 3
+  - name: edge-halo-binary
+    logical_path: edge-halo-binary
+    origin: git@github.com:AtomGradient/edge-halo-binary.git
+    branch: main
+    upstream: origin/main
+    head: 3b06610571ef9fef71015857e3015c38b9169ddd
+    ahead: 0
+    behind: 0
+    clean: true
+    ignored_entries: 2
+  - name: edge-scaffold
+    logical_path: edge-scaffold
+    origin: git@github.com:AtomGradient/edge-scaffold.git
+    branch: main
+    upstream: origin/main
+    head: 048d179437f3759ad8732a68b04a3df81237d548
+    ahead: 0
+    behind: 0
+    clean: true
+    ignored_entries: 47
+  - name: dogfood-app
+    logical_path: dogfood-app
+    origin: git@github.com:AtomGradient/dogfood-app.git
+    branch: main
+    upstream: origin/main
+    head: 4418426e29c20e5c275e51dea3741893cac693dc
+    ahead: 0
+    behind: 0
+    clean: true
+    ignored_entries: 10
+  - name: edge-developers
+    logical_path: edge-developers
+    origin: git@github.com:AtomGradient/edge-developers.git
+    branch: main
+    upstream: origin/main
+    head: 6874aab7c02316d837d772238c8153dabd97da02
+    ahead: 0
+    behind: 0
+    clean: true
+    ignored_entries: 8
+  - name: edge-roadshow
+    logical_path: edge-roadshow
+    origin: git@github.com:AtomGradient/edge-roadshow.git
+    branch: main
+    upstream: origin/main
+    head: bd7f80b5cf662686ad1f408f3864dd6d4e96a4fd
+    ahead: 0
+    behind: 0
+    clean: true
+    ignored_entries: 5
+  - name: AtomGradientGitHubProfile
+    logical_path: AtomGradientGitHubProfile
+    origin: git@github.com:AtomGradient/.github.git
+    branch: main
+    upstream: origin/main
+    head: 0ddb2fcce9160b384418374909abefae8a063619
+    ahead: 0
+    behind: 0
+    clean: true
+    ignored_entries: 0
+  - name: ai-memory
+    logical_path: ai-memory
+    origin: git@github.com:AtomGradient/ai-memory.git
+    branch: main
+    upstream: origin/main
+    head: a787f15c054ae16fe69fc12b41d6c9c03549fbcc
+    ahead: 0
+    behind: 0
+    clean: true
+    ignored_entries: 0
+  - name: PingAgent
+    logical_path: ../PingAgent
+    origin: git@github.com:AtomGradient/PingAgent.git
+    branch: main
+    upstream: origin/main
+    head: c5bf420edd2f5e27ae53583434817973fe86e00c
+    ahead: 0
+    behind: 0
+    clean: true
+    ignored_entries: 2
+
+tracked_input_digests:
+  algorithm: sha256
+  entries:
+    - repository: EdgeStudio
+      repository_head: bbe64e29b5b0d40baa80f30622ac17ac78bb504a
+      path: AGENTS.md
+      sha256: de4988a522d587911e720fa2d3d351403a8d2ba4a9669c54969ff48d4552bdb5
+    - repository: EdgeStudio
+      repository_head: bbe64e29b5b0d40baa80f30622ac17ac78bb504a
+      path: CLAUDE.md
+      sha256: b3d6dc09b7ac1481e8a75895acca38d8fb648a3126a8026e4b16d3ef274fdb59
+    - repository: onboarding
+      repository_head: cfb6c1f144afbdb9c71316cb6506e7a68668862a
+      path: manifests/repos.yaml
+      sha256: c2f7ce4f4a766ac5cfce938b1716d637a8604767f9379f0b3fc70d30d2c47582
+    - repository: EdgeStudio
+      repository_head: bbe64e29b5b0d40baa80f30622ac17ac78bb504a
+      path: docs/ai-collab-harness/README.md
+      sha256: 8e47302e33d8a345b046fee9767a367e857dd5d454b6401b076a48265e7e5975
+    - repository: EdgeStudio
+      repository_head: bbe64e29b5b0d40baa80f30622ac17ac78bb504a
+      path: docs/ai-collab-harness/product_architecture.md
+      sha256: 7303ad7122c259b59805a711d47fdd5a27e83281dcd606f8e44e1ea6db4afef3
+    - repository: EdgeStudio
+      repository_head: bbe64e29b5b0d40baa80f30622ac17ac78bb504a
+      path: docs/ai-collab-harness/edgestudio_integration.md
+      sha256: cad9e5d854af910342b038ebcecb983a519e23cfc4f9522ed02da08288d70e38
+    - repository: EdgeStudio
+      repository_head: bbe64e29b5b0d40baa80f30622ac17ac78bb504a
+      path: docs/ai-collab-harness/edgestudio_gates.yaml
+      sha256: 11003f9cae7639f32c8032ace77f11111b855c9dafd3049fd83d0dff133fe1c3
+
+toolchain_observation:
+  os: macOS 26.6
+  os_build: 25G72
+  architecture: arm64
+  git: 2.55.0
+  python: 3.14.4
+  xcode: 26.4
+  xcode_build: 17E192
+  iterm2: 3.4.22
+  codex_cli: 0.146.0
+  claude_code: 2.1.223
+
+storage_observation:
+  data_volume_capacity: approximately_3_6_tib
+  data_volume_available: approximately_2_0_tib
+  external_backup_volume_detected: false
+  selected_backup_destination:
+    logical_path: codes_workspace_sibling/HarnessPreImplementationSnapshot-20260806
+    outside_canonical_workspace: true
+    same_data_volume_as_source: true
+    filevault_enabled: true
+    directory_mode: "0700"
+    protects_against_refactor_or_workspace_corruption: true
+    protects_against_full_volume_loss: false
+  measured_directories:
+    - logical_path: .ai-mailbox
+      entire_directory_size_kib: 132139748
+      classification: mixed_transport_and_sensitive_local_evidence
+      child_policy:
+        inbox_sent_outbox: exclude_ephemeral_transport
+        refs: preserve_as_sensitive_local_evidence
+    - logical_path: tests
+      entire_directory_size_kib: 14366500
+      ignored_entry_count: 422
+      classification: inspect_for_irreplaceable_device_outputs
+    - logical_path: RealData
+      entire_directory_size_kib: 1742868
+      ignored_entry_count: 33
+      classification: private_encrypted_archive_required_after_review
+    - logical_path: logs
+      entire_directory_size_kib: 514292
+      classification: exclude_unless_specific_evidence_is_declared
+    - logical_path: docs
+      entire_directory_size_kib: 267760
+      ignored_entry_count: 118
+      classification: inspect_ignored_outputs_only
+    - logical_path: .cache
+      entire_directory_size_kib: 261052
+      classification: exclude_reproducible_cache
+    - logical_path: .venv
+      entire_directory_size_kib: 9652
+      classification: exclude_reproducible_environment
+    - logical_path: dist
+      entire_directory_size_kib: 5624
+      classification: exclude_reproducible_build_output
+    - logical_path: experiments
+      entire_directory_size_kib: 472
+      ignored_entry_count: 3
+      classification: inspect_before_archive
+
+unmanaged_scope:
+  automatically_adopted: false
+  note: unmanaged repositories or directories may be backed up separately but remain outside Harness acceptance unless the user explicitly opts them in
+
+backup_completion:
+  git_remote_recovery:
+    status: verified_for_recorded_heads
+  offline_git_bundles:
+    status: verified
+    required_repository_count: 15
+    bundle_count: 15
+    bundle_verify_passed: true
+    exact_sha_non_canonical_restore_passed: true
+  private_non_git_archive:
+    status: verified_filevault_protected_same_volume
+    selected_repository_count: 8
+    selected_file_count: 25133
+    archive_count: 9
+    source_restore_content_digest_match: true
+  sensitive_local_evidence_archive:
+    source: ai_mailbox_refs
+    file_count: 696506
+    logical_bytes: 267624341738
+    archive_bytes: 92815038071
+    content_manually_inspected: false
+    content_handling: automated_hash_only_no_content_emitted
+    compressed_stream_test_passed: true
+    non_canonical_extract_passed: true
+    source_restore_path_set_match: true
+    source_restore_content_digest_match: true
+    path_set_sha256: 5bfbadb1e614ea0d4936075a8f17159f89a270ece353923081b1b47711c654c0
+    aggregate_sha256: c8b84e847f4500b97947efaf21d90a5e474801e4c811a38441066cb8ccdaeb2c
+    protection: filevault_and_0700_acl
+  archive_checksums:
+    status: verified
+    algorithm: sha256
+    artifact_count: 45
+    manifest: SHA256SUMS
+    self_reference_policy: checksum_manifest_digest_is_not_embedded_in_a_file_it_covers
+  restore_drill:
+    status: passed
+    must_use_non_canonical_temporary_directory: true
+    exact_git_head_and_clean_worktree_passed: true
+    non_git_extract_and_content_match_passed: true
+  external_receipt:
+    logical_path: codes_workspace_sibling/HarnessPreImplementationSnapshot-20260806/verification/restore_receipt.yaml
+    sha256: 00d37c83c7a40b5e6b500cfb6e759d9d901617618af40bbb5a345fcba999e6fa
+  disaster_recovery_limitation:
+    full_data_volume_loss_covered: false
+  completion_state_when_all_pass: recoverable_snapshot_verified
+
+stage_gate:
+  current_state: recoverable_snapshot_verified
+  next_allowed_action: enter_immediate_legacy_delivery_failure_path_verification
+  released_by_this_gate:
+    - immediate_legacy_delivery_failure_path_verification
+  still_requires_independent_user_authorization:
+    - independent_product_repository_creation
+    - canonical_workspace_migration

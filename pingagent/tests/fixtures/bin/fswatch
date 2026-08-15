@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Deterministic watcher test double: emit no events and let the watcher exit
+# after its startup inbox scan.
+exit 0

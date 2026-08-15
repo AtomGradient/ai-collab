@@ -1,0 +1,305 @@
+#!/usr/bin/env bash
+# Read-only diagnostics for PingAgent project mailboxes.
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: ai-ping doctor
+       ai-pane-doctor
+
+Runs read-only checks for nested mailboxes, pane registration, watchers,
+blackhole inboxes, spoofed sender history, injection errors, fswatch, and
+.gitignore hygiene. Exits 0 when all checks are OK; exits 1 on any WARN/FAIL.
+EOF
+}
+
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+  "") ;;
+  *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
+esac
+
+WARNINGS=0
+FAILURES=0
+
+print_result() {
+  local level="$1" name="$2" detail="$3" fix="$4"
+  printf '%-4s %s - %s\n' "$level" "$name" "$detail"
+  printf '     fix: %s\n' "$fix"
+  case "$level" in
+    WARN) WARNINGS=$((WARNINGS + 1)) ;;
+    FAIL) FAILURES=$((FAILURES + 1)) ;;
+  esac
+}
+
+extract_field() {
+  local file="$1" key="$2"
+  sed -n "1,30{s/^${key}: *\\(.*\\) *$/\\1/p;}" "$file" 2>/dev/null | head -n 1
+}
+
+json_session_uuid() {
+  local file="$1"
+  sed -n 's/.*"session_uuid": *"\([^"]*\)".*/\1/p' "$file" 2>/dev/null | head -n 1
+}
+
+roles_for_mailbox() {
+  local mailbox="$1" f role roles
+  roles=""
+  for f in "$mailbox/.panes/"*.json; do
+    [[ -f "$f" ]] || continue
+    role=$(basename "$f" .json)
+    roles="${roles:+$roles }$role"
+  done
+  printf '%s\n' "$roles"
+}
+
+contains_word() {
+  local needle="$1" words="$2" word
+  for word in $words; do
+    [[ "$word" == "$needle" ]] && return 0
+  done
+  return 1
+}
+
+append_word_unique() {
+  local word="$1" words="$2"
+  if contains_word "$word" "$words"; then
+    printf '%s\n' "$words"
+  else
+    printf '%s\n' "${words:+$words }$word"
+  fi
+}
+
+find_mailboxes() {
+  local dir="$PWD"
+  MAILBOXES=()
+  MAILBOX_COUNT=0
+  while [[ "$dir" != "/" && "$dir" != "" ]]; do
+    if [[ -d "$dir/.ai-mailbox" ]]; then
+      MAILBOXES[$MAILBOX_COUNT]="$dir/.ai-mailbox"
+      MAILBOX_COUNT=$((MAILBOX_COUNT + 1))
+    fi
+    dir="$(dirname "$dir")"
+  done
+}
+
+SESSION_UUID=""
+if [[ -n "${ITERM_SESSION_ID:-}" ]]; then
+  SESSION_UUID="${ITERM_SESSION_ID##*:}"
+  if [[ "$SESSION_UUID" == "$ITERM_SESSION_ID" || -z "$SESSION_UUID" ]]; then
+    SESSION_UUID=""
+  fi
+fi
+
+find_mailboxes
+
+SELECTED_MAILBOX=""
+SELECTED_ROLE=""
+if [[ -n "$SESSION_UUID" ]]; then
+  for ((i = 0; i < MAILBOX_COUNT; i++)); do
+    mailbox="${MAILBOXES[$i]}"
+    for pane_file in "$mailbox/.panes/"*.json; do
+      [[ -f "$pane_file" ]] || continue
+      if [[ "$(json_session_uuid "$pane_file")" == "$SESSION_UUID" ]]; then
+        SELECTED_MAILBOX="$mailbox"
+        SELECTED_ROLE=$(basename "$pane_file" .json)
+        break
+      fi
+    done
+    [[ -n "$SELECTED_MAILBOX" ]] && break
+  done
+fi
+if [[ -z "$SELECTED_MAILBOX" && "$MAILBOX_COUNT" -gt 0 ]]; then
+  SELECTED_MAILBOX="${MAILBOXES[0]}"
+fi
+
+printf 'PingAgent doctor (cwd: %s)\n' "$PWD"
+
+# 1. Mailbox discovery and selected mailbox.
+if [[ "$MAILBOX_COUNT" -eq 0 ]]; then
+  print_result FAIL "1 mailbox discovery" "no .ai-mailbox found upward" "cd to a registered project or run ai-pane-register <role> in the project root"
+else
+  detail="$MAILBOX_COUNT mailbox(es) upward"
+  if [[ -n "$SELECTED_MAILBOX" ]]; then
+    detail="$detail; selected: $SELECTED_MAILBOX"
+    [[ -n "$SELECTED_ROLE" ]] && detail="$detail (current role: $SELECTED_ROLE)"
+  fi
+  if [[ "$MAILBOX_COUNT" -gt 1 ]]; then
+    print_result WARN "1 mailbox discovery" "$detail" "make sure both panes registered from the same project root; nested mailboxes are allowed but easy to confuse"
+  else
+    print_result OK "1 mailbox discovery" "$detail" "none"
+  fi
+  for ((i = 0; i < MAILBOX_COUNT; i++)); do
+    mailbox="${MAILBOXES[$i]}"
+    roles=$(roles_for_mailbox "$mailbox")
+    [[ -n "$roles" ]] || roles="<none>"
+    printf '     mailbox: %s roles: %s\n' "$mailbox" "$roles"
+  done
+fi
+
+# 2. Current iTerm session registration.
+if [[ -z "${ITERM_SESSION_ID:-}" ]]; then
+  print_result FAIL "2 current session" "ITERM_SESSION_ID is not set" "run from the registered iTerm2 pane; do not guess --from"
+elif [[ -z "$SESSION_UUID" ]]; then
+  print_result FAIL "2 current session" "cannot parse UUID from ITERM_SESSION_ID=$ITERM_SESSION_ID" "run inside a normal iTerm2 pane and re-register"
+elif [[ -z "$SELECTED_ROLE" ]]; then
+  print_result FAIL "2 current session" "session $SESSION_UUID is not registered in any upward mailbox" "run ai-pane-register <role> from the intended project root"
+else
+  print_result OK "2 current session" "session $SESSION_UUID registered as '$SELECTED_ROLE'" "none"
+fi
+
+# 3. Watcher pid/orphan state for each registered role.
+watcher_issues=""
+watcher_count=0
+for ((i = 0; i < MAILBOX_COUNT; i++)); do
+  mailbox="${MAILBOXES[$i]}"
+  for pane_file in "$mailbox/.panes/"*.json; do
+    [[ -f "$pane_file" ]] || continue
+    role=$(basename "$pane_file" .json)
+    watcher_count=$((watcher_count + 1))
+    pid_file="$mailbox/.watch-$role.pid"
+    pid=""
+    [[ -f "$pid_file" ]] && pid=$(sed -n '1p' "$pid_file" 2>/dev/null || true)
+    pattern="ai-collab-watch $role $mailbox"
+    matches=$(pgrep -f "$pattern" 2>/dev/null || true)
+    if [[ -z "$pid" ]]; then
+      if [[ -n "$matches" ]]; then
+        watcher_issues="${watcher_issues}${watcher_issues:+; }$mailbox role=$role has orphan watcher(s) without pid file: $(printf '%s' "$matches" | tr '\n' ' ')"
+      else
+        watcher_issues="${watcher_issues}${watcher_issues:+; }$mailbox role=$role has no watcher pid"
+      fi
+    elif ! kill -0 "$pid" 2>/dev/null; then
+      watcher_issues="${watcher_issues}${watcher_issues:+; }$mailbox role=$role pid $pid is not running"
+    fi
+  done
+done
+if [[ "$watcher_count" -eq 0 ]]; then
+  print_result WARN "3 watcher state" "no registered roles found" "run ai-pane-register <role> in each pane"
+elif [[ -n "$watcher_issues" ]]; then
+  print_result WARN "3 watcher state" "$watcher_issues" "re-run ai-pane-register <role> for affected roles; use ai-pane-unregister <role> for intentional cleanup"
+else
+  print_result OK "3 watcher state" "$watcher_count registered watcher(s) have live pid files" "none"
+fi
+
+# 4. Duplicate/split registrations.
+all_roles=""
+duplicate_roles=""
+mailboxes_with_roles=0
+for ((i = 0; i < MAILBOX_COUNT; i++)); do
+  mailbox="${MAILBOXES[$i]}"
+  roles=$(roles_for_mailbox "$mailbox")
+  [[ -n "$roles" ]] && mailboxes_with_roles=$((mailboxes_with_roles + 1))
+  for role in $roles; do
+    if contains_word "$role" "$all_roles"; then
+      duplicate_roles=$(append_word_unique "$role" "$duplicate_roles")
+    else
+      all_roles=$(append_word_unique "$role" "$all_roles")
+    fi
+  done
+done
+if [[ -n "$duplicate_roles" ]]; then
+  print_result WARN "4 registration split" "duplicate role(s) across ancestor mailboxes: $duplicate_roles" "unregister stale roles or re-register both panes from the same project root"
+elif [[ "$mailboxes_with_roles" -gt 1 ]]; then
+  print_result WARN "4 registration split" "registered roles are spread across $mailboxes_with_roles ancestor mailboxes" "choose one project root and re-run ai-pane-register for every pane there"
+else
+  print_result OK "4 registration split" "no duplicate/split ancestor registrations detected" "none"
+fi
+
+known_roles="$all_roles"
+for ((i = 0; i < MAILBOX_COUNT; i++)); do
+  mailbox="${MAILBOXES[$i]}"
+  for watcher_state in "$mailbox"/.watch-*.log "$mailbox"/.watch-*.pid; do
+    [[ -e "$watcher_state" || -L "$watcher_state" ]] || continue
+    base=$(basename "$watcher_state")
+    role=${base#.watch-}
+    role=${role%.*}
+    [[ -n "$role" && "$role" != "$base" ]] || continue
+    known_roles=$(append_word_unique "$role" "$known_roles")
+  done
+done
+
+# 5. Undispatched inbox messages for unregistered roles.
+blackholes=""
+for ((i = 0; i < MAILBOX_COUNT; i++)); do
+  mailbox="${MAILBOXES[$i]}"
+  [[ -d "$mailbox/inbox" ]] || continue
+  for inbox_dir in "$mailbox/inbox/"*; do
+    [[ -d "$inbox_dir" ]] || continue
+    role=$(basename "$inbox_dir")
+    [[ -f "$mailbox/.panes/$role.json" ]] && continue
+    count=0
+    for msg in "$inbox_dir"/*.md; do
+      [[ -f "$msg" ]] || continue
+      [[ -f "$msg.dispatched" ]] && continue
+      count=$((count + 1))
+    done
+    if [[ "$count" -gt 0 ]]; then
+      blackholes="${blackholes}${blackholes:+; }$mailbox inbox/$role has $count undispatched message(s) but no registered pane"
+    fi
+  done
+done
+if [[ -n "$blackholes" ]]; then
+  print_result WARN "5 inbox blackholes" "$blackholes" "register that role in the intended pane, resend to the real role, or archive the stale inbox after confirming delivery"
+else
+  print_result OK "5 inbox blackholes" "no undispatched messages for unregistered roles" "none"
+fi
+
+# 6. Sent messages from roles never registered in upward mailboxes.
+spoofed=""
+for ((i = 0; i < MAILBOX_COUNT; i++)); do
+  mailbox="${MAILBOXES[$i]}"
+  [[ -d "$mailbox/sent" ]] || continue
+  for msg in "$mailbox/sent/"*.md; do
+    [[ -f "$msg" ]] || continue
+    sender=$(extract_field "$msg" from)
+    [[ -n "$sender" ]] || continue
+    if ! contains_word "$sender" "$known_roles"; then
+      spoofed="${spoofed}${spoofed:+; }$(basename "$msg") from=$sender"
+    fi
+  done
+done
+if [[ -n "$spoofed" ]]; then
+  print_result WARN "6 sent sender history" "sent history contains sender role(s) with no current pane or watcher history: $spoofed" "avoid explicit --from; resend future messages from the registered pane role"
+else
+  print_result OK "6 sent sender history" "no sent messages from unknown sender roles found" "none"
+fi
+
+# 7. Injection errors in watcher logs.
+log_hits=""
+for ((i = 0; i < MAILBOX_COUNT; i++)); do
+  mailbox="${MAILBOXES[$i]}"
+  for log_file in "$mailbox"/.watch-*.log; do
+    [[ -f "$log_file" ]] || continue
+    if tail -n 80 "$log_file" 2>/dev/null | grep -E 'inject failed|session not found' >/dev/null 2>&1; then
+      log_hits="${log_hits}${log_hits:+; }$log_file"
+    fi
+  done
+done
+if [[ -n "$log_hits" ]]; then
+  print_result WARN "7 watcher log tail" "recent inject/session errors in: $log_hits" "re-run ai-pane-register <role>; if it persists, check iTerm2 session and macOS Automation permission"
+else
+  print_result OK "7 watcher log tail" "no recent inject failed/session not found entries" "none"
+fi
+
+# 8. fswatch availability.
+if command -v fswatch >/dev/null 2>&1; then
+  print_result OK "8 fswatch" "fswatch installed; watcher can use event-driven mode" "none"
+else
+  print_result WARN "8 fswatch" "fswatch not found; watcher falls back to polling" "brew install fswatch for event-driven delivery"
+fi
+
+# 9. .gitignore hygiene.
+if git_root=$(git rev-parse --show-toplevel 2>/dev/null); then
+  if [[ -f "$git_root/.gitignore" ]] && grep -qE '^\.ai-mailbox/?$' "$git_root/.gitignore" 2>/dev/null; then
+    print_result OK "9 gitignore" ".ai-mailbox/ is ignored in $git_root/.gitignore" "none"
+  else
+    print_result WARN "9 gitignore" ".ai-mailbox/ is not ignored in git root $git_root" "echo '.ai-mailbox/' >> '$git_root/.gitignore'"
+  fi
+else
+  print_result OK "9 gitignore" "not inside a git repository" "none"
+fi
+
+printf '\nSummary: %s warning(s), %s failure(s)\n' "$WARNINGS" "$FAILURES"
+if [[ "$WARNINGS" -gt 0 || "$FAILURES" -gt 0 ]]; then
+  exit 1
+fi

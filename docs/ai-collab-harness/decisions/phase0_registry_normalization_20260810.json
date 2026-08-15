@@ -1,0 +1,26 @@
+{
+  "schema_version": "phase0_registry_normalization_decision_v1",
+  "decision_id": "PHASE0-REGISTRY-NORMALIZATION-20260810",
+  "decision": "approved",
+  "source": "user_decision",
+  "decided_on": "2026-08-10",
+  "approved_scope": {
+    "phase": "phase-0",
+    "first_workstream": "registry_dependency_normalization",
+    "ordered_steps": [
+      "read_only_dependency_graph_audit",
+      "read_only_evidence_invalidation_blast_radius_audit",
+      "fixed_peer_reviewed_registry_migration_plan",
+      "ordered_evidence_rebuild_plan"
+    ],
+    "preserve_current_receipts_during_audit": true,
+    "registry_or_state_mutation_before_plan_review": false
+  },
+  "not_yet_authorized": [
+    "registry_cutover",
+    "current_receipt_invalidation",
+    "formal_evidence_rebuild",
+    "independent_product_repository_creation",
+    "canonical_workspace_migration"
+  ]
+}

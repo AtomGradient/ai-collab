@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "profiles": [
+    {
+      "profile_id": "runtime-profile.inert",
+      "executable": "/usr/bin/tail",
+      "arguments": ["-f", "/dev/null"],
+      "working_directory": ".",
+      "process_match": "tail",
+      "accepts_typed_delivery": false,
+      "vendor_lifecycle": null,
+      "safe_close": {
+        "idle_detection": "always",
+        "drain_sequence": []
+      },
+      "startup_gate": null
+    },
+    {
+      "profile_id": "runtime-profile.codex-dogfood",
+      "executable": "codex",
+      "arguments": ["--dangerously-bypass-approvals-and-sandbox", "--no-alt-screen"],
+      "working_directory": "bundle/EdgeStudio",
+      "process_match": "codex",
+      "accepts_typed_delivery": true,
+      "vendor_lifecycle": {
+        "adapter_id": "vendor-lifecycle.codex-cli-v1",
+        "continuity_binding_ref": "vendor-session-slot:primary"
+      },
+      "safe_close": {
+        "idle_detection": "always",
+        "drain_sequence": []
+      },
+      "startup_gate": {
+        "scope": "harness_verified_workspace",
+        "prompt_pattern": "(?s)You\\s+are\\s+in.*Do\\s+you\\s+trust\\s+the\\s+contents\\s+of\\s+this\\s+directory\\?.*1\\.\\s+Yes,\\s+continue.*2\\.\\s+No,\\s+quit",
+        "ready_pattern": "(?m)^\\s*›(?!\\s*\\d+\\.).*$",
+        "confirm_sequence": ["1", "\r"],
+        "requires_workspace_path": true,
+        "timeout_seconds": 60
+      }
+    },
+    {
+      "profile_id": "runtime-profile.claude-dogfood",
+      "executable": "claude",
+      "arguments": ["--dangerously-skip-permissions", "--system-prompt", "."],
+      "working_directory": "bundle/EdgeStudio",
+      "process_match": "claude",
+      "accepts_typed_delivery": true,
+      "vendor_lifecycle": {
+        "adapter_id": "vendor-lifecycle.claude-cli-v1",
+        "continuity_binding_ref": "vendor-session-slot:primary"
+      },
+      "safe_close": {
+        "idle_detection": "always",
+        "drain_sequence": []
+      },
+      "startup_gate": {
+        "scope": "harness_verified_workspace",
+        "prompt_pattern": "(?s)Accessing\\s+workspace:.*Quick\\s+safety\\s+check:.*1\\.\\s+Yes,\\s+I\\s+trust\\s+this\\s+folder.*2\\.\\s+No,\\s+exit",
+        "ready_pattern": "(?m)^\\s*❯\\s*$",
+        "confirm_sequence": ["1", "\r"],
+        "requires_workspace_path": true,
+        "timeout_seconds": 60
+      }
+    }
+  ]
+}

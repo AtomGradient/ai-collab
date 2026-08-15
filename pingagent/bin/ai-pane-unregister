@@ -1,0 +1,207 @@
+#!/usr/bin/env bash
+# ai-pane-unregister [<role>]
+# 停止本 pane 的 watcher，清理注册文件。
+# 不传 role 时，从当前 iTerm2 session id 自动反查。
+# 不动 inbox/sent/dispatched 文件（消息历史保留）。
+set -euo pipefail
+
+ROLE="${1:-}"
+
+if [[ -n "$ROLE" && ! "$ROLE" =~ ^[a-z0-9_-]+$ ]]; then
+  echo "Role must be lowercase alphanum, underscore, or dash (got: $ROLE)" >&2
+  exit 1
+fi
+if [[ "$ROLE" == "doctor" ]]; then
+  echo "Role 'doctor' is reserved for 'ai-ping doctor'" >&2
+  exit 1
+fi
+
+find_nearest_mailbox() {
+  local dir="$PWD"
+  while [[ "$dir" != "/" && "$dir" != "" ]]; do
+    if [[ -d "$dir/.ai-mailbox" ]]; then
+      printf '%s\n' "$dir/.ai-mailbox"
+      return 0
+    fi
+    dir="$(dirname "$dir")"
+  done
+  return 1
+}
+
+pane_file_has_session() {
+  local pane_file="$1" session_uuid="$2"
+  [[ -f "$pane_file" ]] && grep -q "\"session_uuid\": *\"$session_uuid\"" "$pane_file" 2>/dev/null
+}
+
+pane_session_uuid() {
+  local pane_file="$1"
+  sed -n 's/.*"session_uuid": *"\([^"]*\)".*/\1/p' "$pane_file" 2>/dev/null | head -n 1
+}
+
+role_for_session_in_mailbox() {
+  local mailbox="$1" session_uuid="$2" f
+  DETECTED_ROLE=""
+  for f in "$mailbox/.panes/"*.json; do
+    [[ -f "$f" ]] || continue
+    if pane_file_has_session "$f" "$session_uuid"; then
+      DETECTED_ROLE=$(basename "$f" .json)
+      return 0
+    fi
+  done
+  return 1
+}
+
+select_mailbox_for_current_session() {
+  local dir="$PWD" mailbox
+  while [[ "$dir" != "/" && "$dir" != "" ]]; do
+    mailbox="$dir/.ai-mailbox"
+    if [[ -d "$mailbox" ]] && role_for_session_in_mailbox "$mailbox" "$SESSION_UUID"; then
+      MAILBOX="$mailbox"
+      return 0
+    fi
+    dir="$(dirname "$dir")"
+  done
+  return 1
+}
+
+select_mailbox_for_role() {
+  local dir mailbox
+  if [[ -n "$SESSION_UUID" ]]; then
+    dir="$PWD"
+    while [[ "$dir" != "/" && "$dir" != "" ]]; do
+      mailbox="$dir/.ai-mailbox"
+      if [[ -d "$mailbox" ]] && pane_file_has_session "$mailbox/.panes/$ROLE.json" "$SESSION_UUID"; then
+        MAILBOX="$mailbox"
+        return 0
+      fi
+      dir="$(dirname "$dir")"
+    done
+  fi
+
+  dir="$PWD"
+  while [[ "$dir" != "/" && "$dir" != "" ]]; do
+    mailbox="$dir/.ai-mailbox"
+    if [[ -d "$mailbox" && -f "$mailbox/.panes/$ROLE.json" ]]; then
+      MAILBOX="$mailbox"
+      return 0
+    fi
+    dir="$(dirname "$dir")"
+  done
+
+  MAILBOX="$NEAREST_MAILBOX"
+  return 0
+}
+
+print_mailbox_candidates() {
+  local dir="$PWD" mailbox f role_name roles
+  while [[ "$dir" != "/" && "$dir" != "" ]]; do
+    mailbox="$dir/.ai-mailbox"
+    if [[ -d "$mailbox" ]]; then
+      printf '  %s' "$mailbox" >&2
+      roles=""
+      for f in "$mailbox/.panes/"*.json; do
+        [[ -f "$f" ]] || continue
+        role_name=$(basename "$f" .json)
+        roles="${roles:+$roles }$role_name"
+      done
+      [[ -n "$roles" ]] && printf ' (roles: %s)' "$roles" >&2
+      printf '\n' >&2
+    fi
+    dir="$(dirname "$dir")"
+  done
+}
+
+SESSION_UUID=""
+if [[ -n "${ITERM_SESSION_ID:-}" ]]; then
+  SESSION_UUID="${ITERM_SESSION_ID##*:}"
+  if [[ "$SESSION_UUID" == "$ITERM_SESSION_ID" ]]; then
+    SESSION_UUID=""
+  fi
+fi
+
+NEAREST_MAILBOX=$(find_nearest_mailbox || true)
+MAILBOX=""
+DETECTED_ROLE=""
+
+if [[ -z "$NEAREST_MAILBOX" ]]; then
+  echo "No .ai-mailbox/ found upward from $PWD" >&2
+  exit 1
+fi
+
+# 自动检测 role（从当前 ITERM_SESSION_ID）
+if [[ -z "$ROLE" ]]; then
+  if [[ -z "$SESSION_UUID" ]] || ! select_mailbox_for_current_session; then
+    echo "Cannot auto-detect role in any .ai-mailbox upward from $PWD. Either:" >&2
+    echo "  1) pass <role> explicitly: ai-pane-unregister <role>" >&2
+    echo "  2) run from the same iTerm2 pane that ran ai-pane-register" >&2
+    echo "" >&2
+    echo "Currently registered:" >&2
+    print_mailbox_candidates
+    exit 1
+  fi
+  ROLE="$DETECTED_ROLE"
+  echo "Auto-detected role: $ROLE"
+else
+  select_mailbox_for_role
+fi
+
+if [[ "$MAILBOX" != "$NEAREST_MAILBOX" ]]; then
+  echo "Note: using selected registered mailbox:" >&2
+  echo "  $MAILBOX" >&2
+  echo "  skipped nearer mailbox: $NEAREST_MAILBOX" >&2
+fi
+
+PID_FILE="$MAILBOX/.watch-$ROLE.pid"
+PANE_FILE="$MAILBOX/.panes/$ROLE.json"
+
+if [[ -n "$SESSION_UUID" && -f "$PANE_FILE" ]]; then
+  TARGET_SESSION_UUID=$(pane_session_uuid "$PANE_FILE")
+  if [[ -n "$TARGET_SESSION_UUID" && "$TARGET_SESSION_UUID" != "$SESSION_UUID" ]]; then
+    echo "WARNING: unregistering a pane that is NOT this one." >&2
+    echo "  current session: $SESSION_UUID" >&2
+    echo "  target session:  $TARGET_SESSION_UUID" >&2
+    echo "  target pane:     $PANE_FILE" >&2
+  fi
+fi
+
+did_anything=false
+
+# 1. Kill watcher via PID file（连同子进程 fswatch）
+if [[ -f "$PID_FILE" ]]; then
+  did_anything=true
+  PID=$(cat "$PID_FILE" 2>/dev/null || echo "")
+  if [[ -n "$PID" ]] && kill -0 "$PID" 2>/dev/null; then
+    # 先杀子进程（fswatch），再杀父
+    pkill -P "$PID" 2>/dev/null || true
+    kill "$PID" 2>/dev/null || true
+    sleep 0.3
+    if kill -0 "$PID" 2>/dev/null; then
+      kill -9 "$PID" 2>/dev/null || true
+      pkill -9 -P "$PID" 2>/dev/null || true
+    fi
+    echo "Stopped watcher (pid $PID)"
+  else
+    echo "Watcher PID file stale (pid $PID not running) — cleaning"
+  fi
+  rm -f "$PID_FILE"
+fi
+
+# 2. 兜底：杀任何匹配 cmdline 的孤儿 watcher
+if pkill -f "ai-collab-watch $ROLE $MAILBOX" 2>/dev/null; then
+  echo "Killed orphan watcher(s) matching 'ai-collab-watch $ROLE $MAILBOX'"
+  did_anything=true
+fi
+
+# 3. 删 pane 注册
+if [[ -f "$PANE_FILE" ]]; then
+  rm -f "$PANE_FILE"
+  echo "Removed $PANE_FILE"
+  did_anything=true
+fi
+
+if ! $did_anything; then
+  echo "Nothing to do: '$ROLE' was not registered."
+fi
+
+echo "Unregistered: $ROLE"
+echo "(Inbox/sent/dispatched files preserved. Delete .ai-mailbox/ manually if you want a clean slate.)"

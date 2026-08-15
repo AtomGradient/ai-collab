@@ -1,0 +1,143 @@
+#!/usr/bin/env python3
+"""Exact-session typed delivery bridge for AI Collaboration Harness.
+
+This command deliberately does not resolve legacy roles or mailbox paths.  The
+Harness presentation driver supplies one already-fenced iTerm session and this
+bridge returns transport evidence only after iTerm confirms exact injection.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+from typing import Any
+
+
+OPAQUE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+MAX_INPUT_BYTES = 1024 * 1024
+MAX_NOTIFICATION_BYTES = 128 * 1024
+OSASCRIPT = os.environ.get("AI_HARNESS_OSASCRIPT", "/usr/bin/osascript")
+SCRIPT = r'''
+on run argv
+  if (count of argv) is not 2 then return "invalid_arguments"
+  set wantedSession to item 1 of argv
+  set notificationText to item 2 of argv
+  set carriageReturn to (ASCII character 13)
+  tell application "iTerm2"
+    repeat with candidateWindow in windows
+      repeat with candidateTab in tabs of candidateWindow
+        repeat with candidateSession in sessions of candidateTab
+          if unique id of candidateSession is wantedSession then
+            tell candidateSession
+              write text notificationText newline false
+              delay 0.5
+              write text carriageReturn newline false
+            end tell
+            return "ok"
+          end if
+        end repeat
+      end repeat
+    end repeat
+  end tell
+  return "session_not_found"
+end run
+'''
+
+
+class TransportError(ValueError):
+    pass
+
+
+def canonical_bytes(value: Any) -> bytes:
+    return json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+
+
+def _read_request() -> dict[str, Any]:
+    raw = sys.stdin.buffer.read(MAX_INPUT_BYTES + 1)
+    if not raw or len(raw) > MAX_INPUT_BYTES:
+        raise TransportError("request size is invalid")
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TransportError("request is invalid JSON") from exc
+    fields = {
+        "transport_contract_version",
+        "operation",
+        "delivery_id",
+        "transport_attempt_id",
+        "session_id",
+        "notification",
+        "payload_digest",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        raise TransportError("request fields differ")
+    if (
+        value["transport_contract_version"] != 1
+        or value["operation"] != "deliver_exact_session"
+        or any(
+            not isinstance(value[field], str)
+            or OPAQUE_RE.fullmatch(value[field]) is None
+            for field in ("delivery_id", "transport_attempt_id", "session_id")
+        )
+        or not isinstance(value["notification"], str)
+        or not value["notification"]
+        or len(value["notification"].encode("utf-8")) > MAX_NOTIFICATION_BYTES
+        or not isinstance(value["payload_digest"], str)
+        or SHA256_RE.fullmatch(value["payload_digest"]) is None
+    ):
+        raise TransportError("request values differ")
+    return value
+
+
+def main() -> int:
+    try:
+        request = _read_request()
+        completed = subprocess.run(
+            (
+                OSASCRIPT,
+                "-e",
+                SCRIPT,
+                "--",
+                request["session_id"],
+                request["notification"],
+            ),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+        if completed.returncode != 0 or completed.stdout.strip() != "ok":
+            raise TransportError("exact session injection was not confirmed")
+        evidence = {
+            "transport_contract_version": 1,
+            "delivery_id": request["delivery_id"],
+            "transport_attempt_id": request["transport_attempt_id"],
+            "payload_digest": request["payload_digest"],
+            "session_identity_sha256": hashlib.sha256(
+                request["session_id"].encode("utf-8")
+            ).hexdigest(),
+            "injection_confirmed": True,
+        }
+        result = {
+            **evidence,
+            "transport_evidence_digest": hashlib.sha256(
+                canonical_bytes(evidence)
+            ).hexdigest(),
+        }
+        sys.stdout.buffer.write(canonical_bytes(result) + b"\n")
+        return 0
+    except (OSError, subprocess.SubprocessError, TransportError):
+        print("typed Harness delivery failed", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

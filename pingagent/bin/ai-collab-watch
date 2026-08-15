@@ -1,0 +1,190 @@
+#!/usr/bin/env bash
+# ai-collab-watch <role> <mailbox-dir>
+# 监听 .ai-mailbox/inbox/<role>/ 的新消息文件，用 osascript 把短通知注入本 pane。
+# 通常由 ai-pane-register 自动启动，不需要手动跑。
+set -euo pipefail
+
+ROLE="${1:?usage: ai-collab-watch <role> <mailbox>}"
+MAILBOX="${2:?usage: ai-collab-watch <role> <mailbox>}"
+OSASCRIPT_BIN="${AI_COLLAB_OSASCRIPT_BIN:-/usr/bin/osascript}"
+
+if [[ ! -x "$OSASCRIPT_BIN" ]]; then
+  echo "osascript executable not found: $OSASCRIPT_BIN" >&2
+  exit 1
+fi
+
+PANES_FILE="$MAILBOX/.panes/$ROLE.json"
+if [[ ! -f "$PANES_FILE" ]]; then
+  echo "Pane not registered: $PANES_FILE not found" >&2
+  exit 1
+fi
+
+# 用 jq 抽 session_uuid（如果没 jq 用 grep）
+if command -v jq >/dev/null 2>&1; then
+  SESSION_UUID=$(jq -r .session_uuid "$PANES_FILE")
+else
+  SESSION_UUID=$(grep '"session_uuid"' "$PANES_FILE" | sed 's/.*"session_uuid": *"\([^"]*\)".*/\1/')
+fi
+
+if [[ -z "$SESSION_UUID" || "$SESSION_UUID" == "null" ]]; then
+  echo "Cannot read session_uuid from $PANES_FILE" >&2
+  exit 1
+fi
+
+INBOX="$MAILBOX/inbox/$ROLE"
+mkdir -p "$INBOX"
+
+# 收到信号时把 fswatch 等子进程一起带走（避免孤儿）。
+# 不 trap HUP：让 nohup 启动的 watcher 在父 shell 退出时正常存活。
+trap 'pkill -P $$ 2>/dev/null || true' EXIT TERM INT
+
+log() {
+  echo "[$(date "+%Y-%m-%d %H:%M:%S")] $*"
+}
+
+# 用 osascript 把一行字注入到指定 session（作为用户输入，自动提交）。
+# 关键点（经过实测踩坑得出）：
+# 1. 单个大 -e + 块式 tell（多 -e 拼 + `tell ... to ...` 会触发 -2741 syntax error）。
+# 2. 末尾用 CR (\r, ASCII 13)。Ink/blessed 这类 TUI（Claude Code、Codex）把 \r 当
+#    Enter，把 \n 当"换行字符"——单纯 \n 只会让文字进输入框但不提交。
+# 3. **正文和 CR 必须分两次 write text 发**。如果 `write text (msg & CR) newline false`
+#    一起发，iTerm2 会把整段当作一次 bracketed paste（\e[200~...\e[201~ 包起来），
+#    Ink TUI 在 paste 模式里把所有字符（含尾部 CR）当文本内容插入输入框、不触发 Enter。
+#    实测：单独发一个孤立 CR 就能把卡住的输入框提交，确认了 paste 抑制是根因。
+#    分两次发使第二次 write 不会被裹进同一个 paste，CR 作为独立字节流到达就当 Enter。
+INJECT_ERROR=""
+
+inject() {
+  local msg="$1" output exit_code
+
+  INJECT_ERROR=""
+  if output=$("$OSASCRIPT_BIN" \
+    -e '
+on run argv
+  set targetID to item 1 of argv
+  set targetMsg to item 2 of argv
+  set CR to (ASCII character 13)
+  tell application "iTerm2"
+    repeat with aWindow in windows
+      repeat with aTab in tabs of aWindow
+        repeat with aSession in sessions of aTab
+          if id of aSession is targetID then
+            tell aSession
+              write text targetMsg newline false
+              delay 0.05
+              write text CR newline false
+            end tell
+            return "ok"
+          end if
+        end repeat
+      end repeat
+    end repeat
+    return "session not found: " & targetID
+  end tell
+end run
+' \
+    -- "$SESSION_UUID" "$msg" 2>&1); then
+    exit_code=0
+  else
+    exit_code=$?
+  fi
+
+  if [[ "$exit_code" -eq 0 && "$output" == "ok" ]]; then
+    return 0
+  fi
+
+  if [[ "$output" == *"session not found:"* ]]; then
+    INJECT_ERROR="session_not_found"
+  elif [[ "$output" == *"(-1743)"* || "$output" == *"error number -1743"* ]]; then
+    INJECT_ERROR="automation_denied_-1743"
+  elif [[ "$exit_code" -ne 0 ]]; then
+    INJECT_ERROR="osascript_exit_$exit_code"
+  else
+    INJECT_ERROR="unexpected_osascript_response"
+  fi
+
+  return 1
+}
+
+# 解析 frontmatter 字段
+extract_field() {
+  local file="$1" key="$2"
+  # 只在前 30 行的 frontmatter 区域查找
+  head -n 30 "$file" | sed -n "s/^${key}: *\(.*\) *$/\1/p" | head -n 1
+}
+
+process_file() {
+  local path="$1"
+  [[ -f "$path" ]] || return 0
+  local fname
+  fname=$(basename "$path")
+
+  # 跳过 dot 文件、tmp 文件、非 .md、已处理过的
+  case "$fname" in
+    .*) return 0 ;;
+    *.md) ;;
+    *) return 0 ;;
+  esac
+  if [[ -f "${path}.dispatched" ]]; then
+    return 0
+  fi
+
+  local sender kind id reply_to
+  sender=$(extract_field "$path" from)
+  kind=$(extract_field "$path" kind)
+  id=$(extract_field "$path" id)
+  reply_to=$(extract_field "$path" reply_to)
+
+  # 计算项目根（mailbox 的父目录）
+  local project_root rel_path
+  project_root=$(dirname "$MAILBOX")
+  rel_path=".ai-mailbox/inbox/$ROLE/$fname"
+
+  # 构造给 AI 的通知（一行，避免在 TUI 输入框里换行）
+  local notif
+  if [[ -n "$reply_to" ]]; then
+    notif="[ai-collab 收信] from=$sender kind=$kind id=$id reply_to=$reply_to | 请 Read $rel_path 并按其中说明处理；这是对你之前消息(id=$reply_to)的回复"
+  else
+    notif="[ai-collab 收信] from=$sender kind=$kind id=$id | 请 Read $rel_path 并按其中说明处理；处理完用 ai-ping $sender --reply-to $id --file <你的回复.md>"
+  fi
+
+  log "dispatching: $fname (from=$sender, kind=$kind)"
+  if inject "$notif"; then
+    if touch "${path}.dispatched" 2>/dev/null; then
+      log "delivery confirmed: $fname"
+    else
+      log "WARNING: injection succeeded but dispatched sidecar write failed for $fname"
+    fi
+  else
+    log "WARNING: inject failed for $fname reason=${INJECT_ERROR:-unknown}; message remains undispatched"
+  fi
+}
+
+log "ai-collab-watch starting: role=$ROLE mailbox=$MAILBOX session=$SESSION_UUID"
+
+# 启动时扫描一次（处理 watcher 启动前已到达的消息）
+for f in "$INBOX"/*.md; do
+  [[ -f "$f" ]] || continue
+  process_file "$f"
+done
+
+# 主循环：fswatch 优先，否则 polling
+if command -v fswatch >/dev/null 2>&1; then
+  log "using fswatch (event-driven)"
+  # -0: NUL-terminated paths; 监听整个 inbox 目录
+  while IFS= read -r -d "" path; do
+    # fswatch 的 path 可能是目录或文件；只处理 inbox 下的 .md
+    if [[ "$path" == "$INBOX"/*.md ]]; then
+      process_file "$path"
+    fi
+  done < <(fswatch -0 "$INBOX")
+else
+  log "fswatch not found, falling back to 1s polling. Install: brew install fswatch"
+  while true; do
+    for f in "$INBOX"/*.md; do
+      [[ -f "$f" ]] || continue
+      process_file "$f"
+    done
+    sleep 1
+  done
+fi

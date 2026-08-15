@@ -1,0 +1,19 @@
+# macOS
+.DS_Store
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*~
+
+# 用户在测试时可能在 repo 内 register pane，避免不小心提交
+.ai-mailbox/
+
+# Local protocol aliases / scratch files
+CLAUDE.md
+*.tmp
+*.bak
+
+# Logs
+*.log

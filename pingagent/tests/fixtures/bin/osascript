@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${FAKE_OSASCRIPT_CALLS:?FAKE_OSASCRIPT_CALLS is required}"
+for arg in "$@"; do
+  printf 'arg=%s\n' "$arg" >> "$FAKE_OSASCRIPT_CALLS"
+done
+
+case "${FAKE_OSASCRIPT_MODE:-success}" in
+  success)
+    printf 'ok\n'
+    ;;
+  session_missing)
+    printf 'session not found: fake-session\n'
+    ;;
+  tcc_denied)
+    printf 'execution error: Not authorized to send Apple events to iTerm2. (-1743)\n' >&2
+    exit 1
+    ;;
+  unexpected_success)
+    printf 'unexpected response\n'
+    ;;
+  *)
+    printf 'unknown fake mode: %s\n' "$FAKE_OSASCRIPT_MODE" >&2
+    exit 2
+    ;;
+esac

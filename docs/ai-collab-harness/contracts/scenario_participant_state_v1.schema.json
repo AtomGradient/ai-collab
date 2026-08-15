@@ -1,0 +1,492 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ai-collab:scenario-participant-state:v1",
+  "title": "AI Collaboration Scenario and Participant state contract v1",
+  "oneOf": [
+    {"$ref": "#/$defs/scenario_record"},
+    {"$ref": "#/$defs/participant_record"},
+    {"$ref": "#/$defs/lifecycle_operation"},
+    {"$ref": "#/$defs/operation_journal_entry"}
+  ],
+  "$defs": {
+    "opaque_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "namespaced_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*(\\.[a-z][a-z0-9-]*)+$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "generation": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "nullable_revision": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/revision"}
+      ]
+    },
+    "nullable_opaque_id": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/opaque_id"}
+      ]
+    },
+    "nullable_namespaced_id": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/namespaced_id"}
+      ]
+    },
+    "nullable_sha256": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/sha256"}
+      ]
+    },
+    "nullable_generation": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/generation"}
+      ]
+    },
+    "scenario_desired_state": {
+      "enum": ["closed", "running", "destroyed"]
+    },
+    "scenario_observed_state": {
+      "enum": [
+        "provisioning",
+        "provision_failed",
+        "closed",
+        "opening",
+        "running",
+        "degraded",
+        "repairing",
+        "closing",
+        "destroying"
+      ]
+    },
+    "participant_desired_state": {
+      "enum": ["detached", "stopped", "running"]
+    },
+    "participant_observed_state": {
+      "enum": [
+        "detached",
+        "stopped",
+        "starting",
+        "ready",
+        "stopping",
+        "recovering",
+        "replacing",
+        "degraded"
+      ]
+    },
+    "nullable_scenario_state": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/scenario_observed_state"}
+      ]
+    },
+    "nullable_participant_state": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/participant_observed_state"}
+      ]
+    },
+    "degraded_observation": {
+      "type": "object",
+      "required": [
+        "reason",
+        "cleanup_pending",
+        "owned_resource_evidence_sha256",
+        "repair_action"
+      ],
+      "properties": {
+        "reason": {
+          "enum": [
+            "provision_failed",
+            "launch_failed",
+            "stop_failed",
+            "cleanup_pending",
+            "binding_drift",
+            "driver_unavailable",
+            "presentation_unavailable",
+            "workspace_unavailable",
+            "participant_fault",
+            "operation_unknown"
+          ]
+        },
+        "cleanup_pending": {"type": "boolean"},
+        "owned_resource_evidence_sha256": {"$ref": "#/$defs/nullable_sha256"},
+        "repair_action": {"$ref": "#/$defs/nullable_namespaced_id"}
+      },
+      "additionalProperties": false
+    },
+    "nullable_degraded_observation": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/degraded_observation"}
+      ]
+    },
+    "scenario_record": {
+      "type": "object",
+      "required": [
+        "scenario_id",
+        "scenario_generation",
+        "state_revision",
+        "desired_state",
+        "observed_state",
+        "project_binding_digest",
+        "workspace_binding_id",
+        "participant_ids",
+        "active_operation_id",
+        "degraded",
+        "journal_head_sequence"
+      ],
+      "properties": {
+        "scenario_id": {"$ref": "#/$defs/opaque_id"},
+        "scenario_generation": {"$ref": "#/$defs/generation"},
+        "state_revision": {"$ref": "#/$defs/revision"},
+        "desired_state": {"$ref": "#/$defs/scenario_desired_state"},
+        "observed_state": {"$ref": "#/$defs/scenario_observed_state"},
+        "project_binding_digest": {"$ref": "#/$defs/sha256"},
+        "workspace_binding_id": {"$ref": "#/$defs/nullable_opaque_id"},
+        "participant_ids": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/opaque_id"},
+          "uniqueItems": true
+        },
+        "active_operation_id": {"$ref": "#/$defs/nullable_opaque_id"},
+        "degraded": {"$ref": "#/$defs/nullable_degraded_observation"},
+        "journal_head_sequence": {"$ref": "#/$defs/revision"}
+      },
+      "additionalProperties": false
+    },
+    "participant_record": {
+      "type": "object",
+      "required": [
+        "scenario_id",
+        "participant_id",
+        "participant_generation",
+        "state_revision",
+        "desired_state",
+        "observed_state",
+        "interaction_mode",
+        "launch_spec_digest",
+        "runtime_binding_id",
+        "presentation_binding_id",
+        "active_operation_id",
+        "degraded",
+        "journal_head_sequence"
+      ],
+      "properties": {
+        "scenario_id": {"$ref": "#/$defs/opaque_id"},
+        "participant_id": {"$ref": "#/$defs/opaque_id"},
+        "participant_generation": {"$ref": "#/$defs/generation"},
+        "state_revision": {"$ref": "#/$defs/revision"},
+        "desired_state": {"$ref": "#/$defs/participant_desired_state"},
+        "observed_state": {"$ref": "#/$defs/participant_observed_state"},
+        "interaction_mode": {"enum": ["tui", "headless"]},
+        "launch_spec_digest": {"$ref": "#/$defs/nullable_sha256"},
+        "runtime_binding_id": {"$ref": "#/$defs/nullable_opaque_id"},
+        "presentation_binding_id": {"$ref": "#/$defs/nullable_opaque_id"},
+        "active_operation_id": {"$ref": "#/$defs/nullable_opaque_id"},
+        "degraded": {"$ref": "#/$defs/nullable_degraded_observation"},
+        "journal_head_sequence": {"$ref": "#/$defs/revision"}
+      },
+      "additionalProperties": false
+    },
+    "operation_target_scenario": {
+      "type": "object",
+      "required": ["scope", "scenario_id"],
+      "properties": {
+        "scope": {"const": "scenario"},
+        "scenario_id": {"$ref": "#/$defs/opaque_id"}
+      },
+      "additionalProperties": false
+    },
+    "operation_target_participant": {
+      "type": "object",
+      "required": ["scope", "scenario_id", "participant_id"],
+      "properties": {
+        "scope": {"const": "participant"},
+        "scenario_id": {"$ref": "#/$defs/opaque_id"},
+        "participant_id": {"$ref": "#/$defs/opaque_id"}
+      },
+      "additionalProperties": false
+    },
+    "operation_target": {
+      "oneOf": [
+        {"$ref": "#/$defs/operation_target_scenario"},
+        {"$ref": "#/$defs/operation_target_participant"}
+      ]
+    },
+    "operation_fence": {
+      "type": "object",
+      "required": [
+        "host_generation",
+        "scenario_generation",
+        "scenario_state_revision",
+        "participant_generation",
+        "participant_state_revision"
+      ],
+      "properties": {
+        "host_generation": {"$ref": "#/$defs/generation"},
+        "scenario_generation": {"$ref": "#/$defs/nullable_generation"},
+        "scenario_state_revision": {"$ref": "#/$defs/nullable_revision"},
+        "participant_generation": {"$ref": "#/$defs/nullable_generation"},
+        "participant_state_revision": {"$ref": "#/$defs/nullable_revision"}
+      },
+      "additionalProperties": false
+    },
+    "lifecycle_operation": {
+      "type": "object",
+      "required": [
+        "operation_id",
+        "request_id",
+        "operation_generation",
+        "operation_kind",
+        "target",
+        "fence",
+        "state",
+        "mutation_state",
+        "desired_state_after",
+        "replacement_launch_spec_digest",
+        "requested_continuity_mode",
+        "plan_digest",
+        "resulting_scenario_generation",
+        "resulting_participant_generation",
+        "failure_code",
+        "created_sequence",
+        "last_journal_sequence"
+      ],
+      "properties": {
+        "operation_id": {"$ref": "#/$defs/opaque_id"},
+        "request_id": {"$ref": "#/$defs/opaque_id"},
+        "operation_generation": {"$ref": "#/$defs/generation"},
+        "operation_kind": {
+          "enum": [
+            "scenario.create",
+            "scenario.open",
+            "scenario.close",
+            "scenario.repair",
+            "scenario.destroy",
+            "participant.add",
+            "participant.start",
+            "participant.stop",
+            "participant.recover",
+            "participant.replace",
+            "participant.detach",
+            "participant.destroy"
+          ]
+        },
+        "target": {"$ref": "#/$defs/operation_target"},
+        "fence": {"$ref": "#/$defs/operation_fence"},
+        "state": {
+          "enum": [
+            "planned",
+            "desired_committed",
+            "executing_external",
+            "finalizing",
+            "succeeded",
+            "failed",
+            "cancelled",
+            "repair_required"
+          ]
+        },
+        "mutation_state": {
+          "enum": ["not_started", "not_committed", "committed", "unknown"]
+        },
+        "desired_state_after": {
+          "enum": ["closed", "running", "destroyed", "detached", "stopped"]
+        },
+        "replacement_launch_spec_digest": {"$ref": "#/$defs/nullable_sha256"},
+        "requested_continuity_mode": {
+          "oneOf": [
+            {"type": "null"},
+            {"enum": ["explicit_recreate", "exact_resume"]}
+          ]
+        },
+        "plan_digest": {"$ref": "#/$defs/sha256"},
+        "resulting_scenario_generation": {"$ref": "#/$defs/nullable_generation"},
+        "resulting_participant_generation": {"$ref": "#/$defs/nullable_generation"},
+        "failure_code": {"$ref": "#/$defs/nullable_namespaced_id"},
+        "created_sequence": {"$ref": "#/$defs/generation"},
+        "last_journal_sequence": {"$ref": "#/$defs/generation"}
+      },
+      "additionalProperties": false
+    },
+    "operation_journal_entry": {
+      "type": "object",
+      "required": [
+        "sequence",
+        "operation_id",
+        "operation_generation",
+        "event",
+        "target",
+        "fence",
+        "target_state_revision_before",
+        "target_state_revision_after",
+        "mutation_state",
+        "payload_digest",
+        "error_code"
+      ],
+      "properties": {
+        "sequence": {"$ref": "#/$defs/generation"},
+        "operation_id": {"$ref": "#/$defs/opaque_id"},
+        "operation_generation": {"$ref": "#/$defs/generation"},
+        "event": {
+          "enum": [
+            "planned",
+            "desired_state_committed",
+            "external_started",
+            "external_succeeded",
+            "external_failed",
+            "finalize_committed",
+            "stale_callback_rejected",
+            "cancel_requested",
+            "repair_required"
+          ]
+        },
+        "target": {"$ref": "#/$defs/operation_target"},
+        "fence": {"$ref": "#/$defs/operation_fence"},
+        "target_state_revision_before": {"$ref": "#/$defs/revision"},
+        "target_state_revision_after": {"$ref": "#/$defs/revision"},
+        "mutation_state": {
+          "enum": ["not_started", "not_committed", "committed", "unknown"]
+        },
+        "payload_digest": {"$ref": "#/$defs/nullable_sha256"},
+        "error_code": {"$ref": "#/$defs/nullable_namespaced_id"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "x-ai-collab": {
+    "schema_version": 1,
+    "contract_id": "ai-collab-scenario-participant-state-v1",
+    "product_contract_version": "3.2",
+    "driver_contract": {
+      "contract_id": "ai-collab-participant-drivers-v2",
+      "participant_driver_contract_version": 2,
+      "runtime_binding_join_field": "runtime_binding_id",
+      "launch_spec_reference": "sha256-canonical-json"
+    },
+    "scenario_transitions": [
+      {"trigger": "create", "from": ["absent"], "to": "provisioning", "desired_after": "closed"},
+      {"trigger": "provision_succeeded", "from": ["provisioning"], "to": "closed", "desired_after": "preserve"},
+      {"trigger": "provision_failed", "from": ["provisioning"], "to": "provision_failed", "desired_after": "preserve"},
+      {"trigger": "open", "from": ["closed"], "to": "opening", "desired_after": "running"},
+      {"trigger": "open_succeeded", "from": ["opening"], "to": "running", "desired_after": "preserve"},
+      {"trigger": "open_failed", "from": ["opening"], "to": "degraded", "desired_after": "preserve"},
+      {"trigger": "participant_or_host_fault", "from": ["opening", "running"], "to": "degraded", "desired_after": "preserve"},
+      {"trigger": "repair", "from": ["provision_failed", "degraded"], "to": "repairing", "desired_after": "preserve"},
+      {"trigger": "repair_to_closed", "from": ["repairing"], "to": "closed", "desired_after": "preserve"},
+      {"trigger": "repair_to_running", "from": ["repairing"], "to": "running", "desired_after": "preserve"},
+      {"trigger": "repair_to_destroying", "from": ["repairing"], "to": "destroying", "desired_after": "preserve"},
+      {"trigger": "repair_failed", "from": ["repairing"], "to": "degraded", "desired_after": "preserve"},
+      {"trigger": "close", "from": ["opening", "running", "degraded"], "to": "closing", "desired_after": "closed"},
+      {"trigger": "close_succeeded", "from": ["closing"], "to": "closed", "desired_after": "preserve"},
+      {"trigger": "close_failed", "from": ["closing"], "to": "degraded", "desired_after": "preserve"},
+      {"trigger": "destroy", "from": ["closed"], "to": "destroying", "desired_after": "destroyed"},
+      {"trigger": "destroy_failed", "from": ["destroying"], "to": "degraded", "desired_after": "preserve"},
+      {"trigger": "destroy_succeeded", "from": ["destroying"], "to": "absent", "desired_after": "record_absent"}
+    ],
+    "participant_transitions": [
+      {"trigger": "add", "from": ["absent"], "to": "stopped", "desired_after": "stopped"},
+      {"trigger": "start", "from": ["stopped"], "to": "starting", "desired_after": "running"},
+      {"trigger": "ready", "from": ["starting"], "to": "ready", "desired_after": "preserve"},
+      {"trigger": "start_failed", "from": ["starting"], "to": "degraded", "desired_after": "preserve"},
+      {"trigger": "stop", "from": ["ready", "degraded"], "to": "stopping", "desired_after": "stopped"},
+      {"trigger": "detach", "from": ["ready", "degraded"], "to": "stopping", "desired_after": "detached"},
+      {"trigger": "stop_succeeded", "from": ["stopping"], "to": "stopped", "desired_after": "preserve"},
+      {"trigger": "stop_failed", "from": ["stopping"], "to": "degraded", "desired_after": "preserve"},
+      {"trigger": "recover", "from": ["degraded"], "to": "recovering", "desired_after": "stopped"},
+      {"trigger": "recover_succeeded", "from": ["recovering"], "to": "stopped", "desired_after": "preserve"},
+      {"trigger": "recover_failed", "from": ["recovering"], "to": "degraded", "desired_after": "preserve"},
+      {"trigger": "detach_stopped", "from": ["stopped"], "to": "detached", "desired_after": "detached"},
+      {"trigger": "detach_cleanup_succeeded", "from": ["stopping", "degraded"], "to": "detached", "desired_after": "preserve"},
+      {"trigger": "replace", "from": ["stopped", "ready", "degraded"], "to": "replacing", "desired_after": "operation_desired"},
+      {"trigger": "replace_to_stopped", "from": ["replacing"], "to": "stopped", "desired_after": "preserve"},
+      {"trigger": "replace_to_starting", "from": ["replacing"], "to": "starting", "desired_after": "preserve"},
+      {"trigger": "replace_failed_after_cas", "from": ["replacing"], "to": "degraded", "desired_after": "preserve"},
+      {"trigger": "destroy", "from": ["detached"], "to": "absent", "desired_after": "record_absent"}
+    ],
+    "operation_protocol": {
+      "phases": [
+        "validate_request_and_capability",
+        "cas_desired_state_with_generation_and_revision_fence",
+        "release_lock_and_execute_external_action",
+        "reacquire_lock_and_finalize_if_fence_matches"
+      ],
+      "request_id_is_idempotency_key": true,
+      "plan_is_immutable_and_digest_bound": true,
+      "external_action_never_holds_state_lock": true,
+      "callback_requires_exact_operation_resulting_generation_and_committed_revision": true,
+      "stale_callback_is_journaled_and_rejected": true,
+      "unknown_external_outcome_requires_degraded_repair": true
+    },
+    "replace_protocol": {
+      "validate_new_launch_spec_before_old_binding_mutation": true,
+      "pre_cas_failure_preserves_old_generation_and_binding": true,
+      "post_cas_failure_is_degraded_and_repairable": true,
+      "new_generation_is_exactly_previous_plus_one": true,
+      "prior_desired_running_restarts_new_generation": true,
+      "history_is_never_rewritten": true
+    },
+    "recover_protocol": {
+      "source": "user_decision",
+      "decision_date": "2026-08-14",
+      "exact_degraded_generation_is_fenced": true,
+      "cleanup_or_absence_proof_precedes_rotation": true,
+      "ambiguous_external_resources_fail_closed": true,
+      "new_generation_is_exactly_previous_plus_one": true,
+      "failed_generation_history_is_retained": true,
+      "recovery_finishes_stopped_before_explicit_restart": true
+    },
+    "detach_protocol": {
+      "desired_detached_committed_before_cleanup": true,
+      "new_delivery_disabled_after_desired_commit": true,
+      "cleanup_pending_is_degraded_not_deleted": true,
+      "stop_detach_and_repair_remain_retryable": true,
+      "history_retained_until_separate_gated_destroy": true
+    },
+    "invariants": {
+      "participant_identity_is_scenario_and_participant_id": true,
+      "desired_and_observed_state_are_distinct": true,
+      "generation_and_state_revision_are_distinct": true,
+      "operation_fence_is_immutable_precondition_snapshot": true,
+      "desired_commit_revision_is_callback_finalize_fence": true,
+      "stable_callbacks_require_exact_resulting_generation_and_committed_revision": true,
+      "absent_target_uses_null_generation_and_revision_fence": true,
+      "ready_requires_exact_runtime_and_optional_presentation_binding": true,
+      "tui_ready_requires_presentation_binding": true,
+      "headless_forbids_presentation_binding": true,
+      "detached_and_stopped_have_no_live_binding": true,
+      "degraded_state_preserves_owned_resource_evidence": true,
+      "recover_never_reuses_a_failed_generation": true,
+      "one_participant_fault_does_not_rebind_other_participants": true,
+      "scenario_degraded_is_an_aggregate_projection": true,
+      "unregistered_is_absence_not_a_persisted_record": true,
+      "destroy_removes_current_state_but_retains_audit_history": true,
+      "no_operation_changes_model_binding_in_place": true,
+      "operation_errors_use_non_reserved_driver_or_lifecycle_namespace": true
+    },
+    "deferred_surfaces": [
+      "collaboration-policy-routing",
+      "workspace-environment-operation-payloads",
+      "permission-and-high-risk-confirmation-matrix",
+      "host-storage-and-transaction-implementation",
+      "phase4-force-stop-and-destroy-mechanics",
+      "host-ipc-operation-registry-population"
+    ]
+  }
+}

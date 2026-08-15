@@ -1,0 +1,199 @@
+{
+  "schema_version": 1,
+  "templates": [
+    {
+      "template_contract_version": 1,
+      "template_id": "team.peer-review",
+      "display_name": "Analyst + reviewer",
+      "policy_id": "policy.peer-review",
+      "participant_ids": ["analyst", "reviewer"],
+      "assignments": [
+        {
+          "assignment_id": "analyst-role",
+          "attribute": "collaboration.role",
+          "task_id": "analysis",
+          "participant_id": "analyst"
+        },
+        {
+          "assignment_id": "reviewer-role",
+          "attribute": "collaboration.role",
+          "task_id": "review",
+          "participant_id": "reviewer"
+        }
+      ],
+      "retry_profiles": [
+        {
+          "profile_id": "interactive",
+          "max_attempts": 3,
+          "backoff_ms": [0, 500, 2000]
+        }
+      ],
+      "route_rules": [
+        {
+          "rule_id": "analyst-review-request",
+          "sender": {"kind": "participant", "participant_id": "analyst"},
+          "receiver": {"kind": "participant", "participant_id": "reviewer"},
+          "message_kind": "collaboration.review-request",
+          "effect": "allow",
+          "retry_profile_id": "interactive"
+        },
+        {
+          "rule_id": "reviewer-review-response",
+          "sender": {"kind": "participant", "participant_id": "reviewer"},
+          "receiver": {"kind": "participant", "participant_id": "analyst"},
+          "message_kind": "collaboration.review-response",
+          "effect": "allow",
+          "retry_profile_id": "interactive"
+        },
+        {
+          "rule_id": "analyst-message",
+          "sender": {"kind": "participant", "participant_id": "analyst"},
+          "receiver": {"kind": "participant", "participant_id": "reviewer"},
+          "message_kind": "collaboration.message",
+          "effect": "allow",
+          "retry_profile_id": "interactive"
+        },
+        {
+          "rule_id": "reviewer-response",
+          "sender": {"kind": "participant", "participant_id": "reviewer"},
+          "receiver": {"kind": "participant", "participant_id": "analyst"},
+          "message_kind": "collaboration.response",
+          "effect": "allow",
+          "retry_profile_id": "interactive"
+        },
+        {
+          "rule_id": "analyst-question",
+          "sender": {"kind": "participant", "participant_id": "analyst"},
+          "receiver": {"kind": "participant", "participant_id": "reviewer"},
+          "message_kind": "collaboration.question",
+          "effect": "allow",
+          "retry_profile_id": "interactive"
+        },
+        {
+          "rule_id": "reviewer-question",
+          "sender": {"kind": "participant", "participant_id": "reviewer"},
+          "receiver": {"kind": "participant", "participant_id": "analyst"},
+          "message_kind": "collaboration.question",
+          "effect": "allow",
+          "retry_profile_id": "interactive"
+        },
+        {
+          "rule_id": "analyst-pushback",
+          "sender": {"kind": "participant", "participant_id": "analyst"},
+          "receiver": {"kind": "participant", "participant_id": "reviewer"},
+          "message_kind": "collaboration.pushback",
+          "effect": "allow",
+          "retry_profile_id": "interactive"
+        },
+        {
+          "rule_id": "reviewer-pushback",
+          "sender": {"kind": "participant", "participant_id": "reviewer"},
+          "receiver": {"kind": "participant", "participant_id": "analyst"},
+          "message_kind": "collaboration.pushback",
+          "effect": "allow",
+          "retry_profile_id": "interactive"
+        },
+        {
+          "rule_id": "analyst-notice",
+          "sender": {"kind": "participant", "participant_id": "analyst"},
+          "receiver": {"kind": "participant", "participant_id": "reviewer"},
+          "message_kind": "collaboration.notice",
+          "effect": "allow",
+          "retry_profile_id": "interactive"
+        },
+        {
+          "rule_id": "reviewer-notice",
+          "sender": {"kind": "participant", "participant_id": "reviewer"},
+          "receiver": {"kind": "participant", "participant_id": "analyst"},
+          "message_kind": "collaboration.notice",
+          "effect": "allow",
+          "retry_profile_id": "interactive"
+        }
+      ]
+    },
+    {
+      "template_contract_version": 1,
+      "template_id": "team.research-triad",
+      "display_name": "Analyst + reviewer + synthesizer",
+      "policy_id": "policy.research-triad",
+      "participant_ids": ["analyst", "reviewer", "synthesizer"],
+      "assignments": [
+        {
+          "assignment_id": "triad-analyst",
+          "attribute": "collaboration.role",
+          "task_id": "analysis",
+          "participant_id": "analyst"
+        },
+        {
+          "assignment_id": "triad-reviewer",
+          "attribute": "collaboration.role",
+          "task_id": "review",
+          "participant_id": "reviewer"
+        },
+        {
+          "assignment_id": "triad-synthesizer",
+          "attribute": "collaboration.role",
+          "task_id": "synthesis",
+          "participant_id": "synthesizer"
+        }
+      ],
+      "retry_profiles": [
+        {
+          "profile_id": "interactive",
+          "max_attempts": 3,
+          "backoff_ms": [0, 500, 2000]
+        }
+      ],
+      "route_rules": [
+        {
+          "rule_id": "triad-analysis-to-review",
+          "sender": {"kind": "participant", "participant_id": "analyst"},
+          "receiver": {"kind": "participant", "participant_id": "reviewer"},
+          "message_kind": "collaboration.review-request",
+          "effect": "allow",
+          "retry_profile_id": "interactive"
+        },
+        {
+          "rule_id": "triad-review-to-synthesis",
+          "sender": {"kind": "participant", "participant_id": "reviewer"},
+          "receiver": {"kind": "participant", "participant_id": "synthesizer"},
+          "message_kind": "collaboration.review-response",
+          "effect": "allow",
+          "retry_profile_id": "interactive"
+        },
+        {
+          "rule_id": "triad-synthesis-to-analysis",
+          "sender": {"kind": "participant", "participant_id": "synthesizer"},
+          "receiver": {"kind": "participant", "participant_id": "analyst"},
+          "message_kind": "collaboration.response",
+          "effect": "allow",
+          "retry_profile_id": "interactive"
+        },
+        {
+          "rule_id": "triad-analyst-question-reviewer",
+          "sender": {"kind": "participant", "participant_id": "analyst"},
+          "receiver": {"kind": "participant", "participant_id": "reviewer"},
+          "message_kind": "collaboration.question",
+          "effect": "allow",
+          "retry_profile_id": "interactive"
+        },
+        {
+          "rule_id": "triad-reviewer-question-synthesizer",
+          "sender": {"kind": "participant", "participant_id": "reviewer"},
+          "receiver": {"kind": "participant", "participant_id": "synthesizer"},
+          "message_kind": "collaboration.question",
+          "effect": "allow",
+          "retry_profile_id": "interactive"
+        },
+        {
+          "rule_id": "triad-synthesizer-question-analyst",
+          "sender": {"kind": "participant", "participant_id": "synthesizer"},
+          "receiver": {"kind": "participant", "participant_id": "analyst"},
+          "message_kind": "collaboration.question",
+          "effect": "allow",
+          "retry_profile_id": "interactive"
+        }
+      ]
+    }
+  ]
+}

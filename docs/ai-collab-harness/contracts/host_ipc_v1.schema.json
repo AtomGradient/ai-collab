@@ -1,0 +1,579 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ai-collab:host-ipc:v1",
+  "title": "AI Collaboration Host logical IPC contract v1",
+  "oneOf": [
+    {"$ref": "#/$defs/handshake_request"},
+    {"$ref": "#/$defs/handshake_reply_accepted"},
+    {"$ref": "#/$defs/handshake_reply_rejected"},
+    {"$ref": "#/$defs/operation_request"},
+    {"$ref": "#/$defs/operation_reply_accepted"},
+    {"$ref": "#/$defs/operation_reply_completed"},
+    {"$ref": "#/$defs/operation_reply_rejected"},
+    {"$ref": "#/$defs/operation_reply_failed"},
+    {"$ref": "#/$defs/progress_event"},
+    {"$ref": "#/$defs/cancel_request"},
+    {"$ref": "#/$defs/cancel_reply_accepted"},
+    {"$ref": "#/$defs/cancel_reply_rejected"}
+  ],
+  "$defs": {
+    "opaque_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "namespaced_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*(\\.[a-z][a-z0-9-]*)+$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "generation": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "capability_proof": {
+      "type": "string",
+      "minLength": 1
+    },
+    "capability_list": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/namespaced_id"},
+      "uniqueItems": true
+    },
+    "mutation_state": {
+      "enum": ["not_started", "not_committed", "committed", "unknown"]
+    },
+    "error": {
+      "type": "object",
+      "required": ["category", "code", "retryable", "redacted_message"],
+      "properties": {
+        "category": {
+          "enum": [
+            "protocol",
+            "identity",
+            "authorization",
+            "fencing",
+            "availability",
+            "operation"
+          ]
+        },
+        "code": {"$ref": "#/$defs/namespaced_id"},
+        "retryable": {"type": "boolean"},
+        "redacted_message": {"type": "string", "minLength": 1},
+        "repair_action": {"$ref": "#/$defs/namespaced_id"}
+      },
+      "additionalProperties": false
+    },
+    "target_host": {
+      "type": "object",
+      "required": ["scope"],
+      "properties": {"scope": {"const": "host"}},
+      "additionalProperties": false
+    },
+    "target_project": {
+      "type": "object",
+      "required": ["scope", "project_instance_id"],
+      "properties": {
+        "scope": {"const": "project"},
+        "project_instance_id": {"$ref": "#/$defs/opaque_id"}
+      },
+      "additionalProperties": false
+    },
+    "target_scenario": {
+      "type": "object",
+      "required": ["scope", "project_instance_id", "scenario_id"],
+      "properties": {
+        "scope": {"const": "scenario"},
+        "project_instance_id": {"$ref": "#/$defs/opaque_id"},
+        "scenario_id": {"$ref": "#/$defs/opaque_id"}
+      },
+      "additionalProperties": false
+    },
+    "target_participant": {
+      "type": "object",
+      "required": [
+        "scope",
+        "project_instance_id",
+        "scenario_id",
+        "participant_id"
+      ],
+      "properties": {
+        "scope": {"const": "participant"},
+        "project_instance_id": {"$ref": "#/$defs/opaque_id"},
+        "scenario_id": {"$ref": "#/$defs/opaque_id"},
+        "participant_id": {"$ref": "#/$defs/opaque_id"}
+      },
+      "additionalProperties": false
+    },
+    "target_operation": {
+      "type": "object",
+      "required": ["scope", "operation_id"],
+      "properties": {
+        "scope": {"const": "operation"},
+        "operation_id": {"$ref": "#/$defs/opaque_id"}
+      },
+      "additionalProperties": false
+    },
+    "operation_target": {
+      "oneOf": [
+        {"$ref": "#/$defs/target_host"},
+        {"$ref": "#/$defs/target_project"},
+        {"$ref": "#/$defs/target_scenario"},
+        {"$ref": "#/$defs/target_participant"},
+        {"$ref": "#/$defs/target_operation"}
+      ]
+    },
+    "generation_fence": {
+      "type": "object",
+      "required": ["host_generation"],
+      "properties": {
+        "host_generation": {"$ref": "#/$defs/generation"},
+        "operation_generation": {"$ref": "#/$defs/generation"},
+        "participant_generation": {"$ref": "#/$defs/generation"}
+      },
+      "additionalProperties": false
+    },
+    "operation_descriptor": {
+      "type": "object",
+      "required": [
+        "operation_id",
+        "operation_schema_version",
+        "request_schema_digest",
+        "result_schema_digest",
+        "required_capability",
+        "target_scope",
+        "required_fences",
+        "mutation_class",
+        "confirmation_policy_ref"
+      ],
+      "properties": {
+        "operation_id": {"$ref": "#/$defs/namespaced_id"},
+        "operation_schema_version": {"type": "integer", "minimum": 1},
+        "request_schema_digest": {"$ref": "#/$defs/sha256"},
+        "result_schema_digest": {"$ref": "#/$defs/sha256"},
+        "required_capability": {"$ref": "#/$defs/namespaced_id"},
+        "target_scope": {
+          "enum": ["host", "project", "scenario", "participant", "operation"]
+        },
+        "required_fences": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "host_generation",
+              "operation_generation",
+              "participant_generation"
+            ]
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "mutation_class": {
+          "enum": ["read_only", "durable_state", "external_effect", "destructive"]
+        },
+        "confirmation_policy_ref": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/namespaced_id"}
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "handshake_request": {
+      "type": "object",
+      "required": [
+        "message_type",
+        "request_id",
+        "client_instance_id",
+        "supported_contract_versions",
+        "client_capabilities"
+      ],
+      "properties": {
+        "message_type": {"const": "handshake_request"},
+        "request_id": {"$ref": "#/$defs/opaque_id"},
+        "client_instance_id": {"$ref": "#/$defs/opaque_id"},
+        "supported_contract_versions": {
+          "type": "array",
+          "items": {"type": "integer", "minimum": 1},
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "client_capabilities": {"$ref": "#/$defs/capability_list"}
+      },
+      "additionalProperties": false
+    },
+    "handshake_reply_accepted": {
+      "type": "object",
+      "required": [
+        "message_type",
+        "request_id",
+        "outcome",
+        "contract_version",
+        "host_instance_fingerprint",
+        "host_generation",
+        "operation_registry_digest",
+        "host_capabilities"
+      ],
+      "properties": {
+        "message_type": {"const": "handshake_reply"},
+        "request_id": {"$ref": "#/$defs/opaque_id"},
+        "outcome": {"const": "accepted"},
+        "contract_version": {"const": 1},
+        "host_instance_fingerprint": {"$ref": "#/$defs/sha256"},
+        "host_generation": {"$ref": "#/$defs/generation"},
+        "operation_registry_digest": {"$ref": "#/$defs/sha256"},
+        "host_capabilities": {"$ref": "#/$defs/capability_list"}
+      },
+      "additionalProperties": false
+    },
+    "handshake_reply_rejected": {
+      "type": "object",
+      "required": ["message_type", "request_id", "outcome", "error"],
+      "properties": {
+        "message_type": {"const": "handshake_reply"},
+        "request_id": {"$ref": "#/$defs/opaque_id"},
+        "outcome": {"const": "rejected"},
+        "error": {"$ref": "#/$defs/error"}
+      },
+      "additionalProperties": false
+    },
+    "operation_request": {
+      "type": "object",
+      "required": [
+        "message_type",
+        "contract_version",
+        "request_id",
+        "operation",
+        "operation_schema_version",
+        "operation_registry_digest",
+        "capability_proof",
+        "target",
+        "fence",
+        "payload"
+      ],
+      "properties": {
+        "message_type": {"const": "operation_request"},
+        "contract_version": {"const": 1},
+        "request_id": {"$ref": "#/$defs/opaque_id"},
+        "operation": {"$ref": "#/$defs/namespaced_id"},
+        "operation_schema_version": {"type": "integer", "minimum": 1},
+        "operation_registry_digest": {"$ref": "#/$defs/sha256"},
+        "capability_proof": {"$ref": "#/$defs/capability_proof"},
+        "target": {"$ref": "#/$defs/operation_target"},
+        "fence": {"$ref": "#/$defs/generation_fence"},
+        "payload": {
+          "type": "object",
+          "x-ai-collab-operation-schema-bound": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "operation_reply_accepted": {
+      "type": "object",
+      "required": [
+        "message_type",
+        "contract_version",
+        "request_id",
+        "outcome",
+        "operation_id",
+        "host_generation",
+        "mutation_state"
+      ],
+      "properties": {
+        "message_type": {"const": "operation_reply"},
+        "contract_version": {"const": 1},
+        "request_id": {"$ref": "#/$defs/opaque_id"},
+        "outcome": {"const": "accepted"},
+        "operation_id": {"$ref": "#/$defs/opaque_id"},
+        "host_generation": {"$ref": "#/$defs/generation"},
+        "mutation_state": {"$ref": "#/$defs/mutation_state"}
+      },
+      "additionalProperties": false
+    },
+    "operation_reply_completed": {
+      "type": "object",
+      "required": [
+        "message_type",
+        "contract_version",
+        "request_id",
+        "outcome",
+        "operation_id",
+        "host_generation",
+        "mutation_state",
+        "result"
+      ],
+      "properties": {
+        "message_type": {"const": "operation_reply"},
+        "contract_version": {"const": 1},
+        "request_id": {"$ref": "#/$defs/opaque_id"},
+        "outcome": {"const": "completed"},
+        "operation_id": {"$ref": "#/$defs/opaque_id"},
+        "host_generation": {"$ref": "#/$defs/generation"},
+        "mutation_state": {"$ref": "#/$defs/mutation_state"},
+        "result": {
+          "type": "object",
+          "x-ai-collab-operation-schema-bound": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "operation_reply_rejected": {
+      "type": "object",
+      "required": [
+        "message_type",
+        "contract_version",
+        "request_id",
+        "outcome",
+        "mutation_state",
+        "error"
+      ],
+      "properties": {
+        "message_type": {"const": "operation_reply"},
+        "contract_version": {"const": 1},
+        "request_id": {"$ref": "#/$defs/opaque_id"},
+        "outcome": {"const": "rejected"},
+        "mutation_state": {"const": "not_started"},
+        "error": {"$ref": "#/$defs/error"}
+      },
+      "additionalProperties": false
+    },
+    "operation_reply_failed": {
+      "type": "object",
+      "required": [
+        "message_type",
+        "contract_version",
+        "request_id",
+        "outcome",
+        "operation_id",
+        "host_generation",
+        "mutation_state",
+        "error"
+      ],
+      "properties": {
+        "message_type": {"const": "operation_reply"},
+        "contract_version": {"const": 1},
+        "request_id": {"$ref": "#/$defs/opaque_id"},
+        "outcome": {"const": "failed"},
+        "operation_id": {"$ref": "#/$defs/opaque_id"},
+        "host_generation": {"$ref": "#/$defs/generation"},
+        "mutation_state": {"$ref": "#/$defs/mutation_state"},
+        "error": {"$ref": "#/$defs/error"}
+      },
+      "additionalProperties": false
+    },
+    "progress_event": {
+      "type": "object",
+      "required": [
+        "message_type",
+        "contract_version",
+        "operation_id",
+        "sequence",
+        "state",
+        "host_generation",
+        "progress"
+      ],
+      "properties": {
+        "message_type": {"const": "progress_event"},
+        "contract_version": {"const": 1},
+        "operation_id": {"$ref": "#/$defs/opaque_id"},
+        "sequence": {"type": "integer", "minimum": 0},
+        "state": {
+          "enum": [
+            "queued",
+            "running",
+            "waiting",
+            "cancelling",
+            "completed",
+            "failed",
+            "cancelled"
+          ]
+        },
+        "host_generation": {"$ref": "#/$defs/generation"},
+        "progress": {
+          "type": "object",
+          "x-ai-collab-operation-schema-bound": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "cancel_request": {
+      "type": "object",
+      "required": [
+        "message_type",
+        "contract_version",
+        "request_id",
+        "operation_id",
+        "host_generation",
+        "capability_proof"
+      ],
+      "properties": {
+        "message_type": {"const": "cancel_request"},
+        "contract_version": {"const": 1},
+        "request_id": {"$ref": "#/$defs/opaque_id"},
+        "operation_id": {"$ref": "#/$defs/opaque_id"},
+        "host_generation": {"$ref": "#/$defs/generation"},
+        "capability_proof": {"$ref": "#/$defs/capability_proof"}
+      },
+      "additionalProperties": false
+    },
+    "cancel_reply_accepted": {
+      "type": "object",
+      "required": [
+        "message_type",
+        "contract_version",
+        "request_id",
+        "outcome",
+        "operation_id",
+        "host_generation",
+        "mutation_state"
+      ],
+      "properties": {
+        "message_type": {"const": "cancel_reply"},
+        "contract_version": {"const": 1},
+        "request_id": {"$ref": "#/$defs/opaque_id"},
+        "outcome": {"const": "accepted"},
+        "operation_id": {"$ref": "#/$defs/opaque_id"},
+        "host_generation": {"$ref": "#/$defs/generation"},
+        "mutation_state": {"$ref": "#/$defs/mutation_state"}
+      },
+      "additionalProperties": false
+    },
+    "cancel_reply_rejected": {
+      "type": "object",
+      "required": [
+        "message_type",
+        "contract_version",
+        "request_id",
+        "outcome",
+        "operation_id",
+        "mutation_state",
+        "error"
+      ],
+      "properties": {
+        "message_type": {"const": "cancel_reply"},
+        "contract_version": {"const": 1},
+        "request_id": {"$ref": "#/$defs/opaque_id"},
+        "outcome": {"const": "rejected"},
+        "operation_id": {"$ref": "#/$defs/opaque_id"},
+        "mutation_state": {"const": "not_started"},
+        "error": {"$ref": "#/$defs/error"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "x-ai-collab": {
+    "schema_version": 1,
+    "contract_id": "ai-collab-host-ipc-v1",
+    "product_contract_version": "3.2",
+    "logical_transport": {
+      "encoding": "typed-json-compatible-value-graph",
+      "binding": "platform-plugin",
+      "required_properties": [
+        "local",
+        "bidirectional-request-reply",
+        "peer-identity-authenticated",
+        "owner-verified",
+        "interruption-observable",
+        "invalidation-observable"
+      ]
+    },
+    "negotiation": {
+      "supported_contract_versions": [1],
+      "selection": "highest-common-version",
+      "no_common_version_error": "ipc.unsupported-contract",
+      "no_post_mutation_downgrade": true
+    },
+    "operation_descriptor_contract": {
+      "schema_ref": "#/$defs/operation_descriptor",
+      "registry_digest": "sha256-canonical-json",
+      "lookup_key": ["operation_id", "operation_schema_version"],
+      "payload_validation": "before-durable-or-external-mutation",
+      "result_validation": "before-reply",
+      "unknown_operation": "ipc.operation-not-allowed",
+      "forbidden_generic_operation_ids": [
+        "shell.exec",
+        "host.exec",
+        "process.exec",
+        "argv.exec"
+      ]
+    },
+    "capability_contract": {
+      "proof_form": "opaque-non-loggable-transport-value",
+      "required_bindings": [
+        "authenticated-peer-identity",
+        "current-owner",
+        "required-capability",
+        "operation-target"
+      ],
+      "validation": "before-durable-or-external-mutation",
+      "issuance_rotation_revocation": "external-versioned-security-contract"
+    },
+    "mutation_state_semantics": {
+      "not_started": "no-target-mutation; rejection-audit-record-allowed",
+      "not_committed": "operation-record-allowed; no-target-mutation-committed",
+      "committed": "target-durable-state-or-external-effect-committed",
+      "unknown": "mutation-cannot-be-proven; degrade-and-repair-required"
+    },
+    "error_taxonomy": {
+      "reserved_namespaces": [
+        "ipc",
+        "identity",
+        "target",
+        "auth",
+        "fence",
+        "availability",
+        "operation"
+      ],
+      "common_codes": [
+        {"code": "ipc.unsupported-contract", "category": "protocol", "retryable": false, "rejected_before_mutation": true},
+        {"code": "ipc.invalid-message", "category": "protocol", "retryable": false, "rejected_before_mutation": true},
+        {"code": "ipc.operation-not-allowed", "category": "protocol", "retryable": false, "rejected_before_mutation": true},
+        {"code": "ipc.operation-schema-mismatch", "category": "protocol", "retryable": false, "rejected_before_mutation": true},
+        {"code": "ipc.operation-registry-mismatch", "category": "protocol", "retryable": true, "rejected_before_mutation": true},
+        {"code": "identity.peer-rejected", "category": "identity", "retryable": false, "rejected_before_mutation": true},
+        {"code": "identity.owner-mismatch", "category": "identity", "retryable": false, "rejected_before_mutation": true},
+        {"code": "target.project-not-found", "category": "identity", "retryable": false, "rejected_before_mutation": true},
+        {"code": "target.scenario-not-found", "category": "identity", "retryable": false, "rejected_before_mutation": true},
+        {"code": "target.participant-not-found", "category": "identity", "retryable": false, "rejected_before_mutation": true},
+        {"code": "target.operation-not-found", "category": "identity", "retryable": false, "rejected_before_mutation": true},
+        {"code": "auth.capability-denied", "category": "authorization", "retryable": false, "rejected_before_mutation": true},
+        {"code": "auth.policy-denied", "category": "authorization", "retryable": false, "rejected_before_mutation": true},
+        {"code": "auth.confirmation-required", "category": "authorization", "retryable": true, "rejected_before_mutation": true},
+        {"code": "auth.permission-denied", "category": "authorization", "retryable": true, "rejected_before_mutation": true},
+        {"code": "fence.stale-host-generation", "category": "fencing", "retryable": true, "rejected_before_mutation": true},
+        {"code": "fence.stale-operation-generation", "category": "fencing", "retryable": true, "rejected_before_mutation": true},
+        {"code": "fence.stale-participant-generation", "category": "fencing", "retryable": true, "rejected_before_mutation": true},
+        {"code": "fence.operation-conflict", "category": "fencing", "retryable": true, "rejected_before_mutation": true},
+        {"code": "availability.host-degraded", "category": "availability", "retryable": true, "rejected_before_mutation": true},
+        {"code": "availability.driver-unavailable", "category": "availability", "retryable": true, "rejected_before_mutation": true},
+        {"code": "availability.adapter-unavailable", "category": "availability", "retryable": true, "rejected_before_mutation": true},
+        {"code": "availability.resource-busy", "category": "availability", "retryable": true, "rejected_before_mutation": true},
+        {"code": "operation.precondition-failed", "category": "operation", "retryable": false, "rejected_before_mutation": true},
+        {"code": "operation.cancelled", "category": "operation", "retryable": false, "rejected_before_mutation": false},
+        {"code": "operation.deadline-exceeded", "category": "operation", "retryable": true, "rejected_before_mutation": false},
+        {"code": "operation.external-failure", "category": "operation", "retryable": true, "rejected_before_mutation": false},
+        {"code": "operation.internal-failure", "category": "operation", "retryable": false, "rejected_before_mutation": false}
+      ]
+    },
+    "invariants": {
+      "peer_identity_checked_before_message_dispatch": true,
+      "owner_is_current_non_root_user": true,
+      "unknown_message_fields_rejected": true,
+      "operation_allowlist_checked_before_mutation": true,
+      "operation_registry_digest_checked_before_mutation": true,
+      "operation_payload_schema_checked_before_mutation": true,
+      "capability_checked_before_mutation": true,
+      "target_and_generation_fences_checked_before_mutation": true,
+      "confirmation_policy_checked_before_mutation": true,
+      "request_id_is_idempotency_key": true,
+      "progress_sequence_is_monotonic_per_operation": true,
+      "cancel_is_cooperative_and_does_not_imply_rollback": true,
+      "capability_proof_is_redacted_from_logs_receipts_and_ui": true,
+      "errors_are_structured_and_redacted": true,
+      "arbitrary_shell_argv_or_exec_is_forbidden": true,
+      "runtime_vendor_identity_is_not_part_of_ipc_identity": true
+    }
+  }
+}

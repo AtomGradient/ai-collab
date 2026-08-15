@@ -1,0 +1,455 @@
+#!/usr/bin/env bash
+# ai-ping <to> [options] [<message>]
+# Legacy 模式写 mailbox；Harness participant 模式把 intent 交回 Host。
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: ai-ping <to> [options] [<message words...>]
+
+Required:
+  <to>                 目标 role (e.g. claude, codex)
+
+Options:
+  --file <path>        从文件读消息正文（推荐：长内容/带代码块）
+  --kind <kind>        消息类型 (default: msg). e.g. review-request, review-response
+  --reply-to <id>      这条是对某条消息的回复
+  --from <role>        显式指定发送者（默认从当前 pane 自动检测）
+  --wait               阻塞等待对方回复（轮询 .ai-mailbox/inbox/<from>/，匹配 reply_to）
+  --timeout <sec>      --wait 超时（默认 300）
+  --                   后续参数当成消息正文
+
+Diagnostics:
+  ai-ping doctor       只读诊断当前项目的 mailbox / 注册 / watcher 状态
+
+示例：
+  ai-ping claude "请审核 src/auth.ts 的并发"
+  ai-ping claude --kind review-request --file /tmp/req.md
+  ai-ping codex --kind review-response --reply-to 20260511-153000-abc123 --file /tmp/review.md
+  ai-ping claude --wait --timeout 600 -- "blocking question"
+EOF
+  exit 1
+}
+
+[[ $# -lt 1 ]] && usage
+case "$1" in -h|--help) usage ;; esac
+if [[ "$1" == "doctor" ]]; then
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  if [[ -x "$SCRIPT_DIR/ai-pane-doctor" ]]; then
+    shift
+    exec "$SCRIPT_DIR/ai-pane-doctor" "$@"
+  fi
+  shift
+  exec ai-pane-doctor "$@"
+fi
+
+TO="$1"; shift
+FROM=""
+FROM_EXPLICIT=false
+KIND="msg"
+REPLY_TO=""
+WAIT=false
+TIMEOUT=300
+FILE=""
+MSG=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --file)      FILE="$2"; shift 2 ;;
+    --kind)      KIND="$2"; shift 2 ;;
+    --reply-to)  REPLY_TO="$2"; shift 2 ;;
+    --from)      FROM="$2"; FROM_EXPLICIT=true; shift 2 ;;
+    --wait)      WAIT=true; shift ;;
+    --timeout)   TIMEOUT="$2"; shift 2 ;;
+    --)          shift; MSG="$*"; break ;;
+    -*)          echo "Unknown option: $1" >&2; usage ;;
+    *)           MSG="${MSG:+$MSG }$1"; shift ;;
+  esac
+done
+
+validate_role() {
+  local label="$1" role="$2"
+  if [[ ! "$role" =~ ^[a-z0-9_-]+$ ]]; then
+    echo "$label must be lowercase alphanum, underscore, or dash (got: $role)" >&2
+    exit 1
+  fi
+  if [[ "$role" == "doctor" ]]; then
+    echo "$label role 'doctor' is reserved for 'ai-ping doctor'" >&2
+    exit 1
+  fi
+}
+
+validate_role "<to>" "$TO"
+if [[ -n "$FROM" ]]; then
+  validate_role "--from" "$FROM"
+fi
+
+# Harness participant mode: the Agent-facing command stays the same, but the
+# intent returns to the authoritative Host instead of creating legacy mailbox
+# state.  Environment values only locate the Host-issued context and canonical
+# product client; Host still requires the scoped capability plus owned-process
+# proof before accepting the sender.
+if [[ -n "${AI_COLLAB_HARNESS_CONTEXT:-}" ]]; then
+  if $FROM_EXPLICIT; then
+    echo "--from is forbidden inside a Harness Scenario; sender identity is scoped by Host." >&2
+    exit 1
+  fi
+  if $WAIT; then
+    echo "--wait is not available in Harness participant mode yet; inspect delivery state through Host." >&2
+    exit 1
+  fi
+  HARNESS_CLIENT="${AI_COLLAB_HARNESS_CLIENT_EXECUTABLE:-}"
+  HARNESS_PYTHONPATH="${AI_COLLAB_HARNESS_CLIENT_PYTHONPATH:-}"
+  if [[ "$HARNESS_CLIENT" != /* || ! -x "$HARNESS_CLIENT" || -L "$HARNESS_CLIENT" ]]; then
+    echo "Harness participant client executable is unavailable." >&2
+    exit 1
+  fi
+  if [[ "$HARNESS_PYTHONPATH" != /* || ! -d "$HARNESS_PYTHONPATH" || -L "$HARNESS_PYTHONPATH" ]]; then
+    echo "Harness participant client module path is unavailable." >&2
+    exit 1
+  fi
+  if [[ ! -f "$AI_COLLAB_HARNESS_CONTEXT" || -L "$AI_COLLAB_HARNESS_CONTEXT" ]]; then
+    echo "Harness participant context is unavailable." >&2
+    exit 1
+  fi
+  HARNESS_OPERATION="send"
+  HARNESS_ARGS=(
+    -m edgestudio.harness.participant_client
+    "$HARNESS_OPERATION"
+    --context "$AI_COLLAB_HARNESS_CONTEXT"
+    --to "$TO"
+    --kind "$KIND"
+  )
+  if [[ -n "$REPLY_TO" ]]; then
+    HARNESS_OPERATION="reply"
+    HARNESS_ARGS=(
+      -m edgestudio.harness.participant_client
+      "$HARNESS_OPERATION"
+      --context "$AI_COLLAB_HARNESS_CONTEXT"
+      --to "$TO"
+      --kind "$KIND"
+      --reply-to "$REPLY_TO"
+    )
+  fi
+  if [[ -n "$FILE" ]]; then
+    HARNESS_ARGS+=(--file "$FILE")
+  elif [[ -n "$MSG" ]]; then
+    HARNESS_ARGS+=(--message "$MSG")
+  elif [[ -t 0 ]]; then
+    echo "No message body. Use --file, pass message as args, or pipe via stdin." >&2
+    exit 1
+  fi
+  export PYTHONPATH="$HARNESS_PYTHONPATH"
+  exec "$HARNESS_CLIENT" "${HARNESS_ARGS[@]}"
+fi
+
+# 找到当前目录向上的 mailbox。存在嵌套 mailbox 时，不能简单选择最近的：
+# pane 可能注册在上层项目，而当前子目录里残留了另一套 .ai-mailbox。
+find_nearest_mailbox() {
+  local dir="$PWD"
+  while [[ "$dir" != "/" && "$dir" != "" ]]; do
+    if [[ -d "$dir/.ai-mailbox" ]]; then
+      printf '%s\n' "$dir/.ai-mailbox"
+      return 0
+    fi
+    dir="$(dirname "$dir")"
+  done
+  return 1
+}
+
+mailbox_has_role() {
+  local mailbox="$1" role="$2"
+  [[ -f "$mailbox/.panes/$role.json" ]]
+}
+
+pane_file_has_session() {
+  local pane_file="$1" session_uuid="$2"
+  [[ -f "$pane_file" ]] && grep -q "\"session_uuid\": *\"$session_uuid\"" "$pane_file" 2>/dev/null
+}
+
+role_for_session_in_mailbox() {
+  local mailbox="$1" session_uuid="$2" f
+  DETECTED_FROM=""
+  for f in "$mailbox/.panes/"*.json; do
+    [[ -f "$f" ]] || continue
+    if pane_file_has_session "$f" "$session_uuid"; then
+      DETECTED_FROM=$(basename "$f" .json)
+      return 0
+    fi
+  done
+  return 1
+}
+
+find_other_mailbox_with_role() {
+  local role="$1" excluded_mailbox="$2" dir="$PWD" mailbox
+  OTHER_ROLE_MAILBOX=""
+  while [[ "$dir" != "/" && "$dir" != "" ]]; do
+    mailbox="$dir/.ai-mailbox"
+    if [[ -d "$mailbox" && "$mailbox" != "$excluded_mailbox" && -f "$mailbox/.panes/$role.json" ]]; then
+      OTHER_ROLE_MAILBOX="$mailbox"
+      return 0
+    fi
+    dir="$(dirname "$dir")"
+  done
+  return 1
+}
+
+select_mailbox_for_auto_from() {
+  local dir mailbox
+
+  # 最优先：当前 pane 注册在该 mailbox，且目标 role 也注册在同一个 mailbox。
+  dir="$PWD"
+  while [[ "$dir" != "/" && "$dir" != "" ]]; do
+    mailbox="$dir/.ai-mailbox"
+    if [[ -d "$mailbox" ]] && mailbox_has_role "$mailbox" "$TO" && role_for_session_in_mailbox "$mailbox" "$SESSION_UUID"; then
+      MAILBOX="$mailbox"
+      return 0
+    fi
+    dir="$(dirname "$dir")"
+  done
+
+  # 兼容“先发消息、目标 pane 稍后注册”的队列语义。
+  dir="$PWD"
+  while [[ "$dir" != "/" && "$dir" != "" ]]; do
+    mailbox="$dir/.ai-mailbox"
+    if [[ -d "$mailbox" ]] && role_for_session_in_mailbox "$mailbox" "$SESSION_UUID"; then
+      MAILBOX="$mailbox"
+      return 0
+    fi
+    dir="$(dirname "$dir")"
+  done
+
+  return 1
+}
+
+select_mailbox_for_explicit_from() {
+  local dir mailbox
+
+  if [[ -n "$SESSION_UUID" ]]; then
+    # 显式 --from 时也优先相信当前 pane 的真实注册位置。
+    dir="$PWD"
+    while [[ "$dir" != "/" && "$dir" != "" ]]; do
+      mailbox="$dir/.ai-mailbox"
+      if [[ -d "$mailbox" ]] && mailbox_has_role "$mailbox" "$TO" && pane_file_has_session "$mailbox/.panes/$FROM.json" "$SESSION_UUID"; then
+        MAILBOX="$mailbox"
+        return 0
+      fi
+      dir="$(dirname "$dir")"
+    done
+
+    dir="$PWD"
+    while [[ "$dir" != "/" && "$dir" != "" ]]; do
+      mailbox="$dir/.ai-mailbox"
+      if [[ -d "$mailbox" ]] && pane_file_has_session "$mailbox/.panes/$FROM.json" "$SESSION_UUID"; then
+        MAILBOX="$mailbox"
+        return 0
+      fi
+      dir="$(dirname "$dir")"
+    done
+  fi
+
+  # 非 iTerm2 / 脚本化调用：优先选择双方都注册的 mailbox。
+  dir="$PWD"
+  while [[ "$dir" != "/" && "$dir" != "" ]]; do
+    mailbox="$dir/.ai-mailbox"
+    if [[ -d "$mailbox" ]] && mailbox_has_role "$mailbox" "$FROM" && mailbox_has_role "$mailbox" "$TO"; then
+      MAILBOX="$mailbox"
+      return 0
+    fi
+    dir="$(dirname "$dir")"
+  done
+
+  dir="$PWD"
+  while [[ "$dir" != "/" && "$dir" != "" ]]; do
+    mailbox="$dir/.ai-mailbox"
+    if [[ -d "$mailbox" ]] && mailbox_has_role "$mailbox" "$FROM"; then
+      MAILBOX="$mailbox"
+      return 0
+    fi
+    dir="$(dirname "$dir")"
+  done
+
+  dir="$PWD"
+  while [[ "$dir" != "/" && "$dir" != "" ]]; do
+    mailbox="$dir/.ai-mailbox"
+    if [[ -d "$mailbox" ]] && mailbox_has_role "$mailbox" "$TO"; then
+      MAILBOX="$mailbox"
+      return 0
+    fi
+    dir="$(dirname "$dir")"
+  done
+
+  MAILBOX="$NEAREST_MAILBOX"
+  return 0
+}
+
+print_mailbox_candidates() {
+  local dir="$PWD" mailbox f role_name roles
+  while [[ "$dir" != "/" && "$dir" != "" ]]; do
+    mailbox="$dir/.ai-mailbox"
+    if [[ -d "$mailbox" ]]; then
+      printf '  %s' "$mailbox" >&2
+      roles=""
+      for f in "$mailbox/.panes/"*.json; do
+        [[ -f "$f" ]] || continue
+        role_name=$(basename "$f" .json)
+        roles="${roles:+$roles }$role_name"
+      done
+      [[ -n "$roles" ]] && printf ' (roles: %s)' "$roles" >&2
+      printf '\n' >&2
+    fi
+    dir="$(dirname "$dir")"
+  done
+}
+
+SESSION_UUID=""
+if [[ -n "${ITERM_SESSION_ID:-}" ]]; then
+  SESSION_UUID="${ITERM_SESSION_ID##*:}"
+  if [[ "$SESSION_UUID" == "$ITERM_SESSION_ID" ]]; then
+    SESSION_UUID=""
+  fi
+fi
+
+NEAREST_MAILBOX=$(find_nearest_mailbox || true)
+MAILBOX=""
+DETECTED_FROM=""
+OTHER_ROLE_MAILBOX=""
+
+if [[ -z "$NEAREST_MAILBOX" ]]; then
+  echo "No .ai-mailbox/ found upward from $PWD" >&2
+  echo "Run 'ai-pane-register <role>' in your project root first." >&2
+  exit 1
+fi
+
+# 自动检测 FROM（从当前 pane 的 ITERM_SESSION_ID 反查 .panes/）
+if [[ -z "$FROM" ]]; then
+  if [[ -z "$SESSION_UUID" ]] || ! select_mailbox_for_auto_from; then
+    echo "Cannot auto-detect --from in any .ai-mailbox upward from $PWD. Either:" >&2
+    echo "  1) run ai-pane-register <role> first, or" >&2
+    echo "  2) pass --from <role> explicitly" >&2
+    echo "" >&2
+    echo "Mailbox candidates found:" >&2
+    print_mailbox_candidates
+    exit 1
+  fi
+  FROM="$DETECTED_FROM"
+else
+  select_mailbox_for_explicit_from
+fi
+
+if [[ "$MAILBOX" != "$NEAREST_MAILBOX" ]]; then
+  echo "Note: using selected registered mailbox:" >&2
+  echo "  $MAILBOX" >&2
+  echo "  skipped nearer mailbox: $NEAREST_MAILBOX" >&2
+fi
+
+if $FROM_EXPLICIT && [[ -n "$SESSION_UUID" ]] && role_for_session_in_mailbox "$MAILBOX" "$SESSION_UUID"; then
+  SESSION_ROLE="$DETECTED_FROM"
+  if [[ -n "$SESSION_ROLE" && "$SESSION_ROLE" != "$FROM" ]]; then
+    echo "Warning: this pane is registered as '$SESSION_ROLE' in the selected mailbox, but sending as --from '$FROM'." >&2
+    echo "Replies will go to inbox/$FROM, not the inbox watched by this pane." >&2
+    echo "Recipients will be told to reply to '$FROM'." >&2
+  fi
+fi
+
+if [[ "$FROM" == "$TO" ]]; then
+  echo "Cannot ping yourself (from=to=$FROM)" >&2
+  exit 1
+fi
+
+# 校验目标 pane 已注册
+if [[ ! -f "$MAILBOX/.panes/$TO.json" ]]; then
+  if find_other_mailbox_with_role "$TO" "$MAILBOX"; then
+    echo "Warning: target '$TO' is not registered in selected mailbox:" >&2
+    echo "  $MAILBOX" >&2
+    echo "but '$TO' is registered in a different mailbox:" >&2
+    echo "  $OTHER_ROLE_MAILBOX" >&2
+    echo "Message will queue in the selected mailbox. Re-register both panes in the same project root if this is unintended." >&2
+  else
+    echo "Warning: target '$TO' not registered yet. Message will queue in inbox." >&2
+  fi
+fi
+
+# 生成消息 ID
+TS=$(date "+%Y%m%d-%H%M%S")
+RAND=$(LC_ALL=C tr -dc 'a-z0-9' < /dev/urandom 2>/dev/null | head -c 6 || true)
+if [[ ${#RAND} -ne 6 ]]; then
+  RAND=$(printf '%06x' "$((RANDOM * 32768 + RANDOM))" | head -c 6)
+fi
+MSG_ID="${TS}-${RAND}"
+
+# 读取消息正文
+BODY=""
+if [[ -n "$FILE" ]]; then
+  if [[ ! -f "$FILE" ]]; then
+    echo "File not found: $FILE" >&2
+    exit 1
+  fi
+  BODY=$(cat "$FILE")
+elif [[ -n "$MSG" ]]; then
+  BODY="$MSG"
+elif [[ ! -t 0 ]]; then
+  # stdin
+  BODY=$(cat)
+else
+  echo "No message body. Use --file, pass message as args, or pipe via stdin." >&2
+  exit 1
+fi
+
+if [[ -z "$BODY" ]]; then
+  echo "Empty message body." >&2
+  exit 1
+fi
+
+# 写入消息文件（atomic：tmp + rename）
+TARGET_INBOX="$MAILBOX/inbox/$TO"
+mkdir -p "$TARGET_INBOX" "$MAILBOX/sent"
+TARGET_FILE="$TARGET_INBOX/${MSG_ID}.md"
+TMP=$(mktemp "$TARGET_INBOX/.tmp.XXXXXX")
+
+{
+  echo "---"
+  echo "id: $MSG_ID"
+  echo "from: $FROM"
+  echo "to: $TO"
+  echo "kind: $KIND"
+  echo "created: $(date "+%Y-%m-%dT%H:%M:%S%z")"
+  if [[ -n "$REPLY_TO" ]]; then
+    echo "reply_to: $REPLY_TO"
+  fi
+  echo "---"
+  echo ""
+  printf '%s\n' "$BODY"
+} > "$TMP"
+
+mv "$TMP" "$TARGET_FILE"
+
+# audit log
+cp "$TARGET_FILE" "$MAILBOX/sent/${MSG_ID}.md"
+
+echo "Sent: $MSG_ID  ($FROM -> $TO, kind=$KIND${REPLY_TO:+, reply_to=$REPLY_TO})"
+echo "  $TARGET_FILE"
+
+# --wait: 轮询自己 inbox 找 reply_to=$MSG_ID 的回复
+if $WAIT; then
+  echo "Waiting for reply to $MSG_ID (timeout ${TIMEOUT}s)..."
+  REPLY_INBOX="$MAILBOX/inbox/$FROM"
+  mkdir -p "$REPLY_INBOX"
+  ELAPSED=0
+  INTERVAL=2
+  while (( ELAPSED < TIMEOUT )); do
+    for f in "$REPLY_INBOX"/*.md; do
+      [[ -f "$f" ]] || continue
+      if grep -qE "^reply_to: *$MSG_ID *$" "$f" 2>/dev/null; then
+        echo ""
+        echo "=== Reply received: $(basename "$f") ==="
+        cat "$f"
+        exit 0
+      fi
+    done
+    sleep "$INTERVAL"
+    ELAPSED=$((ELAPSED + INTERVAL))
+  done
+  echo "Timeout after ${TIMEOUT}s — no reply yet. Message remains in inbox." >&2
+  exit 2
+fi

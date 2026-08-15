@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+# ai-pane-register <role>
+# 注册当前 iTerm2 pane 的 role + session id，并启动 watcher。
+# 在每个 pane 启动两个 AI 之前各跑一次。
+set -euo pipefail
+
+ROLE="${1:-}"
+if [[ -z "$ROLE" ]]; then
+  echo "Usage: ai-pane-register <role>" >&2
+  echo "  e.g. ai-pane-register codex" >&2
+  echo "       ai-pane-register claude" >&2
+  exit 1
+fi
+
+if [[ ! "$ROLE" =~ ^[a-z0-9_-]+$ ]]; then
+  echo "Role must be lowercase alphanum, underscore, or dash (got: $ROLE)" >&2
+  exit 1
+fi
+if [[ "$ROLE" == "doctor" ]]; then
+  echo "Role 'doctor' is reserved for 'ai-ping doctor'" >&2
+  exit 1
+fi
+
+if [[ -z "${ITERM_SESSION_ID:-}" ]]; then
+  echo "ITERM_SESSION_ID not set. Run this from inside an iTerm2 pane." >&2
+  exit 1
+fi
+
+# ITERM_SESSION_ID format: w<n>t<n>p<n>:<UUID>
+SESSION_UUID="${ITERM_SESSION_ID##*:}"
+if [[ -z "$SESSION_UUID" || "$SESSION_UUID" == "$ITERM_SESSION_ID" ]]; then
+  echo "Cannot parse UUID from ITERM_SESSION_ID=$ITERM_SESSION_ID" >&2
+  exit 1
+fi
+
+find_parent_mailbox() {
+  local dir
+  dir="$(dirname "$PWD")"
+  while [[ "$dir" != "/" && "$dir" != "" ]]; do
+    if [[ -d "$dir/.ai-mailbox" ]]; then
+      printf '%s\n' "$dir/.ai-mailbox"
+      return 0
+    fi
+    dir="$(dirname "$dir")"
+  done
+  return 1
+}
+
+MAILBOX="$PWD/.ai-mailbox"
+PARENT_MAILBOX=$(find_parent_mailbox || true)
+if [[ -n "$PARENT_MAILBOX" ]]; then
+  echo "" >&2
+  echo "WARNING: an ancestor mailbox already exists:" >&2
+  echo "  $PARENT_MAILBOX" >&2
+  if [[ -d "$MAILBOX" ]]; then
+    echo "Registering here will use this nested mailbox:" >&2
+  else
+    echo "Registering here will create a separate mailbox:" >&2
+  fi
+  echo "  $MAILBOX" >&2
+  echo "If this pane should join the ancestor collaboration, cd to that project root and run ai-pane-register there." >&2
+  echo "" >&2
+fi
+mkdir -p "$MAILBOX/inbox/$ROLE" "$MAILBOX/sent" "$MAILBOX/.panes"
+
+# 检测是否在覆盖已有的 different-UUID 注册（防止用户没意识到老 pane 被静默 orphan）
+PREV_PANE_FILE="$MAILBOX/.panes/$ROLE.json"
+if [[ -f "$PREV_PANE_FILE" ]]; then
+  if command -v jq >/dev/null 2>&1; then
+    PREV_UUID=$(jq -r '.session_uuid // ""' "$PREV_PANE_FILE" 2>/dev/null || echo "")
+  else
+    PREV_UUID=$(grep '"session_uuid"' "$PREV_PANE_FILE" | sed 's/.*"session_uuid": *"\([^"]*\)".*/\1/' | head -n 1)
+  fi
+  if [[ -n "$PREV_UUID" && "$PREV_UUID" != "$SESSION_UUID" ]]; then
+    echo ""
+    echo "WARNING: '$ROLE' was registered to a different pane. Auto-replacing."
+    echo "  prev session: $PREV_UUID  (will be orphaned — still running, no longer notified)"
+    echo "  new session:  $SESSION_UUID  (this pane)"
+    echo "  to restore the previous pane, just run 'ai-pane-register $ROLE' from it."
+    echo ""
+  fi
+fi
+
+# Write pane info
+cat > "$MAILBOX/.panes/$ROLE.json" <<EOF
+{
+  "role": "$ROLE",
+  "session_uuid": "$SESSION_UUID",
+  "iterm_session_id": "$ITERM_SESSION_ID",
+  "cwd": "$PWD",
+  "registered_at": "$(date "+%Y-%m-%dT%H:%M:%S%z")"
+}
+EOF
+
+echo "Registered '$ROLE' -> session $SESSION_UUID"
+echo "  mailbox: $MAILBOX"
+
+# 启动 watcher：每次 register 都做幂等 reset，避免 orphan watcher 累积。
+# nohup 之后 watcher 会被 reparent 到 init，单纯 kill PID 文件里那个 pid 不够，
+# 必须按 cmdline 把同一 role+mailbox 的所有进程一并清掉。
+WATCH_PID_FILE="$MAILBOX/.watch-$ROLE.pid"
+WATCH_LOG="$MAILBOX/.watch-$ROLE.log"
+WATCH_CMD_PATTERN="ai-collab-watch $ROLE $MAILBOX"
+
+# pgrep 找不到匹配会 exit 1，配合 set -e + pipefail 会让整个脚本静默退出。
+# 因此显式吞掉 non-zero。
+EXISTING=$(pgrep -f "$WATCH_CMD_PATTERN" 2>/dev/null || true)
+if [[ -n "$EXISTING" ]]; then
+  echo "Killing existing watcher(s) for $ROLE: $(echo "$EXISTING" | tr '\n' ' ')"
+  pkill -f "$WATCH_CMD_PATTERN" 2>/dev/null || true
+  pkill -f "fswatch.*$MAILBOX/inbox/$ROLE" 2>/dev/null || true
+  sleep 0.3
+  pkill -9 -f "$WATCH_CMD_PATTERN" 2>/dev/null || true
+  pkill -9 -f "fswatch.*$MAILBOX/inbox/$ROLE" 2>/dev/null || true
+  sleep 0.2
+fi
+rm -f "$WATCH_PID_FILE"
+
+# 起新 watcher
+nohup ai-collab-watch "$ROLE" "$MAILBOX" >> "$WATCH_LOG" 2>&1 &
+WATCH_PID=$!
+echo "$WATCH_PID" > "$WATCH_PID_FILE"
+disown 2>/dev/null || true
+sleep 0.4
+
+if ! kill -0 "$WATCH_PID" 2>/dev/null; then
+  echo "Watcher failed to start. See $WATCH_LOG" >&2
+  rm -f "$WATCH_PID_FILE"
+  exit 1
+fi
+# 不在这里做 pgrep count（process substitution 的 subshell 会让计数翻倍误报）；
+# orphan 防护由前面的预先 pkill 负责。
+echo "Watcher started (pid $WATCH_PID, log $WATCH_LOG)"
+
+# .gitignore reminder
+GITIGNORE="$PWD/.gitignore"
+if [[ -d "$PWD/.git" ]]; then
+  if [[ ! -f "$GITIGNORE" ]] || ! grep -qE '^\.ai-mailbox/?$' "$GITIGNORE" 2>/dev/null; then
+    echo ""
+    echo "Tip: add '.ai-mailbox/' to .gitignore"
+  fi
+fi

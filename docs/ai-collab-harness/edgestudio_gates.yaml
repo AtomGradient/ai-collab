@@ -1,0 +1,686 @@
+schema_version: 2
+registry_id: ai-collab-scenario-harness-edgestudio-v3.2-20260809
+docs_projection: docs/ai-collab-harness/edgestudio_integration.md
+
+# class=cacheable: immutable evidence 可在完整 input fingerprint 和有效期内复用。
+# class=revocable: 每次 preflight/operation 必须实时探测；历史 receipt 只保存 observation。
+# class=derived: 不保存独立 passed evidence；每次从依赖 gate 的当前状态重新计算。
+# evaluation=verifier|aggregate|decision 定义通过结果的唯一来源。
+receipt_contract:
+  schema_version: 2
+  evidence_path_template: receipts/runs/{run_id}/{gate_id}.json
+  current_view_path_template: receipts/gates/{gate_id}.json
+  aggregate_policy: recompute_from_current_dependencies
+  bootstrap_allowed_groups: [stage-0, immediate, phase-minus-1]
+  default_fingerprint_inputs:
+    - registry_digest
+    - producer_digest
+    - verifier_digest
+    - verifier_params_digest
+    - project_descriptor_digest
+    - manifest_digest
+    - host_cli_app_versions
+    - runtime_driver_registry_digest
+    - window_driver_version
+    - os_version
+
+delivery_contract:
+  canonical_states: [queued, delivery_attempted, delivered, consumed]
+
+workflow:
+  phase_order:
+    - stage-0
+    - immediate
+    - gate-0
+    - phase-minus-1
+    - phase-0
+    - phase-1
+    - phase-2
+    - phase-3
+    - phase-4
+    - phase-5
+  phase_gate_assignments:
+    stage-0:
+      - PREIMPL-SNAPSHOT-001
+    immediate:
+      - LEGACY-DELIVERY-001
+    gate-0:
+      - DOD-SCOPE-001
+    phase-minus-1:
+      - SPIKE-HOST-001
+      - SPIKE-IPC-001
+      - SPIKE-ITERM-001
+      - SPIKE-RUNTIME-DRIVER-001
+      - SPIKE-TUI-ID-001
+      - SPIKE-TUI-LIFE-001
+      - SPIKE-DELIVERY-001
+      - SPIKE-WINDOW-TOPOLOGY-001
+      - SPIKE-STORAGE-001
+      - SPIKE-CLOSE-001
+      - SPIKE-UPGRADE-001
+      - DOD-SPIKES-001
+    phase-0:
+      - ACC-PARTICIPANT-IDENTITY-001
+      - ACC-RUNTIME-CAPABILITY-001
+      - ACC-MODEL-BINDING-001
+      - ACC-POLICY-ROUTING-001
+    phase-1:
+      - ACC-PROVISION-001
+      - ACC-GIT-STORAGE-001
+      - ACC-GIT-ORIGIN-001
+      - ACC-GIT-GUARD-001
+      - ACC-REMOTE-NAME-001
+      - ACC-ENV-001
+    phase-2:
+      - ACC-HOST-001
+      - ACC-IPC-001
+      - ACC-PERM-001
+      - ACC-PROJECT-ACCESS-001
+      - ACC-REGISTRY-001
+      - ACC-MIGRATION-001
+    phase-3:
+      - ACC-PARTICIPANT-LIFECYCLE-001
+      - ACC-READY-001
+      - ACC-DELIVERY-001
+      - ACC-CROSS-DELIVERY-001
+      - ACC-RESUME-001
+      - ACC-PARTICIPANT-FAULT-001
+      - ACC-WINDOW-TOPOLOGY-001
+    phase-4:
+      - ACC-WIP-001
+      - ACC-CLOSE-001
+      - ACC-RESOURCE-001
+      - ACC-DESTROY-001
+      - ACC-ROLLBACK-001
+    phase-5:
+      - ACC-EFFICIENCY-001
+      - DOD-PERMISSION-001
+      - DOD-IPC-001
+      - DOD-ISOLATION-001
+      - DOD-PARTICIPANT-001
+      - DOD-COLLABORATION-001
+      - DOD-WINDOW-001
+      - DOD-GIT-001
+      - DOD-DELIVERY-001
+      - DOD-LIFECYCLE-001
+      - DOD-RISK-001
+      - DOD-DIAGNOSTIC-001
+      - DOD-EFFICIENCY-001
+      - DOD-ROLLBACK-001
+  must_precede:
+    - gate_id: PREIMPL-SNAPSHOT-001
+      before_groups: [immediate, phase-minus-1, acceptance, dod]
+    - gate_id: LEGACY-DELIVERY-001
+      before_groups: [phase-minus-1, acceptance, dod]
+    - gate_id: DOD-SCOPE-001
+      before_groups: [phase-minus-1, acceptance]
+    - gate_id: DOD-SPIKES-001
+      before_groups: [acceptance]
+
+gates:
+  - gate_id: PREIMPL-SNAPSHOT-001
+    group: stage-0
+    required: true
+    class: cacheable
+    evaluation: verifier
+    producer: bootstrap_verifier
+    verifier: pre_implementation_snapshot_restore
+    verifier_params:
+      exact_sha_for_all_declared_repositories: true
+      require_non_git_data_classification: true
+      require_archive_checksums: true
+      require_non_canonical_restore_drill: true
+      forbid_secret_pii_and_full_session_identity: true
+
+  - gate_id: LEGACY-DELIVERY-001
+    group: immediate
+    required: true
+    class: cacheable
+    evaluation: verifier
+    producer: bootstrap_verifier
+    verifier: pingagent_legacy_delivery
+    depends_on: [PREIMPL-SNAPSHOT-001]
+    verifier_params:
+      sidecar_after_confirmed_injection_only: true
+      require_session_missing_and_tcc_regressions: true
+    related_gates: [ACC-DELIVERY-001, DOD-DELIVERY-001, ACC-ROLLBACK-001]
+
+  - gate_id: ACC-HOST-001
+    group: acceptance
+    required: true
+    class: revocable
+    evaluation: verifier
+    producer: system_probe
+    verifier: host_install_and_live_status
+    max_age_seconds: 0
+  - gate_id: ACC-IPC-001
+    group: acceptance
+    required: true
+    class: cacheable
+    evaluation: verifier
+    producer: host
+    verifier: ipc_security_acceptance
+  - gate_id: ACC-PERM-001
+    group: acceptance
+    required: true
+    class: revocable
+    evaluation: verifier
+    producer: system_probe
+    verifier: permission_live_probe
+    max_age_seconds: 0
+  - gate_id: ACC-PROJECT-ACCESS-001
+    group: acceptance
+    required: true
+    class: revocable
+    evaluation: verifier
+    producer: system_probe
+    verifier: project_access_live_probe
+    max_age_seconds: 0
+  - gate_id: ACC-PROVISION-001
+    group: acceptance
+    required: true
+    class: cacheable
+    evaluation: verifier
+    producer: host
+    verifier: provision_crash_acceptance
+  - gate_id: ACC-GIT-STORAGE-001
+    group: acceptance
+    required: true
+    class: cacheable
+    evaluation: verifier
+    producer: host
+    verifier: git_storage_acceptance
+  - gate_id: ACC-GIT-ORIGIN-001
+    group: acceptance
+    required: true
+    class: cacheable
+    evaluation: verifier
+    producer: host
+    verifier: git_origin_acceptance
+  - gate_id: ACC-GIT-GUARD-001
+    group: acceptance
+    required: true
+    class: cacheable
+    evaluation: verifier
+    producer: host
+    verifier: git_guard_acceptance
+  - gate_id: ACC-REMOTE-NAME-001
+    group: acceptance
+    required: true
+    class: cacheable
+    evaluation: verifier
+    producer: host
+    verifier: remote_name_acceptance
+  - gate_id: ACC-ENV-001
+    group: acceptance
+    required: true
+    class: cacheable
+    evaluation: verifier
+    producer: host
+    verifier: environment_isolation_acceptance
+  - gate_id: ACC-REGISTRY-001
+    group: acceptance
+    required: true
+    class: cacheable
+    evaluation: verifier
+    producer: host
+    verifier: registry_concurrency_acceptance
+  - gate_id: ACC-PARTICIPANT-IDENTITY-001
+    group: acceptance
+    required: true
+    class: cacheable
+    evaluation: verifier
+    producer: host
+    verifier: participant_identity_acceptance
+    verifier_params:
+      identity_key: [scenario_id, participant_id]
+      forbid_role_or_product_identity: true
+  - gate_id: ACC-PARTICIPANT-LIFECYCLE-001
+    group: acceptance
+    required: true
+    class: cacheable
+    evaluation: verifier
+    producer: host
+    verifier: participant_lifecycle_acceptance
+    verifier_params:
+      required_transitions:
+        - detached_to_stopped_on_add
+        - stopped_to_starting_to_ready
+        - ready_or_degraded_to_stopping
+        - stopping_to_stopped_on_success
+        - stopping_to_degraded_on_failure
+        - degraded_to_starting_on_recover
+        - stopped_to_detached
+      detach_sets_desired_before_cleanup: true
+      degraded_detach_retryable: true
+      replace_is_generation_fenced_compound_operation: true
+  - gate_id: ACC-RUNTIME-CAPABILITY-001
+    group: acceptance
+    required: true
+    class: cacheable
+    evaluation: verifier
+    producer: host
+    verifier: runtime_driver_capability_acceptance
+    verifier_params:
+      forbid_host_product_branches: true
+      modes: [tui, headless]
+      required_continuity_modes: [explicit_recreate]
+      optional_capability_modes: [exact_resume]
+      harness_process_binding_required: true
+      vendor_session_identity_required: false
+      optional_capabilities_must_be_declared: true
+      unsupported_request_rejected_before_desired_state_change: true
+  - gate_id: ACC-MODEL-BINDING-001
+    group: acceptance
+    required: true
+    class: cacheable
+    evaluation: verifier
+    producer: host
+    verifier: immutable_model_binding_acceptance
+    verifier_params:
+      opaque_reference_only: true
+      forbid_credentials: true
+      set_before_start: true
+      immutable_per_participant_generation: true
+      change_requires_new_runtime_generation: true
+      forbid_live_rebind_operation: true
+  - gate_id: ACC-READY-001
+    group: acceptance
+    required: true
+    class: cacheable
+    evaluation: verifier
+    producer: host
+    verifier: participant_ready_acceptance
+    verifier_params:
+      target_set: all_desired_running_participants
+  - gate_id: ACC-DELIVERY-001
+    group: acceptance
+    required: true
+    class: cacheable
+    evaluation: verifier
+    producer: host
+    verifier: host_delivery_acceptance
+    related_gates: [LEGACY-DELIVERY-001, DOD-DELIVERY-001]
+  - gate_id: ACC-CROSS-DELIVERY-001
+    group: acceptance
+    required: true
+    class: cacheable
+    evaluation: verifier
+    producer: host
+    verifier: participant_cross_delivery_acceptance
+    verifier_params:
+      include_same_runtime_instances: true
+      target_set: all_declared_test_targets
+  - gate_id: ACC-POLICY-ROUTING-001
+    group: acceptance
+    required: true
+    class: cacheable
+    evaluation: verifier
+    producer: host
+    verifier: collaboration_policy_routing_acceptance
+    verifier_params:
+      require_versioned_policy_digest: true
+      forbid_implicit_topology: true
+  - gate_id: ACC-RESUME-001
+    group: acceptance
+    required: true
+    class: cacheable
+    evaluation: verifier
+    producer: host
+    verifier: participant_continuity_acceptance
+    verifier_params:
+      required_continuity_modes: [explicit_recreate]
+      optional_capability_modes: [exact_resume]
+      exact_resume_requires_vendor_session_identity_capability: true
+      unsupported_request_rejected_before_desired_state_change: true
+      explicit_recreate_must_be_presented_as_recreate: true
+      forbid_resume_fallback: true
+      forbid_role_cwd_window_or_recent_session_heuristics: true
+  - gate_id: ACC-PARTICIPANT-FAULT-001
+    group: acceptance
+    required: true
+    class: cacheable
+    evaluation: verifier
+    producer: host
+    verifier: participant_fault_isolation_acceptance
+  - gate_id: ACC-WINDOW-TOPOLOGY-001
+    group: acceptance
+    required: true
+    class: cacheable
+    evaluation: verifier
+    producer: host
+    verifier: window_topology_acceptance
+    verifier_params:
+      one_top_level_window_per_interactive_participant: true
+      headless_has_no_window: true
+      geometry_key: [machine_id, display_topology_fingerprint]
+  - gate_id: ACC-WIP-001
+    group: acceptance
+    required: true
+    class: cacheable
+    evaluation: verifier
+    producer: host
+    verifier: wip_preservation_acceptance
+  - gate_id: ACC-CLOSE-001
+    group: acceptance
+    required: true
+    class: cacheable
+    evaluation: verifier
+    producer: host
+    verifier: close_lifecycle_acceptance
+  - gate_id: ACC-RESOURCE-001
+    group: acceptance
+    required: true
+    class: cacheable
+    evaluation: verifier
+    producer: host
+    verifier: resource_fencing_acceptance
+    verifier_params:
+      resource_classes: [port, device, compute, accelerator, exclusive_runtime]
+  - gate_id: ACC-DESTROY-001
+    group: acceptance
+    required: true
+    class: cacheable
+    evaluation: verifier
+    producer: host
+    verifier: destroy_guard_acceptance
+  - gate_id: ACC-MIGRATION-001
+    group: acceptance
+    required: true
+    class: cacheable
+    evaluation: verifier
+    producer: host
+    verifier: migration_acceptance
+  - gate_id: ACC-ROLLBACK-001
+    group: acceptance
+    required: true
+    class: cacheable
+    evaluation: verifier
+    producer: external_acceptance_runner
+    verifier: manual_independent_window_rollback_acceptance
+    depends_on: [LEGACY-DELIVERY-001]
+  - gate_id: ACC-EFFICIENCY-001
+    group: acceptance
+    required: true
+    class: cacheable
+    evaluation: verifier
+    producer: host
+    verifier: efficiency_acceptance
+
+  - gate_id: DOD-SCOPE-001
+    group: dod
+    required: true
+    class: cacheable
+    evaluation: decision
+    decision_schema: user_scope_decision_v1
+    depends_on:
+      - LEGACY-DELIVERY-001
+  - gate_id: DOD-SPIKES-001
+    group: dod
+    required: true
+    class: derived
+    evaluation: aggregate
+    depends_on:
+      - SPIKE-HOST-001
+      - SPIKE-IPC-001
+      - SPIKE-ITERM-001
+      - SPIKE-RUNTIME-DRIVER-001
+      - SPIKE-TUI-ID-001
+      - SPIKE-TUI-LIFE-001
+      - SPIKE-DELIVERY-001
+      - SPIKE-WINDOW-TOPOLOGY-001
+      - SPIKE-STORAGE-001
+      - SPIKE-CLOSE-001
+      - SPIKE-UPGRADE-001
+  - gate_id: DOD-PERMISSION-001
+    group: dod
+    required: true
+    class: derived
+    evaluation: aggregate
+    depends_on: [ACC-HOST-001, ACC-PERM-001, ACC-PROJECT-ACCESS-001]
+  - gate_id: DOD-IPC-001
+    group: dod
+    required: true
+    class: derived
+    evaluation: aggregate
+    depends_on: [ACC-IPC-001]
+  - gate_id: DOD-ISOLATION-001
+    group: dod
+    required: true
+    class: derived
+    evaluation: aggregate
+    depends_on:
+      - ACC-PROVISION-001
+      - ACC-ENV-001
+      - ACC-PARTICIPANT-IDENTITY-001
+      - ACC-CROSS-DELIVERY-001
+      - ACC-RESUME-001
+  - gate_id: DOD-PARTICIPANT-001
+    group: dod
+    required: true
+    class: derived
+    evaluation: aggregate
+    depends_on:
+      - ACC-PARTICIPANT-IDENTITY-001
+      - ACC-PARTICIPANT-LIFECYCLE-001
+      - ACC-RUNTIME-CAPABILITY-001
+      - ACC-MODEL-BINDING-001
+      - ACC-PARTICIPANT-FAULT-001
+  - gate_id: DOD-COLLABORATION-001
+    group: dod
+    required: true
+    class: derived
+    evaluation: aggregate
+    depends_on:
+      - ACC-POLICY-ROUTING-001
+      - ACC-READY-001
+      - ACC-DELIVERY-001
+      - ACC-CROSS-DELIVERY-001
+  - gate_id: DOD-WINDOW-001
+    group: dod
+    required: true
+    class: derived
+    evaluation: aggregate
+    depends_on: [ACC-WINDOW-TOPOLOGY-001, ACC-READY-001, ACC-RESUME-001]
+  - gate_id: DOD-GIT-001
+    group: dod
+    required: true
+    class: derived
+    evaluation: aggregate
+    depends_on: [ACC-GIT-STORAGE-001, ACC-GIT-ORIGIN-001, ACC-GIT-GUARD-001, ACC-REMOTE-NAME-001]
+  - gate_id: DOD-DELIVERY-001
+    group: dod
+    required: true
+    class: derived
+    evaluation: aggregate
+    depends_on: [ACC-READY-001, ACC-DELIVERY-001, ACC-CROSS-DELIVERY-001]
+    related_gates: [LEGACY-DELIVERY-001, ACC-DELIVERY-001]
+  - gate_id: DOD-LIFECYCLE-001
+    group: dod
+    required: true
+    class: derived
+    evaluation: aggregate
+    depends_on:
+      - ACC-REGISTRY-001
+      - ACC-PARTICIPANT-LIFECYCLE-001
+      - ACC-PARTICIPANT-FAULT-001
+      - ACC-RESUME-001
+      - ACC-WINDOW-TOPOLOGY-001
+      - ACC-WIP-001
+      - ACC-CLOSE-001
+  - gate_id: DOD-RISK-001
+    group: dod
+    required: true
+    class: derived
+    evaluation: aggregate
+    depends_on: [ACC-GIT-GUARD-001, ACC-RESOURCE-001, ACC-DESTROY-001]
+  - gate_id: DOD-DIAGNOSTIC-001
+    group: dod
+    required: true
+    class: derived
+    evaluation: aggregate
+    depends_on:
+      - ACC-HOST-001
+      - ACC-PERM-001
+      - ACC-PROJECT-ACCESS-001
+      - ACC-MIGRATION-001
+      - ACC-PARTICIPANT-FAULT-001
+      - ACC-WINDOW-TOPOLOGY-001
+  - gate_id: DOD-EFFICIENCY-001
+    group: dod
+    required: true
+    class: derived
+    evaluation: aggregate
+    depends_on: [ACC-EFFICIENCY-001]
+  - gate_id: DOD-ROLLBACK-001
+    group: dod
+    required: true
+    class: derived
+    evaluation: aggregate
+    depends_on: [LEGACY-DELIVERY-001, ACC-ROLLBACK-001]
+
+  - gate_id: SPIKE-HOST-001
+    group: phase-minus-1
+    required: true
+    class: cacheable
+    evaluation: verifier
+    producer: bootstrap_verifier
+    verifier: host_install_feasibility
+    depends_on:
+      - LEGACY-DELIVERY-001
+      - DOD-SCOPE-001
+  - gate_id: SPIKE-IPC-001
+    group: phase-minus-1
+    required: true
+    class: cacheable
+    evaluation: verifier
+    producer: bootstrap_verifier
+    verifier: ipc_feasibility
+    depends_on:
+      - LEGACY-DELIVERY-001
+      - DOD-SCOPE-001
+      - SPIKE-HOST-001
+  - gate_id: SPIKE-ITERM-001
+    group: phase-minus-1
+    required: true
+    class: cacheable
+    evaluation: verifier
+    producer: bootstrap_verifier
+    verifier: iterm_presentation_driver_feasibility
+    depends_on:
+      - LEGACY-DELIVERY-001
+      - DOD-SCOPE-001
+      - SPIKE-IPC-001
+      - SPIKE-RUNTIME-DRIVER-001
+  - gate_id: SPIKE-RUNTIME-DRIVER-001
+    group: phase-minus-1
+    required: true
+    class: cacheable
+    evaluation: verifier
+    producer: bootstrap_verifier
+    verifier: runtime_driver_contract_feasibility
+    depends_on:
+      - LEGACY-DELIVERY-001
+      - DOD-SCOPE-001
+    verifier_params:
+      required_continuity_modes: [explicit_recreate]
+      optional_capability_modes: [exact_resume]
+      harness_process_binding_required: true
+      vendor_session_identity_required: false
+      optional_capabilities_must_be_declared: true
+      unsupported_request_rejected_before_desired_state_change: true
+      forbid_host_product_branches: true
+  - gate_id: SPIKE-TUI-ID-001
+    group: phase-minus-1
+    required: true
+    class: cacheable
+    evaluation: verifier
+    producer: bootstrap_verifier
+    verifier: harness_process_presentation_identity_feasibility
+    depends_on:
+      - LEGACY-DELIVERY-001
+      - DOD-SCOPE-001
+      - SPIKE-RUNTIME-DRIVER-001
+      - SPIKE-IPC-001
+      - SPIKE-ITERM-001
+    verifier_params:
+      required_binding_layers: [participant_generation, harness_process, exact_presentation]
+      foreground_job_must_be_owned_descendant: true
+      owned_process_group_match_required: true
+      process_name_ownership_forbidden: true
+      required_continuity_mode: explicit_recreate
+      vendor_session_identity_required: false
+      exact_resume_required: false
+      optional_capabilities_must_be_declared: true
+      unsupported_request_rejected_before_desired_state_change: true
+      forbid_host_product_branches: true
+      forbid_implicit_recent_session_fallback: true
+      forbid_resume_fallback: true
+      forbid_role_cwd_window_or_recent_session_heuristics: true
+      private_session_database_scan_forbidden: true
+      incompatible_driver_isolated: true
+  - gate_id: SPIKE-TUI-LIFE-001
+    group: phase-minus-1
+    required: true
+    class: cacheable
+    evaluation: verifier
+    producer: bootstrap_verifier
+    verifier: runtime_lifecycle_feasibility
+    depends_on:
+      - SPIKE-TUI-ID-001
+    verifier_params:
+      required_continuity_modes: [explicit_recreate]
+      optional_capability_modes: [exact_resume]
+      exact_resume_requires_vendor_session_identity_capability: true
+      unsupported_request_rejected_before_desired_state_change: true
+      forbid_implicit_recent_session_fallback: true
+      forbid_resume_fallback: true
+      forbid_role_cwd_window_or_recent_session_heuristics: true
+  - gate_id: SPIKE-DELIVERY-001
+    group: phase-minus-1
+    required: true
+    class: cacheable
+    evaluation: verifier
+    producer: bootstrap_verifier
+    verifier: delivery_ack_feasibility
+    depends_on:
+      - SPIKE-HOST-001
+      - SPIKE-IPC-001
+      - SPIKE-TUI-ID-001
+      - SPIKE-TUI-LIFE-001
+  - gate_id: SPIKE-WINDOW-TOPOLOGY-001
+    group: phase-minus-1
+    required: true
+    class: cacheable
+    evaluation: verifier
+    producer: bootstrap_verifier
+    verifier: display_topology_restore_feasibility
+    depends_on:
+      - SPIKE-ITERM-001
+      - SPIKE-TUI-ID-001
+  - gate_id: SPIKE-STORAGE-001
+    group: phase-minus-1
+    required: true
+    class: cacheable
+    evaluation: verifier
+    producer: bootstrap_verifier
+    verifier: storage_budget_feasibility
+    depends_on:
+      - DOD-SCOPE-001
+  - gate_id: SPIKE-CLOSE-001
+    group: phase-minus-1
+    required: true
+    class: cacheable
+    evaluation: verifier
+    producer: bootstrap_verifier
+    verifier: close_fencing_feasibility
+    depends_on:
+      - SPIKE-TUI-ID-001
+      - SPIKE-TUI-LIFE-001
+  - gate_id: SPIKE-UPGRADE-001
+    group: phase-minus-1
+    required: true
+    class: cacheable
+    evaluation: verifier
+    producer: bootstrap_verifier
+    verifier: upgrade_migration_feasibility

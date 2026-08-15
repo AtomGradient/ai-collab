@@ -1,0 +1,420 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ai-collab:collaboration-policy-delivery:v1",
+  "title": "AI Collaboration Policy, Routing, and Delivery contract v1",
+  "oneOf": [
+    {"$ref": "#/$defs/policy_pack"},
+    {"$ref": "#/$defs/policy_snapshot"},
+    {"$ref": "#/$defs/route_request"},
+    {"$ref": "#/$defs/route_decision"},
+    {"$ref": "#/$defs/delivery_record"},
+    {"$ref": "#/$defs/delivery_ack"},
+    {"$ref": "#/$defs/consumption_ack"}
+  ],
+  "$defs": {
+    "opaque_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "namespaced_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*(\\.[a-z][a-z0-9-]*)+$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "generation": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "nullable_opaque_id": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/opaque_id"}
+      ]
+    },
+    "nullable_namespaced_id": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/namespaced_id"}
+      ]
+    },
+    "nullable_sha256": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/sha256"}
+      ]
+    },
+    "participant_ref": {
+      "type": "object",
+      "required": ["scenario_id", "participant_id", "participant_generation"],
+      "properties": {
+        "scenario_id": {"$ref": "#/$defs/opaque_id"},
+        "participant_id": {"$ref": "#/$defs/opaque_id"},
+        "participant_generation": {"$ref": "#/$defs/generation"}
+      },
+      "additionalProperties": false
+    },
+    "selector_participant": {
+      "type": "object",
+      "required": ["kind", "participant"],
+      "properties": {
+        "kind": {"const": "participant"},
+        "participant": {"$ref": "#/$defs/participant_ref"}
+      },
+      "additionalProperties": false
+    },
+    "selector_assignment": {
+      "type": "object",
+      "required": ["kind", "attribute", "task_id"],
+      "properties": {
+        "kind": {"const": "assignment"},
+        "attribute": {"$ref": "#/$defs/namespaced_id"},
+        "task_id": {"$ref": "#/$defs/nullable_opaque_id"}
+      },
+      "additionalProperties": false
+    },
+    "route_selector": {
+      "oneOf": [
+        {"$ref": "#/$defs/selector_participant"},
+        {"$ref": "#/$defs/selector_assignment"}
+      ]
+    },
+    "assignment_binding": {
+      "type": "object",
+      "required": ["assignment_id", "attribute", "task_id", "participant"],
+      "properties": {
+        "assignment_id": {"$ref": "#/$defs/opaque_id"},
+        "attribute": {"$ref": "#/$defs/namespaced_id"},
+        "task_id": {"$ref": "#/$defs/nullable_opaque_id"},
+        "participant": {"$ref": "#/$defs/participant_ref"}
+      },
+      "additionalProperties": false
+    },
+    "retry_profile": {
+      "type": "object",
+      "required": ["profile_id", "max_attempts", "backoff_ms"],
+      "properties": {
+        "profile_id": {"$ref": "#/$defs/opaque_id"},
+        "max_attempts": {"type": "integer", "minimum": 1},
+        "backoff_ms": {
+          "type": "array",
+          "items": {"type": "integer", "minimum": 0}
+        }
+      },
+      "additionalProperties": false
+    },
+    "route_rule": {
+      "type": "object",
+      "required": [
+        "rule_id",
+        "sender",
+        "receiver",
+        "message_kind",
+        "effect",
+        "retry_profile_id"
+      ],
+      "properties": {
+        "rule_id": {"$ref": "#/$defs/opaque_id"},
+        "sender": {"$ref": "#/$defs/route_selector"},
+        "receiver": {"$ref": "#/$defs/route_selector"},
+        "message_kind": {"$ref": "#/$defs/namespaced_id"},
+        "effect": {"enum": ["allow", "deny"]},
+        "retry_profile_id": {"$ref": "#/$defs/nullable_opaque_id"}
+      },
+      "additionalProperties": false
+    },
+    "policy_pack": {
+      "type": "object",
+      "required": [
+        "policy_contract_version",
+        "policy_id",
+        "policy_version",
+        "scenario_id",
+        "default_effect",
+        "assignments",
+        "retry_profiles",
+        "route_rules"
+      ],
+      "properties": {
+        "policy_contract_version": {"const": 1},
+        "policy_id": {"$ref": "#/$defs/namespaced_id"},
+        "policy_version": {"$ref": "#/$defs/generation"},
+        "scenario_id": {"$ref": "#/$defs/opaque_id"},
+        "default_effect": {"const": "deny"},
+        "assignments": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/assignment_binding"}
+        },
+        "retry_profiles": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/retry_profile"}
+        },
+        "route_rules": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/route_rule"}
+        }
+      },
+      "additionalProperties": false
+    },
+    "policy_snapshot": {
+      "type": "object",
+      "required": ["policy_id", "policy_version", "policy_digest"],
+      "properties": {
+        "policy_id": {"$ref": "#/$defs/namespaced_id"},
+        "policy_version": {"$ref": "#/$defs/generation"},
+        "policy_digest": {"$ref": "#/$defs/sha256"}
+      },
+      "additionalProperties": false
+    },
+    "route_request": {
+      "type": "object",
+      "required": [
+        "request_id",
+        "message_id",
+        "scenario_id",
+        "sender",
+        "receiver_intent",
+        "message_kind",
+        "payload_digest",
+        "policy_snapshot"
+      ],
+      "properties": {
+        "request_id": {"$ref": "#/$defs/opaque_id"},
+        "message_id": {"$ref": "#/$defs/opaque_id"},
+        "scenario_id": {"$ref": "#/$defs/opaque_id"},
+        "sender": {"$ref": "#/$defs/participant_ref"},
+        "receiver_intent": {"$ref": "#/$defs/route_selector"},
+        "message_kind": {"$ref": "#/$defs/namespaced_id"},
+        "payload_digest": {"$ref": "#/$defs/sha256"},
+        "policy_snapshot": {"$ref": "#/$defs/policy_snapshot"}
+      },
+      "additionalProperties": false
+    },
+    "route_decision": {
+      "type": "object",
+      "required": [
+        "request_id",
+        "request_digest",
+        "policy_snapshot",
+        "outcome",
+        "matched_rule_id",
+        "target_participants",
+        "retry_profile_id",
+        "denial_code"
+      ],
+      "properties": {
+        "request_id": {"$ref": "#/$defs/opaque_id"},
+        "request_digest": {"$ref": "#/$defs/sha256"},
+        "policy_snapshot": {"$ref": "#/$defs/policy_snapshot"},
+        "outcome": {"enum": ["allow", "deny"]},
+        "matched_rule_id": {"$ref": "#/$defs/nullable_opaque_id"},
+        "target_participants": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/participant_ref"},
+          "uniqueItems": true
+        },
+        "retry_profile_id": {"$ref": "#/$defs/nullable_opaque_id"},
+        "denial_code": {"$ref": "#/$defs/nullable_namespaced_id"}
+      },
+      "additionalProperties": false
+    },
+    "retry_profile_snapshot": {
+      "type": "object",
+      "required": ["profile", "profile_digest"],
+      "properties": {
+        "profile": {"$ref": "#/$defs/retry_profile"},
+        "profile_digest": {"$ref": "#/$defs/sha256"}
+      },
+      "additionalProperties": false
+    },
+    "delivery_target": {
+      "type": "object",
+      "required": [
+        "sender",
+        "receiver",
+        "interaction_mode",
+        "runtime_binding_id",
+        "presentation_binding_id"
+      ],
+      "properties": {
+        "sender": {"$ref": "#/$defs/participant_ref"},
+        "receiver": {"$ref": "#/$defs/participant_ref"},
+        "interaction_mode": {"enum": ["tui", "headless"]},
+        "runtime_binding_id": {"$ref": "#/$defs/opaque_id"},
+        "presentation_binding_id": {"$ref": "#/$defs/nullable_opaque_id"}
+      },
+      "additionalProperties": false
+    },
+    "delivery_event": {
+      "type": "object",
+      "required": [
+        "sequence",
+        "event",
+        "attempt_number",
+        "backoff_ms",
+        "transport_attempt_id",
+        "evidence_digest",
+        "error_code"
+      ],
+      "properties": {
+        "sequence": {"$ref": "#/$defs/generation"},
+        "event": {
+          "enum": ["attempt_started", "attempt_failed", "ack_accepted", "consumed"]
+        },
+        "attempt_number": {"$ref": "#/$defs/generation"},
+        "backoff_ms": {"type": "integer", "minimum": 0},
+        "transport_attempt_id": {"$ref": "#/$defs/opaque_id"},
+        "evidence_digest": {"$ref": "#/$defs/nullable_sha256"},
+        "error_code": {"$ref": "#/$defs/nullable_namespaced_id"}
+      },
+      "additionalProperties": false
+    },
+    "delivery_record": {
+      "type": "object",
+      "required": [
+        "delivery_id",
+        "message_id",
+        "route_request_digest",
+        "route_decision_digest",
+        "policy_snapshot",
+        "target",
+        "payload_digest",
+        "retry_profile",
+        "state",
+        "events",
+        "delivery_degraded_reason"
+      ],
+      "properties": {
+        "delivery_id": {"$ref": "#/$defs/opaque_id"},
+        "message_id": {"$ref": "#/$defs/opaque_id"},
+        "route_request_digest": {"$ref": "#/$defs/sha256"},
+        "route_decision_digest": {"$ref": "#/$defs/sha256"},
+        "policy_snapshot": {"$ref": "#/$defs/policy_snapshot"},
+        "target": {"$ref": "#/$defs/delivery_target"},
+        "payload_digest": {"$ref": "#/$defs/sha256"},
+        "retry_profile": {"$ref": "#/$defs/retry_profile_snapshot"},
+        "state": {"enum": ["queued", "delivery_attempted", "delivered", "consumed"]},
+        "events": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/delivery_event"}
+        },
+        "delivery_degraded_reason": {"$ref": "#/$defs/nullable_namespaced_id"}
+      },
+      "additionalProperties": false
+    },
+    "delivery_ack": {
+      "type": "object",
+      "required": [
+        "ack_kind",
+        "delivery_id",
+        "message_id",
+        "target",
+        "payload_digest",
+        "attempt_number",
+        "transport_attempt_id"
+      ],
+      "properties": {
+        "ack_kind": {"const": "delivered"},
+        "delivery_id": {"$ref": "#/$defs/opaque_id"},
+        "message_id": {"$ref": "#/$defs/opaque_id"},
+        "target": {"$ref": "#/$defs/delivery_target"},
+        "payload_digest": {"$ref": "#/$defs/sha256"},
+        "attempt_number": {"$ref": "#/$defs/generation"},
+        "transport_attempt_id": {"$ref": "#/$defs/opaque_id"}
+      },
+      "additionalProperties": false
+    },
+    "consumption_ack": {
+      "type": "object",
+      "required": [
+        "ack_kind",
+        "delivery_id",
+        "message_id",
+        "target",
+        "payload_digest",
+        "attempt_number",
+        "transport_attempt_id",
+        "delivery_ack_digest"
+      ],
+      "properties": {
+        "ack_kind": {"const": "consumed"},
+        "delivery_id": {"$ref": "#/$defs/opaque_id"},
+        "message_id": {"$ref": "#/$defs/opaque_id"},
+        "target": {"$ref": "#/$defs/delivery_target"},
+        "payload_digest": {"$ref": "#/$defs/sha256"},
+        "attempt_number": {"$ref": "#/$defs/generation"},
+        "transport_attempt_id": {"$ref": "#/$defs/opaque_id"},
+        "delivery_ack_digest": {"$ref": "#/$defs/sha256"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "x-ai-collab": {
+    "schema_version": 1,
+    "contract_id": "ai-collab-collaboration-policy-delivery-v1",
+    "product_contract_version": "3.2",
+    "dependencies": {
+      "host_ipc_contract_id": "ai-collab-host-ipc-v1",
+      "state_contract_id": "ai-collab-scenario-participant-state-v1",
+      "participant_binding_source": "state-contract-runtime-and-presentation-binding"
+    },
+    "canonical_delivery_states": [
+      "queued",
+      "delivery_attempted",
+      "delivered",
+      "consumed"
+    ],
+    "delivery_transitions": [
+      {"trigger": "attempt", "from": ["queued", "delivery_attempted"], "to": "delivery_attempted"},
+      {"trigger": "matching_delivery_ack", "from": ["delivery_attempted"], "to": "delivered"},
+      {"trigger": "matching_consumption_ack", "from": ["delivered"], "to": "consumed"}
+    ],
+    "routing_protocol": {
+      "route_rules_are_ordered_first_match": true,
+      "default_effect_is_deny": true,
+      "attributes_are_namespaced_policy_data_not_identity": true,
+      "route_decision_contains_only_explicit_exact_targets": true,
+      "host_does_not_infer_broadcast_quorum_or_escalation": true,
+      "every_queued_message_pins_policy_version_and_digest": true,
+      "policy_update_never_reroutes_existing_delivery": true
+    },
+    "delivery_protocol": {
+      "file_or_sidecar_never_implies_delivery": true,
+      "matching_ack_is_required_for_delivered": true,
+      "matching_consumption_ack_is_required_for_consumed": true,
+      "target_is_scenario_sender_receiver_generation_and_binding_exact": true,
+      "delivery_events_are_append_only": true,
+      "retry_profile_is_policy_snapshot_not_global_constant": true,
+      "retry_is_bounded_and_backoff_nondecreasing": true,
+      "restart_resumes_all_nonterminal_without_redelivering_delivered": true,
+      "retry_exhaustion_degrades_only_exact_target": true,
+      "no_role_recent_session_or_other_mailbox_fallback": true
+    },
+    "invariants": {
+      "participant_identity_is_never_policy_attribute": true,
+      "sender_and_receiver_are_exact_participant_generations": true,
+      "ready_receiver_binding_is_frozen_at_enqueue": true,
+      "policy_and_route_digests_are_immutable_per_delivery": true,
+      "one_route_target_produces_one_delivery_record": true,
+      "cross_scenario_or_stale_generation_route_fails_closed": true,
+      "payload_is_digest_only_in_contract_values": true,
+      "vendor_session_identity_is_not_required": true,
+      "no_policy_rule_executes_shell_or_vendor_api": true
+    },
+    "deferred_surfaces": [
+      "project-and-organization-policy-pack-population",
+      "host-policy-storage-and-transaction-implementation",
+      "runtime-and-presentation-transport-adapters",
+      "real-agent-consumption-witness",
+      "workspace-environment-operation-payloads",
+      "permission-and-high-risk-confirmation-matrix",
+      "gate-registry-fingerprint-wiring-and-rebuild"
+    ]
+  }
+}
