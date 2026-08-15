@@ -2,9 +2,9 @@
 
 > 状态：**active current-state routing source；不替代 `product_architecture.md` 的 normative contract、`edgestudio_gates.yaml` 的 gate truth 或 `IMPLEMENTATION_PROGRESS.md` 的 fixed-SHA 账本**
 >
-> 来源：`user_decision`（2026-08-14 主线复核；2026-08-15 P1-E scope收敛、P2-B technical closeout与P2-A独立采用流边界）
+> 来源：`user_decision`（2026-08-14 主线复核；2026-08-15 P1-E scope收敛、P2-B technical closeout与P2-A独立采用流边界；2026-08-16独立产品仓抽离与双 AI 完整回归门槛）
 >
-> 最近更新：2026-08-15
+> 最近更新：2026-08-16
 
 本表防止 Harness 升级再次被单个按钮、一次 dogfood 或中间 receipt 带离主线。每个 implementation slice 必须同时检查受影响的 Host、PingAgent、CLI/TUI client、App、driver/plugin、acceptance 和 tracked docs；没有进入某个 surface 必须说明是合理的 surface-specific boundary，不能默认为“CLI 有即可”。
 
@@ -55,6 +55,8 @@ delivery.consume
 | P2-A-R | Employee dogfood continuity/collaboration remediation | `in_progress_employee_revalidation`（`user_decision` 2026-08-15 + `evidence` 2026-08-15）：terminal consume-only、自动context、owner-private exact identity与显式fallback保持有效。r3/r4修正已review；r5随后证明两个exact identity均保存，官方CLI按固定identity可加载原conversation，失败仅来自banner-dependent readiness对长历史恢复的false negative。root `50c8b61df4a332f433d5560255957681ac8df75a`改用稳定真实input prompt并继续拒绝numbered menu，review `20260815-203645-72jlmf`为P0=0/P1=0/P2=0；signed候选已安装为Host generation 24 | fresh r6完成双Agent Start、首轮binding、normal Close/Resume同conversation/同generation、context与terminal no-third-delivery。r5作为旧构建immutable degraded evidence，不手工改写或冒充acceptance；`degraded`员工友好文案为P2-A UX follow-up，已有binding mismatch继续fail closed | product participant/store validation；root contract/driver/tests；active architecture/integration/progress/employee docs | `ACC-RESUME-001`、`ACC-RUNTIME-CAPABILITY-001`、`DOD-LIFECYCLE-001`；Workspace/WIP、delivery/context既有slice不因本修正失效 |
 | P2-B | Final gate/DoD closeout | `completed`：root `a22cd9b8d4807bff031ab654c36c7443e35a60c9`、product `92813fd0d82e8e5757ccd0816159cbe00e38278a`、PingAgent `c402acd968a7b95288d5eeed033fbd2ac487e5cb`；29 ACC current/evidence fresh+passed，13 non-spike DoD passed，`DOD-SPIKES` 11/11 fresh；implementation与compatibility reviews均P0/P1/P2=0 | 无technical gate/DoD阻塞；derived DoD只写current view、immutable evidence=0。P2-A distribution与Hermes真实runtime conformance保持独立边界 | registry、producer/verifier、receipt engine、active docs | 29 ACC + 13 DoD machine audit；`0600/0700`；peer reviewed |
 
+| P2-X | Independent AI Collab repository extraction | `in_progress`：private `AtomGradient/ai-collab` 已建立；通用 Python core/CLI、macOS App/HostAgent、Participant driver、PingAgent、build/payload tooling、contract、产品测试与通用文档已迁入，edge-studio-dev consumer cutover已形成固定提交。独立产品测试240 passed，Swift 14 executed（1 expected live-Host skip）/0 failures，PingAgent 5/5+7 passed | 完成EdgeStudio integration/gate anchor cutover并固定三仓SHA；Codex与Claude分别执行完整产品、集成、signed App及真实多Scenario/多Agent delivery/Close/Resume/no-cross/destroy回归。公开前另做license/header/secret/doc/notarization裁决；旧Scenario仅兼容读取，不迁移durable state | product package/App/PingAgent/docs；EdgeStudio manifest/adapter/build wrappers/gates；edge-studio-dev compatibility；all acceptance surfaces | fixed-SHA cross-repo review；两套独立全量测试与真实Scenario evidence；通过后才进入employee acceptance |
+
 ## 4. Invalidation 与同步规则
 
 以下改动发生时，相关行必须在同一 slice 更新状态、fixed SHA、verification 和下一动作：
@@ -74,6 +76,8 @@ delivery.consume
 
 1. `P0-A`–`P0-E`均已闭合，migration/efficiency formal refresh已通过；
 2. P1 lifecycle/operations parity：P1-A、P1-B、P1-C、P1-D、P1-E 均已完成产品切片；
-3. P2-B一次性final fingerprint/formal DoD technical closeout已完成；当前先闭合员工实测发现的P2-A-R continuity/collaboration修正，再继续P2-A onboarding/distribution独立采用流；Hermes真实runtime conformance继续按裁决延后。
+3. P2-B一次性final fingerprint/formal DoD technical closeout已完成；P2-A-R的实现与真实Resume主故障已闭合，但员工采用流暂不继续扩张；
+4. 当前先完成P2-X独立产品仓抽离、三仓consumer cutover与Codex/Claude各自完整回归；只有两边在同一fixed vector上通过后，才恢复P2-A员工采用验收；
+5. Hermes真实runtime conformance继续按裁决延后。
 
 P2-B technical closeout不等于Developer ID/notarized员工发布完成；P2-A继续负责员工first-run、onboarding与distribution-specific acceptance。

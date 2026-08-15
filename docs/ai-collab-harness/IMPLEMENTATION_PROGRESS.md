@@ -1,25 +1,22 @@
 # AI Collaboration Scenario Harness 实施进度
 
-> 状态：Phase -1、Phase 0 A–J、M1–M4、descendant process-chain remediation/evidence rebuild、Phase 4 P4-A–P4-D、Phase 5 limited dogfood、native App/internal delivery/recovery、P0-A–P0-E、P1-A–P1-E 与 P2-B final gate/DoD technical closeout均已完成；29个ACC direct dependency与13个non-spike DoD current view已在当前fixed vector上fresh/passed，`DOD-SPIKES-001`仍11/11 source-fresh；当前续接P2-A employee onboarding/distribution，Hermes真实runtime conformance延后
+> 状态：既有 Phase -1、Phase 0、M1–M4、P0/P1 与 P2-B technical closeout 均已完成；当前主线为独立 `ai-collab` 产品仓抽离、EdgeStudio consumer cutover 与抽离后的 Codex/Claude 双重完整 Harness 回归，之后再续接 P2-A employee onboarding/distribution
 >
 > 裁决来源：`user_decision`
 >
-> 裁决日期：2026-08-06（Phase -1 scope）；2026-08-10（Phase 0 audit/cutover）；2026-08-11（Phase 0 freeze 与 M1–M4 working vertical slices）；2026-08-12（Harness-owned descendant process chain 与统一 Phase 4 实施方案）；2026-08-13（Host-owned project identity、native App、internal/dogfood 稳定交付与受保护项目 witness）；2026-08-14（Participant failure recovery generation rotation；Harness 目标复核、App/TUI/CLI/PingAgent 职责与 P0→P1→P2 顺序）；2026-08-15（P1-E scope 收敛并直接进入 P2-B；P2-A员工实测后的会话连续性、kind-aware reply与自动collaboration context修正）
+> 裁决日期：2026-08-06（Phase -1 scope）；2026-08-10（Phase 0 audit/cutover）；2026-08-11（Phase 0 freeze 与 M1–M4 working vertical slices）；2026-08-12（Harness-owned descendant process chain 与统一 Phase 4 实施方案）；2026-08-13（Host-owned project identity、native App、internal/dogfood 稳定交付与受保护项目 witness）；2026-08-14（Participant failure recovery generation rotation；Harness 目标复核、App/TUI/CLI/PingAgent 职责与 P0→P1→P2 顺序）；2026-08-15（P1-E scope 收敛并直接进入 P2-B；P2-A员工实测后的会话连续性、kind-aware reply与自动collaboration context修正）；2026-08-16（批准 `AtomGradient/ai-collab` 私有抽离，抽离后 Codex 与 Claude 必须分别完成整套 Harness 验证）
 >
 > 最近更新：2026-08-16
 
-## 开源前必须完成：提取独立 ai-collab 仓库
+## 当前主线：独立 `ai-collab` 仓库抽离
 
-来源：`user_decision` 2026-08-15。Harness 代码（`edgestudio/harness/`）和 macOS App（`macos/AI-Collab/`）对 edge-studio-dev 产品代码零 import、零第三方依赖，放在 edge-studio-dev 纯粹是历史路径选择。开源前必须提取为独立仓库，包含：
+来源：`user_decision` 2026-08-15、2026-08-16。用户批准产品与仓库品牌为 **AI Collab**，GitHub repo 为 `AtomGradient/ai-collab`，README 副标题为 **Local Multi-Agent Scenario Harness**，并把抽离提升到 P2-A 员工验收之前执行。
 
-- Host / store / delivery / participant / auth / workspace / security
-- macOS App（AI Collab.app）
-- participant driver + runtime profiles
-- PingAgent
-- 测试
-- 文档（`docs/ai-collab-harness/`）
+当前产品仓已承载 provider/project-neutral Host、CLI、state/delivery/participant/workspace/security、macOS App/HostAgent、Participant driver、PingAgent、build/payload tooling、versioned contract、产品测试与通用文档。EdgeStudio 保留 project adapter、descriptor/manifest、composed gates 与总装入口；edge-studio-dev 只保留 consumer compatibility。既有 Scenario durable state 不搬迁、不改写。
 
-优先级在 P2-A adoption/distribution 收尾之后、开源发布之前。既有 Scenario 不迁移，旧路径按兼容解析。
+抽离后的新固定向量必须重新完成两套独立验证：Codex 与 Claude 各自执行产品/consumer/root 全量测试、signed App/Host 安装，以及真实多 Scenario、多 Agent 双向 delivery、normal Close/Resume 同 vendor conversation/同 generation、WIP/no-cross 与 Destroy/Force Delete。旧 receipt 只作迁移前基线，不能证明新仓布局。两边均通过后才进入员工验收。
+
+公开发布仍需 license/header、secret scan、公开文档分流、Developer ID/notarization 与 clean-machine distribution 裁决；当前仓库保持 private。旧独立 PingAgent 仓的归档/只读状态也留待 fixed-SHA cutover 后由用户裁决。
 
 ---
 

@@ -2,7 +2,7 @@
 
 > 用途：验证 AI Collab 从内部候选到员工可采用版本的 first-run、日常协作、恢复和分发体验
 >
-> 更新日期：2026-08-15
+> 更新日期：2026-08-16
 >
 > 规则：本 checklist 不替代 `edgestudio_gates.yaml`、P2-B formal receipt 或代码 review；P2-B 已完成，P2-A 只验证员工采用和 distribution-specific 事实
 >
@@ -16,9 +16,9 @@
 Candidate:
 App version/build:
 App bundle SHA-256:
-Root SHA:
-Product SHA:
-PingAgent SHA:
+EdgeStudio integration SHA:
+AI Collab product SHA:
+edge-studio-dev consumer SHA:
 macOS version/build:
 Machine class:
 Tester:
@@ -39,7 +39,7 @@ Signing mode: Apple Development | Developer ID
 ## 2. Release scope 与材料冻结
 
 - [ ] 候选用途明确：`internal pilot` 或 `broad employee release`。
-- [ ] 三仓完整 40-char SHA 已记录，均为已 push 的固定提交。
+- [ ] EdgeStudio、AI Collab 与 edge-studio-dev 三仓完整 40-char SHA 已记录，均为已 push 的固定提交；内嵌 PingAgent 与 AI Collab 使用同一产品 SHA。
 - [ ] 工作区 clean，候选不是从 moving working tree 构建。
 - [ ] App bundle SHA-256、version、build 和 embedded service build identity 已记录。
 - [ ] 候选包含预期的 embedded Host、integration plugin 和 PingAgent transport。
