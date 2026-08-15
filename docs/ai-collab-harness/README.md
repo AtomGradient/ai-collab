@@ -1,10 +1,10 @@
 # AI Collaboration Scenario Harness 文档入口
 
-> 状态：Harness v3.3 P0/P1 产品切片与 P2-B technical gate/DoD closeout 已完成；员工实测发现的continuity/collaboration修正已完成fixed-SHA review，当前主线继续P2-A employee onboarding/distribution真实候选复测
+> 状态：Harness v3.3 既有产品切片与 technical closeout 已完成；当前仓库处于 private extraction staging，正在完成消费者 cutover 与 Codex/Claude 双重完整回归
 >
 > 文档版本：v3.3
 >
-> 更新日期：2026-08-15
+> 更新日期：2026-08-16
 
 本目录把 AI Collaboration Scenario Harness 的**通用产品架构**与 **EdgeStudio 集成设计**分开维护，避免项目实现细节反向定义产品内核。
 
@@ -39,7 +39,9 @@
 
 ## 仓库边界
 
-当前文档暂存于 EdgeStudio，便于在实现前完成评审。新建独立产品仓库属于跨仓架构变更，尚未执行；获得用户明确授权后，`product_architecture.md`、通用 schema/SDK、Host/CLI/App 和 conformance suite 应迁入产品仓，EdgeStudio 只保留 integration 文档、adapter 与项目 gates。
+本仓是 AI Collab 通用产品的 canonical target：`product_architecture.md`、通用 contract、Host/CLI/App、PingAgent 与 conformance suite 在这里维护。抽离 cutover 完成前，EdgeStudio 中的同名通用文档仍作为迁移期 review mirror；固定 SHA 经 Codex 与 Claude 各自完整回归后，EdgeStudio 只保留 project integration、adapter/manifest/gates、实施账本与迁移指针。
+
+本目录仍含从 EdgeStudio 导入的 integration/progress/evidence 文档，便于 private staging 阶段核对来源和语义；公开前必须完成文档分流与内部信息审查，不能因文件已经迁入就视为适合发布。
 
 ## 迁移说明
 

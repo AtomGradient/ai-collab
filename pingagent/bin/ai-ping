@@ -114,7 +114,7 @@ if [[ -n "${AI_COLLAB_HARNESS_CONTEXT:-}" ]]; then
   fi
   HARNESS_OPERATION="send"
   HARNESS_ARGS=(
-    -m edgestudio.harness.participant_client
+    -m ai_collab.participant_client
     "$HARNESS_OPERATION"
     --context "$AI_COLLAB_HARNESS_CONTEXT"
     --to "$TO"
@@ -123,7 +123,7 @@ if [[ -n "${AI_COLLAB_HARNESS_CONTEXT:-}" ]]; then
   if [[ -n "$REPLY_TO" ]]; then
     HARNESS_OPERATION="reply"
     HARNESS_ARGS=(
-      -m edgestudio.harness.participant_client
+      -m ai_collab.participant_client
       "$HARNESS_OPERATION"
       --context "$AI_COLLAB_HARNESS_CONTEXT"
       --to "$TO"

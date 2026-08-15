@@ -76,7 +76,7 @@ def test_harness_mode_routes_send_and_reply_to_scoped_product_client(
     assert pythonpath == environment["AI_COLLAB_HARNESS_CLIENT_PYTHONPATH"]
     assert arguments == [
         "-m",
-        "edgestudio.harness.participant_client",
+        "ai_collab.participant_client",
         "send",
         "--context",
         str(context),
@@ -111,7 +111,7 @@ def test_harness_mode_routes_send_and_reply_to_scoped_product_client(
     _, arguments, stdin = _record(log)
     assert arguments == [
         "-m",
-        "edgestudio.harness.participant_client",
+        "ai_collab.participant_client",
         "reply",
         "--context",
         str(context),

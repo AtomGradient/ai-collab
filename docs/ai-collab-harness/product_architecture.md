@@ -4,7 +4,7 @@
 >
 > 版本：v3.3
 >
-> 更新日期：2026-08-15
+> 更新日期：2026-08-16
 >
 > 目标：把长期 AI 协作任务保存为可恢复、可并行、可扩展且不会串线的本地 Scenario；使用方通过 adapter/plugin 接入，不修改产品核心。
 
@@ -51,6 +51,14 @@
 - collaboration context 只提供模型工作提示，live Host policy、generation fence 与 sender process proof 始终是授权真相源。正常 accepted/delivered/consumed 仍保持 machine-only silent ACK；
 - 默认员工安装中，Application Support只保存owner-private控制面状态、receipt、binding和cache；新建Scenario的隔离Workspace保存在`~/Documents/Scenarios`。既有Application Support Workspace不自动搬迁，Host按durable binding兼容解析；自定义测试state root仍可显式使用其隔离workspace root。
 - 历史Scenario必须提供列表右键`Force Delete Scenario`的短路径。App先明确告知会丢失该Scenario隔离Workspace中的WIP，Host再对一个`scenario.force-destroy`请求执行一次trusted single-use confirmation；该复合动作只清理能够由frozen runtime/presentation binding精确证明归属的Participant、lease、Scenario Workspace与控制面记录。任一owner proof、Workspace exact binding、revision/generation fence或WIP digest无法复核时都fail closed；注册项目的canonical source永远不属于删除目标。详细页的`Load Destroy Preview → Destroy Scenario`继续作为可检查blocker的保守路径。
+
+### 0.1 产品仓与集成仓边界
+
+AI Collab 作为独立产品仓承载 provider/project-neutral 的 Host、CLI、macOS control plane、Participant transport、versioned contract 与 conformance suite。PingAgent 是同一产品中的 Participant-facing transport，不建立第二套 identity、policy 或 delivery authority。
+
+EdgeStudio 等使用方通过 versioned project/runtime/presentation adapter、descriptor、manifest、policy pack 与 composed acceptance 接入。产品仓不得导入使用方业务代码或按公司、项目、供应商、terminal、SCM 写条件分支；集成仓也不得复制或 fork Host authority。仓库抽离只是把既有架构边界落实为可发布的物理边界，不改变 Scenario、Participant、delivery、continuity 或安全语义。
+
+物理迁移完成的最低证据不是 import/build success，而是产品仓独立 contract/build/test、消费者集成测试、真实多 Scenario/多 Agent lifecycle、双向 delivery、normal Close/Resume exact continuity、no-cross 与安全删除都通过；Codex 与 Claude 必须分别在固定 SHA 上完成该回归，之后才能进入员工验收或公开发布判断。
 
 ## 1. 范围与非目标
 
