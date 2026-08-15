@@ -14,9 +14,9 @@
 
 当前产品仓已承载 provider/project-neutral Host、CLI、state/delivery/participant/workspace/security、macOS App/HostAgent、Participant driver、PingAgent、build/payload tooling、versioned contract、产品测试与通用文档。EdgeStudio 保留 project adapter、descriptor/manifest、composed gates 与总装入口；edge-studio-dev 只保留 consumer compatibility。既有 Scenario durable state 不搬迁、不改写。
 
-当前产品实现anchor为`14e4c4038c7314b3a4d3b0c05205bf9270b57576`。抽离后首轮真实双Scenario回归中四个TUI均并行ready，但Codex tool的login shell一边命中新`ai-ping`后缺`ai_collab`，另一边命中旧全局`ai-ping`后尝试`edgestudio.harness`，均在delivery创建前失败。该anchor改为在每个participant generation的owner-private root物化exact通信入口，并由private collaboration context/reply instruction指向它；不依赖全局安装，Host sender ancestry/generation/policy authority不变。失败witness保持原样且不计acceptance。
+当前产品实现anchor为`f1ea8cf8baa5fb53d7afe6d02c26c3cb1378554b`。抽离后首轮真实双Scenario回归中四个TUI均并行ready，但Codex tool的login shell一边命中新`ai-ping`后缺`ai_collab`，另一边命中旧全局`ai-ping`后尝试`edgestudio.harness`，均在delivery创建前失败。产品随后在每个participant generation的owner-private root物化exact通信入口，并由private collaboration context/reply instruction指向它；不依赖全局安装，Host sender ancestry/generation/policy authority不变。首次修复后的真实重跑证明Agent确实调用了该私有入口，同时暴露Host错误地把仓库/服务根签发为module root，导致source布局缺`src/`、embedded布局缺`python/`。当前anchor改为签发`ai_collab` package的direct parent，并新增清除ambient`PYTHONPATH`后由exact client interpreter实际import的回归。两次失败witness均保持原样且不计acceptance。
 
-修复后产品Python 241 passed、PingAgent Python 7 passed，EdgeStudio clean-environment Harness 1399 passed、active docs/gate 166 passed；迁移候选此前的Swift/Xcode 14 executed（1 expected live-Host skip）/0 failures、consumer 242 passed、isolated signed payload deep/strict seal/zero-bytecode/embedded Host smoke仍成立。最终fixed vector仍需Claude review，并由Codex与Claude分别重跑真实Scenario矩阵。
+当前anchor产品Python 242 passed、PingAgent Python 7 passed；上一固定向量的EdgeStudio clean-environment Harness 1399 passed、active docs/gate 166 passed、Swift/Xcode 14 executed（1 expected live-Host skip）/0 failures、consumer 242 passed。module-root修正改变embedded payload，旧签名候选及其Host smoke不再作为current artifact证据；必须重建并验证。此前Claude零阻塞review也被新anchor supersede，最终fixed vector仍需重新review，并由Codex与Claude分别重跑真实Scenario矩阵。
 
 抽离后的新固定向量必须重新完成两套独立验证：Codex 与 Claude 各自执行产品/consumer/root 全量测试、signed App/Host 安装，以及真实多 Scenario、多 Agent 双向 delivery、normal Close/Resume 同 vendor conversation/同 generation、WIP/no-cross 与 Destroy/Force Delete。旧 receipt 只作迁移前基线，不能证明新仓布局。两边均通过后才进入员工验收。
 
