@@ -9,6 +9,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -48,17 +49,26 @@ def _install_contract(tmp_path: Path, contract: dict[str, Any] | None = None) ->
 
 
 def _snapshot(root: Path) -> dict[str, tuple[int, int, str]]:
-    transient_parts = {".git", ".pytest_cache", ".build", "__pycache__"}
+    completed = subprocess.run(
+        ["git", "ls-files", "-z"],
+        cwd=root,
+        check=True,
+        capture_output=True,
+    )
+    relative_paths = [
+        Path(value.decode("utf-8"))
+        for value in completed.stdout.split(b"\0")
+        if value
+    ]
     return {
-        path.relative_to(root).as_posix(): (
+        relative.as_posix(): (
             path.stat().st_mode,
             path.stat().st_mtime_ns,
             sha256_file(path),
         )
-        for path in root.rglob("*")
+        for relative in relative_paths
+        for path in [root / relative]
         if path.is_file()
-        and path.name != ".DS_Store"
-        and transient_parts.isdisjoint(path.relative_to(root).parts)
     }
 
 
