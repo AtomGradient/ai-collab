@@ -3,7 +3,7 @@
 # Copyright (c) 2026 AtomGradient. All rights reserved.
 # 版权所有 (c) 2026 质子梯度（北京）科技有限公司。保留所有权利。
 
-"""EdgeStudio generic process runtime + official iTerm presentation driver."""
+"""AI Collab generic process runtime + official iTerm presentation driver."""
 
 from __future__ import annotations
 

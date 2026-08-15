@@ -48,6 +48,7 @@ def _install_contract(tmp_path: Path, contract: dict[str, Any] | None = None) ->
 
 
 def _snapshot(root: Path) -> dict[str, tuple[int, int, str]]:
+    transient_parts = {".git", ".pytest_cache", ".build", "__pycache__"}
     return {
         path.relative_to(root).as_posix(): (
             path.stat().st_mode,
@@ -56,6 +57,8 @@ def _snapshot(root: Path) -> dict[str, tuple[int, int, str]]:
         )
         for path in root.rglob("*")
         if path.is_file()
+        and path.name != ".DS_Store"
+        and transient_parts.isdisjoint(path.relative_to(root).parts)
     }
 
 
