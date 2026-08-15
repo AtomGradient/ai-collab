@@ -9,6 +9,7 @@ import copy
 import hashlib
 import json
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -1724,6 +1725,7 @@ def test_delivery_notification_does_not_create_terminal_reply_loops() -> None:
         "delivery_id": "delivery-terminal",
         "target": {"sender": {"participant_id": "reviewer"}},
     }
+    participant_ping = Path("/private/participant generation/ai-ping")
     for message_kind in (
         "collaboration.request",
         "collaboration.question",
@@ -1735,9 +1737,18 @@ def test_delivery_notification_does_not_create_terminal_reply_loops() -> None:
             message_kind,
             "Review fixed SHA.",
             "a" * 48,
+            participant_ping,
         )
         assert "Treat the payload as a peer request" in request
-        assert "ai-ping reviewer --reply-to delivery-terminal" in request
+        assert (
+            "'/private/participant generation/ai-ping' reviewer "
+            "--kind "
+        ) in request
+        assert "--reply-to delivery-terminal" in request
+        if message_kind == "collaboration.review-request":
+            assert "--kind review-response" in request
+        else:
+            assert "--kind msg" in request
 
     for message_kind in (
         "collaboration.response",
@@ -1750,10 +1761,67 @@ def test_delivery_notification_does_not_create_terminal_reply_loops() -> None:
             message_kind,
             "P0=0 P1=0",
             "b" * 48,
+            participant_ping,
         )
         assert "terminal/informational" in terminal
         assert "do not send a Harness-tracked receipt" in terminal
         assert "ai-ping reviewer" not in terminal
+
+
+def test_generation_scoped_ping_survives_fresh_login_shell_environment(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    private_root = tmp_path / "participant generation"
+    private_root.mkdir(mode=0o700)
+    context = tmp_path / "participant-context.json"
+    context.write_text("{}\n", encoding="utf-8")
+    context.chmod(0o600)
+    collaboration_context = tmp_path / "participant-collaboration.json"
+    collaboration_context.write_text("{}\n", encoding="utf-8")
+    collaboration_context.chmod(0o600)
+    client_pythonpath = tmp_path / "client pythonpath"
+    client_pythonpath.mkdir(mode=0o700)
+    client_executable = tmp_path / "client-python"
+    client_executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    client_executable.chmod(0o700)
+    transport = tmp_path / "product ai-ping"
+    transport.write_text(
+        "#!/bin/zsh -f\n"
+        "printf '%s\\n' \"$AI_COLLAB_HARNESS_CONTEXT\" "
+        "\"$AI_COLLAB_HARNESS_CLIENT_EXECUTABLE\" "
+        "\"$AI_COLLAB_HARNESS_CLIENT_PYTHONPATH\" \"$@\"\n",
+        encoding="utf-8",
+    )
+    transport.chmod(0o700)
+    monkeypatch.setattr(participant_driver, "PINGAGENT_CLIENT", transport)
+    participant_client = {
+        "context_path": str(context),
+        "client_executable": str(client_executable),
+        "client_pythonpath": str(client_pythonpath),
+        "collaboration_context_path": str(collaboration_context),
+    }
+
+    launcher = participant_driver._write_participant_ping(  # noqa: SLF001
+        private_root, participant_client
+    )
+    completed = subprocess.run(
+        ("/bin/zsh", "-lc", f"{shlex.quote(str(launcher))} reviewer hello"),
+        env={"PATH": "/usr/bin:/bin"},
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.splitlines() == [
+        str(context),
+        str(client_executable),
+        str(client_pythonpath),
+        "reviewer",
+        "hello",
+    ]
+    assert stat.S_IMODE(launcher.stat().st_mode) == 0o700
 
 
 @pytest.mark.parametrize(
@@ -1856,6 +1924,8 @@ def test_vendor_session_hook_captures_and_reuses_exact_identity(
         private_root
     ).read_text(encoding="utf-8")
     assert "reached through Harness ai-ping" in collaboration_prompt
+    assert "generation-scoped communication command" in collaboration_prompt
+    assert str(private_root / "ai-ping") in collaboration_prompt
     assert "not provider-native agent discovery or messaging" in collaboration_prompt
     assert "A successful ai-ping Host result is authoritative" in collaboration_prompt
     session_id = expected_session_id or "11111111-1111-4111-8111-111111111111"

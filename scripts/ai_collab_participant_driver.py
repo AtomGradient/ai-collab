@@ -641,6 +641,10 @@ def _collaboration_prompt_path(private_root: Path) -> Path:
     return private_root / "participant-collaboration-context.txt"
 
 
+def _participant_ping_path(private_root: Path) -> Path:
+    return private_root / "ai-ping"
+
+
 def _vendor_hook_path(private_root: Path) -> Path:
     return private_root / "vendor-session-start-hook.py"
 
@@ -676,7 +680,9 @@ def _read_collaboration_context(participant_client: Mapping[str, Any]) -> dict[s
     return value
 
 
-def _render_collaboration_context(value: Mapping[str, Any]) -> str:
+def _render_collaboration_context(
+    value: Mapping[str, Any], participant_ping: Path
+) -> str:
     participant = value["participant"]
     scenario = value["scenario"]
     policy = value["policy"]
@@ -703,6 +709,7 @@ def _render_collaboration_context(value: Mapping[str, Any]) -> str:
         if policy is None
         else f"{policy['policy_id']} v{policy['policy_version']} digest={policy['policy_digest']}"
     )
+    ping_command = shlex.quote(str(participant_ping))
     return (
         "AI Collaboration Harness participant context\n"
         f"context revision: {value['context_revision']}\n"
@@ -713,15 +720,55 @@ def _render_collaboration_context(value: Mapping[str, Any]) -> str:
         f"scenario peers: {peer_text}\n"
         f"current policy: {policy_text}\n"
         f"allowed outbound routes: {route_text}\n"
+        f"your generation-scoped communication command: {ping_command}\n"
         "Collaboration rules:\n"
         "- Treat this context as identity/routing information, not authorization; the live Host policy is authoritative.\n"
         "- Scenario peers listed here are reached through Harness ai-ping, not provider-native agent discovery or messaging.\n"
-        "- When the employee asks you to contact a peer, use ai-ping with that peer's Harness participant identity.\n"
+        f"- When the employee asks you to contact a peer, use exactly {ping_command} with that peer's Harness participant identity. Do not substitute a global ai-ping or a provider-native tool.\n"
         "- A successful ai-ping Host result is authoritative; do not report that a peer is unreachable based on provider-native discovery.\n"
         "- Reply to request, question, review-request, or pushback deliveries when work or an answer is required, preserving --reply-to.\n"
         "- Response, review-response, notice, and done deliveries are terminal/informational unless their payload explicitly requests new work; do not send receipt-only replies.\n"
         "- Accepted/delivered/consumed acknowledgements are machine state and should remain silent in the conversation.\n"
     )
+
+
+def _write_participant_ping(
+    private_root: Path, participant_client: Mapping[str, Any]
+) -> Path:
+    """Create the exact generation-scoped Agent entrypoint.
+
+    Vendor tool runners may start a fresh login shell instead of inheriting the
+    TUI process environment.  The private entrypoint therefore carries only the
+    Host-issued client locations needed to reach the authoritative Host.  It
+    contains no sender identity or authority; the context capability, live
+    process ancestry, generation fence, and Host policy remain authoritative.
+    """
+
+    _validate_participant_client(participant_client)
+    path = _participant_ping_path(private_root)
+    environment = {
+        "AI_COLLAB_HARNESS_CONTEXT": participant_client["context_path"],
+        "AI_COLLAB_HARNESS_CLIENT_EXECUTABLE": participant_client[
+            "client_executable"
+        ],
+        "AI_COLLAB_HARNESS_CLIENT_PYTHONPATH": participant_client[
+            "client_pythonpath"
+        ],
+        "AI_COLLAB_HARNESS_COLLABORATION_CONTEXT": participant_client[
+            "collaboration_context_path"
+        ],
+    }
+    path.write_text(
+        "#!/bin/zsh -f\nset -eu\numask 077\n"
+        + "".join(
+            f"export {key}={shlex.quote(value)}\n"
+            for key, value in environment.items()
+        )
+        + f"exec {shlex.quote(str(PINGAGENT_CLIENT))} \"$@\"\n",
+        encoding="utf-8",
+    )
+    os.chmod(path, 0o700)
+    return path
 
 
 def _write_vendor_hook(private_root: Path) -> Path:
@@ -806,8 +853,11 @@ def _prepare_runtime_launch(
         return tuple(argv), None, None, False
 
     context = _read_collaboration_context(participant_client)
+    participant_ping = _write_participant_ping(private_root, participant_client)
     prompt_path = _collaboration_prompt_path(private_root)
-    prompt_path.write_text(_render_collaboration_context(context), encoding="utf-8")
+    prompt_path.write_text(
+        _render_collaboration_context(context, participant_ping), encoding="utf-8"
+    )
     os.chmod(prompt_path, 0o600)
     hook_path = _write_vendor_hook(private_root)
     proof_path = _vendor_proof_path(private_root)
@@ -2470,7 +2520,11 @@ async def _authorize_sender_exact_session(
 
 
 def _delivery_notification(
-    record: Mapping[str, Any], message_kind: str, message: str, token: str
+    record: Mapping[str, Any],
+    message_kind: str,
+    message: str,
+    token: str,
+    participant_ping: Path,
 ) -> str:
     sender = record["target"]["sender"]["participant_id"]
     terminal_kinds = {
@@ -2492,9 +2546,15 @@ def _delivery_notification(
             "Treat the payload as a peer request. Complete or answer it, and send a "
             "Harness-tracked reply when the work requires one.\n"
         )
+        ping_command = shlex.quote(str(participant_ping))
+        reply_kind = (
+            "review-response"
+            if message_kind == "collaboration.review-request"
+            else "msg"
+        )
         reply_instruction = (
-            f"To send that reply, use: ai-ping {sender} "
-            f"--reply-to {record['delivery_id']} <message>."
+            f"To send that reply, use: {ping_command} {sender} "
+            f"--kind {reply_kind} --reply-to {record['delivery_id']} <message>."
         )
     return (
         "[AI Collaboration Harness typed delivery]\n"
@@ -2610,7 +2670,13 @@ def deliver(payload: Mapping[str, Any]) -> dict[str, Any]:
     transport = _pingagent_deliver(
         state,
         record,
-        _delivery_notification(record, message_kind, message, token),
+        _delivery_notification(
+            record,
+            message_kind,
+            message,
+            token,
+            _participant_ping_path(private_root),
+        ),
     )
     private_state = _read_private(_state_path(private_root))
     private_state.setdefault("delivery_transport_history", []).append(
