@@ -405,6 +405,8 @@ Host 在 Participant start/resume/replace 前生成独立于供应商的私有 m
 
 Runtime adapter 使用供应商支持的 system/session-start context surface，在首次用户输入前注入同一份语义；不能依赖员工先解释“你是谁、同事是谁、怎么 ai-ping”。供应商不支持安全注入时，该 capability fail closed或明确 degraded，不能写动态 `AGENTS.md`/`CLAUDE.md` 污染共享 Workspace。运行中 policy 仍由 Host 每次发送时重新校验；旧 context 即使存在也不能扩大权限。普通 lifecycle resume 会重新注入 current context，未来需要无重启热刷新时必须沿 versioned lifecycle capability 增量实现。
 
+Participant 工具执行器可能在 TUI process chain 内另起登录 shell，并重建 `PATH` 或丢弃启动时环境。Runtime adapter 因此不能把 ambient `PATH`、全局 `ai-ping` 安装或继承的 Python module path当作协作可用性的前提；它必须在 owner-private participant generation root 物化精确通信入口，并在 collaboration context 与 typed-delivery reply instruction 中给出该入口。入口只固定 Host-issued client/context locator，不携带或推导 sender authority；live Host 仍以 capability、owned descendant process proof、generation fence 与 policy 决定是否接受消息。
+
 同一context必须指示Agent：列出的peer通过Harness `ai-ping`触达，不使用供应商原生agent discovery/messaging替代；`ai-ping`返回的Host结果是发送事实真相源。若Host已返回成功，Agent不得再根据供应商原生discovery声称peer不可达；若Host拒绝，则只报告该结构化失败与建议动作。
 
 ## 9. Window 与 display topology

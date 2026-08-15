@@ -197,6 +197,8 @@ M4 typed path 固定为 policy first-match/default deny → exact participant-ge
 
 同一修正增加 Host-owned collaboration manifest。Host按 current Scenario/team/policy生成 identity、assignments、peers、允许route、reply kinds与revision/digest，ParticipantAuth放在独立0600目录，driver在首次用户输入前注入。Codex/Claude只负责消费该 provider-neutral context，live policy enforcement仍由Host完成；共享Workspace里的`AGENTS.md`/`CLAUDE.md`不承载动态participant identity。
 
+抽离后的真实 Agent-native 回归证明，Codex tool execution 会在 Participant process chain 内启动新的 login shell，但该 shell 不保证保留 TUI 启动时注入的 `PATH`/client module环境；结果可能命中新产品 `ai-ping`却找不到`ai_collab`，也可能命中旧全局`ai-ping`并尝试`edgestudio.harness`。EdgeStudio integration 不通过安装或改写全局命令修补该边界。通用 driver 为每个 participant generation 生成 owner-private exact `ai-ping` wrapper，把Host-issued client executable、module root与context locator固定在wrapper内，并把精确路径注入provider-neutral collaboration context和reply instruction；Host的sender process proof、generation与policy校验保持不变。
+
 2026-08-15员工实测进一步收紧反馈语义：同一Scenario中reviewer→analyst的`Bye bye!`已由durable delivery账本证明`attempt_started → ack_accepted → consumed`，但Claude TUI仍显示供应商原生“No agents reachable”。这不是Harness路由失败，而是模型把provider-native discovery误当Harness reachability。driver context因此明确禁止以供应商原生agent discovery/messaging替代Harness peer，并规定成功的`ai-ping` Host结果具有反馈权威性；员工仍只需自然语言说“发给reviewer/analyst”，无需点名PingAgent。
 
 同日用户冻结默认存储布局：production App/Host继续把control-plane state保存在`~/Library/Application Support/AI Collab`，但所有新Scenario workspace写入`~/Documents/Scenarios`。已有Application Support workspace不迁移，由Host按binding双根解析；测试或开发通过custom state/workspace root保持完全隔离。Scenario列表按最近journal activity倒序；Destroy按钮只有fresh effect preview明确`eligible=true`时启用，未满足closed/stopped/released/aligned条件时保留blocker而不再提交必然失败的高风险mutation。
