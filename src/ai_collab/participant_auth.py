@@ -169,7 +169,7 @@ class ParticipantAuthStore:
         return {
             "context_path": str(path),
             "client_executable": str(Path(sys.executable).resolve(strict=True)),
-            "client_pythonpath": str(Path(__file__).resolve().parents[2]),
+            "client_pythonpath": str(Path(__file__).resolve().parents[1]),
             "collaboration_context_path": str(collaboration_path),
         }
 

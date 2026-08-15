@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
+import subprocess
 import tempfile
 import threading
 import time
@@ -14,7 +16,7 @@ from typing import Any, Iterator, Mapping
 
 import pytest
 
-from ai_collab import cli as cli_main
+from ai_collab import cli as cli_main, participant_auth
 from ai_collab.client import HarnessClient, HarnessClientError
 from ai_collab.host import HarnessHost
 from ai_collab.participant import ParticipantCoordinator, ParticipantError
@@ -36,6 +38,41 @@ TOPOLOGY_DIGEST = "f" * 64
 BOOT_DIGEST = "1" * 64
 FENCE_DIGEST = "2" * 64
 RESOURCE_DIGEST = "3" * 64
+
+
+def test_participant_client_pythonpath_imports_product_module(
+    tmp_path: Path,
+) -> None:
+    store = ParticipantAuthStore(tmp_path / "state", tmp_path / "host.sock")
+    material = store.ensure(
+        project_instance_id=PROJECT_ID,
+        scenario_id=SCENARIO_ID,
+        participant_id=PARTICIPANT_ID,
+        participant_generation=1,
+        participant_state_revision=1,
+    )
+
+    module_root = Path(material["client_pythonpath"])
+    assert module_root == Path(participant_auth.__file__).resolve().parents[1]
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {"PYTHONHOME", "PYTHONPATH"}
+    }
+    environment["PYTHONPATH"] = str(module_root)
+    completed = subprocess.run(
+        [
+            material["client_executable"],
+            "-c",
+            "import ai_collab.participant_client",
+        ],
+        cwd=tmp_path,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_collaboration_context_revision_tracks_semantic_changes_only(
