@@ -819,6 +819,103 @@ def test_authorize_tui_sender_retries_only_closed_iterm_transport(
     assert exact_calls == 3
 
 
+def test_iterm_connection_release_cancels_dispatch_and_closes_websocket() -> None:
+    observed: dict[str, bool] = {"closed": False}
+
+    class _WebSocket:
+        async def close(self) -> None:
+            observed["closed"] = True
+
+    async def exercise() -> bool:
+        dispatcher = asyncio.create_task(asyncio.Event().wait())
+        connection = SimpleNamespace(websocket=_WebSocket())
+        setattr(
+            connection,
+            "_Connection__dispatch_forever_future",
+            dispatcher,
+        )
+        await participant_driver._close_iterm_connection(  # noqa: SLF001
+            connection
+        )
+        return dispatcher.cancelled()
+
+    assert asyncio.run(exercise()) is True
+    assert observed == {"closed": True}
+
+
+def test_exact_session_failure_releases_created_iterm_connection() -> None:
+    observed: dict[str, bool] = {"closed": False}
+
+    class _WebSocket:
+        async def close(self) -> None:
+            observed["closed"] = True
+
+    async def exercise() -> None:
+        dispatcher = asyncio.create_task(asyncio.Event().wait())
+        connection = SimpleNamespace(websocket=_WebSocket())
+        setattr(
+            connection,
+            "_Connection__dispatch_forever_future",
+            dispatcher,
+        )
+
+        async def create_connection() -> Any:
+            return connection
+
+        async def get_app(found_connection: Any) -> Any:
+            assert found_connection is connection
+            return SimpleNamespace(get_window_by_id=lambda window_id: None)
+
+        module = SimpleNamespace(
+            Connection=SimpleNamespace(async_create=create_connection),
+            async_get_app=get_app,
+        )
+        with pytest.raises(
+            participant_driver.DriverError,
+            match="owned iTerm window is absent",
+        ):
+            await participant_driver._exact_session(  # noqa: SLF001
+                module,
+                {"window_id": "window-owned"},
+            )
+        assert dispatcher.cancelled()
+
+    asyncio.run(exercise())
+    assert observed == {"closed": True}
+
+
+def test_sender_exact_session_success_releases_iterm_connection(
+    monkeypatch: Any,
+) -> None:
+    observed: dict[str, bool] = {"closed": False}
+
+    class _WebSocket:
+        async def close(self) -> None:
+            observed["closed"] = True
+
+    async def exercise() -> None:
+        dispatcher = asyncio.create_task(asyncio.Event().wait())
+        connection = SimpleNamespace(websocket=_WebSocket())
+        setattr(
+            connection,
+            "_Connection__dispatch_forever_future",
+            dispatcher,
+        )
+        app = SimpleNamespace(connection=connection)
+
+        async def exact_session(*args: Any, **kwargs: Any) -> tuple[Any, ...]:
+            return app, object(), object(), 4102
+
+        monkeypatch.setattr(participant_driver, "_exact_session", exact_session)
+        await participant_driver._authorize_sender_exact_session(  # noqa: SLF001
+            object(), {}
+        )
+        assert dispatcher.cancelled()
+
+    asyncio.run(exercise())
+    assert observed == {"closed": True}
+
+
 def test_authorize_tui_sender_does_not_retry_binding_drift(
     tmp_path: Path, monkeypatch: Any
 ) -> None:

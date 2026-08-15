@@ -23,6 +23,7 @@ import time
 import urllib.request
 import uuid
 import venv
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -1611,10 +1612,36 @@ async def _bounded(awaitable: Any) -> Any:
     return await asyncio.wait_for(awaitable, timeout=OPERATION_TIMEOUT_SECONDS)
 
 
+async def _close_iterm_connection(connection: Any | None) -> None:
+    """Release one short-lived iTerm API connection before its loop exits.
+
+    The official client starts a background dispatch task but exposes no public
+    connection close helper.  Letting ``asyncio.run`` tear the loop down leaves
+    iTerm's Unix-socket peer open long enough for repeated Harness operations to
+    exhaust the server.  Cancel the dispatcher first so it cannot race the
+    WebSocket close handshake, then close the socket explicitly.
+    """
+
+    if connection is None:
+        return
+    dispatcher = getattr(
+        connection, "_Connection__dispatch_forever_future", None
+    )
+    if dispatcher is not None and not dispatcher.done():
+        dispatcher.cancel()
+        with suppress(asyncio.CancelledError, Exception):
+            await dispatcher
+    websocket = getattr(connection, "websocket", None)
+    if websocket is not None:
+        with suppress(asyncio.CancelledError, Exception):
+            await _bounded(websocket.close())
+
+
 async def _connect_iterm_application(module: Any) -> tuple[Any, Any]:
     """Reconnect only before launch has crossed the external-effect boundary."""
 
     for attempt in range(SENDER_SESSION_CONNECT_ATTEMPTS):
+        connection = None
         try:
             connection = await _bounded(module.Connection.async_create())
             app = await _bounded(module.async_get_app(connection))
@@ -1622,6 +1649,7 @@ async def _connect_iterm_application(module: Any) -> tuple[Any, Any]:
                 raise DriverError("iTerm application state is unavailable")
             return connection, app
         except Exception as exc:
+            await _close_iterm_connection(connection)
             if (
                 not _retryable_iterm_connection_error(exc)
                 or attempt + 1 == SENDER_SESSION_CONNECT_ATTEMPTS
@@ -1765,6 +1793,7 @@ async def _iterm_start_async(
 ) -> dict[str, Any]:
     stage = "iterm-connect"
     launcher = private_root / "runtime-launcher.zsh"
+    connection: Any | None = None
     window: Any | None = None
     marker_verified = False
     marker: dict[str, Any] | None = None
@@ -1941,6 +1970,7 @@ async def _iterm_start_async(
         )
         raise
     finally:
+        await _close_iterm_connection(connection)
         launcher.unlink(missing_ok=True)
 
 
@@ -2189,22 +2219,31 @@ def _validate_process_state(state: Mapping[str, Any]) -> None:
 
 async def _iterm_status_async(module: Any, state: Mapping[str, Any]) -> None:
     connection = await _bounded(module.Connection.async_create())
-    app = await _bounded(module.async_get_app(connection))
-    window = app.get_window_by_id(state.get("window_id")) if app is not None else None
-    if window is None:
-        raise DriverError("owned iTerm window is absent")
-    window_id, session_id, session = _topology_identity(window)
-    if window_id != state.get("window_id") or session_id != state.get("session_id"):
-        raise DriverError("owned iTerm topology drifted")
-    if await _bounded(window.async_get_variable(OWNER_VARIABLE)) != state.get(
-        "owner_marker"
-    ):
-        raise DriverError("owned iTerm marker drifted")
     try:
-        job_pid = int(await _bounded(session.async_get_variable("jobPid")))
-    except (TypeError, ValueError) as exc:
-        raise DriverError("owned iTerm job identity is invalid") from exc
-    _validate_owned_foreground_job(job_pid, state)
+        app = await _bounded(module.async_get_app(connection))
+        window = (
+            app.get_window_by_id(state.get("window_id"))
+            if app is not None
+            else None
+        )
+        if window is None:
+            raise DriverError("owned iTerm window is absent")
+        window_id, session_id, session = _topology_identity(window)
+        if window_id != state.get("window_id") or session_id != state.get(
+            "session_id"
+        ):
+            raise DriverError("owned iTerm topology drifted")
+        if await _bounded(window.async_get_variable(OWNER_VARIABLE)) != state.get(
+            "owner_marker"
+        ):
+            raise DriverError("owned iTerm marker drifted")
+        try:
+            job_pid = int(await _bounded(session.async_get_variable("jobPid")))
+        except (TypeError, ValueError) as exc:
+            raise DriverError("owned iTerm job identity is invalid") from exc
+        _validate_owned_foreground_job(job_pid, state)
+    finally:
+        await _close_iterm_connection(connection)
 
 
 def status(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -2240,6 +2279,26 @@ async def _presentation_action_async(
     action: str,
 ) -> dict[str, Any]:
     connection = await _bounded(module.Connection.async_create())
+    try:
+        return await _presentation_action_connected(
+            module,
+            connection,
+            private_root,
+            state,
+            action=action,
+        )
+    finally:
+        await _close_iterm_connection(connection)
+
+
+async def _presentation_action_connected(
+    module: Any,
+    connection: Any,
+    private_root: Path,
+    state: dict[str, Any],
+    *,
+    action: str,
+) -> dict[str, Any]:
     app = await _bounded(module.async_get_app(connection))
     window = app.get_window_by_id(state.get("window_id")) if app is not None else None
     if window is None:
@@ -2461,6 +2520,25 @@ async def _exact_session(
     require_foreground_process_group: bool = True,
 ) -> tuple[Any, Any, Any, int]:
     connection = await _bounded(module.Connection.async_create())
+    try:
+        return await _exact_session_connected(
+            module,
+            connection,
+            state,
+            require_foreground_process_group=require_foreground_process_group,
+        )
+    except BaseException:
+        await _close_iterm_connection(connection)
+        raise
+
+
+async def _exact_session_connected(
+    module: Any,
+    connection: Any,
+    state: Mapping[str, Any],
+    *,
+    require_foreground_process_group: bool,
+) -> tuple[Any, Any, Any, int]:
     app = await _bounded(module.async_get_app(connection))
     window = app.get_window_by_id(state.get("window_id")) if app is not None else None
     if window is None:
@@ -2504,11 +2582,15 @@ async def _authorize_sender_exact_session(
 
     for attempt in range(SENDER_SESSION_CONNECT_ATTEMPTS):
         try:
-            return await _exact_session(
+            result = await _exact_session(
                 module,
                 state,
                 require_foreground_process_group=False,
             )
+            await _close_iterm_connection(
+                getattr(result[0], "connection", None)
+            )
+            return result
         except Exception as exc:
             if (
                 not _retryable_iterm_connection_error(exc)
@@ -2635,6 +2717,18 @@ def _pingagent_deliver(
     return result
 
 
+async def _validate_exact_session_async(
+    module: Any, state: Mapping[str, Any]
+) -> None:
+    result = await _exact_session(module, state)
+    try:
+        return None
+    finally:
+        await _close_iterm_connection(
+            getattr(result[0], "connection", None)
+        )
+
+
 def deliver(payload: Mapping[str, Any]) -> dict[str, Any]:
     required = {
         "delivery_record",
@@ -2666,7 +2760,7 @@ def deliver(payload: Mapping[str, Any]) -> dict[str, Any]:
     ):
         raise DriverError("typed delivery payload is invalid")
     module = _ensure_iterm_module(private_root)
-    asyncio.run(_exact_session(module, state))
+    asyncio.run(_validate_exact_session_async(module, state))
     transport = _pingagent_deliver(
         state,
         record,
@@ -2702,15 +2796,18 @@ def deliver(payload: Mapping[str, Any]) -> dict[str, Any]:
 async def _await_consumption_async(
     module: Any, state: Mapping[str, Any], expected_marker: str
 ) -> None:
-    _, _, session, _ = await _exact_session(module, state)
-    deadline = asyncio.get_running_loop().time() + CONSUMPTION_TIMEOUT_SECONDS
-    while True:
-        contents = await _bounded(session.async_get_screen_contents())
-        if expected_marker in _screen_text(contents):
-            return
-        if asyncio.get_running_loop().time() >= deadline:
-            raise DriverError("agent consumption signal timed out")
-        await asyncio.sleep(0.5)
+    app, _, session, _ = await _exact_session(module, state)
+    try:
+        deadline = asyncio.get_running_loop().time() + CONSUMPTION_TIMEOUT_SECONDS
+        while True:
+            contents = await _bounded(session.async_get_screen_contents())
+            if expected_marker in _screen_text(contents):
+                return
+            if asyncio.get_running_loop().time() >= deadline:
+                raise DriverError("agent consumption signal timed out")
+            await asyncio.sleep(0.5)
+    finally:
+        await _close_iterm_connection(getattr(app, "connection", None))
 
 
 def await_consumption(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -2751,6 +2848,15 @@ def await_consumption(payload: Mapping[str, Any]) -> dict[str, Any]:
 
 async def _iterm_close_async(module: Any, state: Mapping[str, Any]) -> int:
     connection = await _bounded(module.Connection.async_create())
+    try:
+        return await _iterm_close_connected(module, connection, state)
+    finally:
+        await _close_iterm_connection(connection)
+
+
+async def _iterm_close_connected(
+    module: Any, connection: Any, state: Mapping[str, Any]
+) -> int:
     app = await _bounded(module.async_get_app(connection))
     window = app.get_window_by_id(state.get("window_id")) if app is not None else None
     if window is None:
@@ -2814,6 +2920,7 @@ async def _safe_tui_close_async(
     app = None
     accepted_process_pids = [state["pid"]]
     for attempt in range(2):
+        app = None
         try:
             app, window, _, foreground_pid = await _exact_session(module, state)
             accepted_process_pids.append(foreground_pid)
@@ -2822,11 +2929,32 @@ async def _safe_tui_close_async(
         except Exception:
             if app is not None and app.get_window_by_id(state["window_id"]) is None:
                 break
+            await _close_iterm_connection(
+                getattr(app, "connection", None)
+            )
+            app = None
             if attempt == 1:
                 raise
             await asyncio.sleep(0.1)
     if app is None:  # pragma: no cover - the retry loop raises first
         raise DriverError("iTerm application is unavailable before exact close")
+    try:
+        return await _safe_tui_close_connected(
+            app,
+            state,
+            accepted_process_pids,
+            drain_timeout_ms,
+        )
+    finally:
+        await _close_iterm_connection(getattr(app, "connection", None))
+
+
+async def _safe_tui_close_connected(
+    app: Any,
+    state: Mapping[str, Any],
+    accepted_process_pids: list[int],
+    drain_timeout_ms: int,
+) -> tuple[str, bool, int, bool]:
     deadline = asyncio.get_running_loop().time() + drain_timeout_ms / 1000
     while True:
         if app.get_window_by_id(state["window_id"]) is None:
