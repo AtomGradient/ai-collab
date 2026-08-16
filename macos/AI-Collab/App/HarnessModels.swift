@@ -68,6 +68,20 @@ struct ParticipantRecord: Identifiable, Equatable {
     let continuityMode: String?
     let modelBinding: ModelBindingRecord?
 
+    /// Mirrors `begin_participant_start` in the Host store, which accepts only a
+    /// stopped or detached record. The Host additionally gates on the enclosing
+    /// Scenario, so this stays a necessary — not sufficient — condition.
+    var canStart: Bool {
+        ["stopped", "detached"].contains(observedState)
+    }
+
+    /// Mirrors `begin_participant_stop` in the Host store. Note that "running" is
+    /// deliberately absent: the store rejects it, so offering Stop there would
+    /// render a control that can only fail.
+    var canStop: Bool {
+        ["ready", "degraded"].contains(observedState)
+    }
+
     var canRecover: Bool {
         observedState == "degraded" && repairAction == "participant.recover"
     }

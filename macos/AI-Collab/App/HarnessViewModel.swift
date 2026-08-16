@@ -2,6 +2,27 @@ import AppKit
 import Foundation
 import SwiftUI
 
+/// Where a refusal should be rendered. Each case names the control that declined
+/// to act, so the View can put the reason next to it.
+enum ValidationScope: String {
+    case scenarioCreate
+    case workspace
+    case scenarioLifecycle
+    case participantAdd
+    case participantAction
+    case policy
+    case delivery
+    case resource
+    case project
+}
+
+struct ValidationNotice: Identifiable, Equatable {
+    let scope: ValidationScope
+    let message: String
+
+    var id: String { "\(scope.rawValue):\(message)" }
+}
+
 @MainActor
 final class HarnessViewModel: ObservableObject {
     @Published var hostStatus = "Connecting…"
@@ -27,6 +48,8 @@ final class HarnessViewModel: ObservableObject {
     @Published var deliveryMessage = "Select a Scenario to inspect delivery health."
     @Published var newScenarioID = "research-\(HarnessViewModel.shortTimestamp())"
     @Published var newParticipantID = "analyst"
+    /// Set only while a mutation is in flight. Read-only refreshes deliberately
+    /// leave it false so browsing never disables the window.
     @Published var isBusy = false
     @Published var activityText: String?
     @Published var activeOperationID: String?
@@ -34,6 +57,12 @@ final class HarnessViewModel: ObservableObject {
     @Published var operationCanCancel = false
     @Published var errorMessage: String?
     @Published var actionableError: ActionableErrorRecord?
+    /// Confirms a completed mutation. Cleared automatically; see `noteSuccess`.
+    @Published var successMessage: String?
+    /// Explains why a request could not even be attempted, so no control can
+    /// fail silently. Scoped so the reason renders next to the control that
+    /// refused, not in a single ambiguous global slot.
+    @Published var validation: ValidationNotice?
     @Published var diagnosticText = "Select a Scenario to inspect diagnostics."
     @Published var resourceText = "Select a Scenario to inspect resources."
     @Published var policyText = "Select a Scenario to inspect policy."
@@ -45,6 +74,7 @@ final class HarnessViewModel: ObservableObject {
     let client: HarnessIPCClient
     private let serviceController: HarnessServiceController?
     private var activeProgressSessionID: UUID?
+    private var successToken: UUID?
 
     init(
         client: HarnessIPCClient = HarnessIPCClient(),
@@ -70,8 +100,56 @@ final class HarnessViewModel: ObservableObject {
         policyTemplates.first { $0.id == selectedPolicyTemplateID }
     }
 
+    var runningParticipantCount: Int {
+        participants.filter { $0.observedState == "ready" }.count
+    }
+
+    /// One line of plain language for the Scenario header, in place of the
+    /// `desired X · observed Y` protocol pair.
+    var scenarioHeadline: String {
+        guard let scenario = selectedScenario else { return "No Scenario selected" }
+        let people = participants.count
+        let running = runningParticipantCount
+        let team: String
+        switch (people, running) {
+        case (0, _):
+            team = "no participants yet"
+        case (_, 0):
+            team = people == 1 ? "1 participant, none running" : "\(people) participants, none running"
+        case (running, _) where running == people:
+            team = people == 1 ? "1 participant running" : "all \(people) participants running"
+        default:
+            team = "\(running) of \(people) participants running"
+        }
+        return "\(Self.humanState(scenario.observedState)) · \(team)"
+    }
+
+    /// Machine state to plain language. Presentation only: the Host keeps
+    /// emitting machine states, and the App does the translating.
+    static func humanState(_ state: String) -> String {
+        switch state {
+        case "ready": "Ready"
+        case "running": "Running"
+        case "stopped": "Stopped"
+        case "detached": "Detached"
+        case "closed": "Closed"
+        case "degraded": "Needs attention"
+        case "provision_failed": "Workspace setup failed"
+        case "provisioning": "Setting up workspace"
+        case "opening": "Resuming"
+        case "closing": "Closing"
+        case "starting": "Starting"
+        case "stopping": "Stopping"
+        case "recovering": "Recovering"
+        case "repairing": "Repairing"
+        case "replacing": "Replacing"
+        case "destroying": "Deleting"
+        default: state.replacingOccurrences(of: "_", with: " ").capitalized
+        }
+    }
+
     func bootstrap() async {
-        await perform {
+        await performRead {
             if let serviceController = self.serviceController {
                 let serviceStatus = try await serviceController.ensureRegistered()
                 self.hostStatus = "starting · \(serviceStatus.label)"
@@ -98,7 +176,11 @@ final class HarnessViewModel: ObservableObject {
         panel.allowsMultipleSelection = false
         panel.prompt = "Register Project"
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        await perform {
+        await performMutation(
+            activity: "Registering \(url.lastPathComponent)…",
+            scope: .project,
+            success: "Registered \(url.lastPathComponent)."
+        ) {
             try self.client.grantProjectDirectoryAccess(url)
             let result = try await self.client.call(
                 HarnessCall(
@@ -128,7 +210,7 @@ final class HarnessViewModel: ObservableObject {
         topology = nil
         clearDestroyPreview()
         clearCollaborationValues()
-        await perform {
+        await performRead {
             try await self.reloadScenarios()
             try await self.reloadPolicyTemplates()
         }
@@ -141,14 +223,20 @@ final class HarnessViewModel: ObservableObject {
     }
 
     func runPreflight() async {
-        await perform(activity: "Checking current permissions and readiness…") {
+        await performRead {
             try await self.reloadPreflight()
         }
     }
 
     func focusScenario() async {
-        guard let project = selectedProject, let scenario = selectedScenario else { return }
-        await perform(activity: "Focusing and restoring Scenario windows…") {
+        guard let project = selectedProject, let scenario = selectedScenario else {
+            return refuse(.scenarioLifecycle, "Select a Scenario first.")
+        }
+        await performMutation(
+            activity: "Focusing and restoring Scenario windows…",
+            scope: .scenarioLifecycle,
+            success: "Restored the Scenario windows."
+        ) {
             let result = try await self.client.call(
                 HarnessCall(
                     operation: "scenario.focus",
@@ -222,10 +310,21 @@ final class HarnessViewModel: ObservableObject {
     }
 
     func createScenario() async {
-        guard let project = selectedProject else { return }
+        guard let project = selectedProject else {
+            return refuse(.scenarioCreate, "Register or select a project first.")
+        }
         let scenarioID = newScenarioID.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !scenarioID.isEmpty else { return }
-        await perform {
+        guard !scenarioID.isEmpty else {
+            return refuse(.scenarioCreate, "Give the Scenario a name.")
+        }
+        guard !scenarios.contains(where: { $0.id == scenarioID }) else {
+            return refuse(.scenarioCreate, "This project already has a Scenario named “\(scenarioID)”.")
+        }
+        await performMutation(
+            activity: "Creating Scenario \(scenarioID)…",
+            scope: .scenarioCreate,
+            success: "Created Scenario \(scenarioID)."
+        ) {
             let result = try await self.client.call(
                 HarnessCall(
                     operation: "scenario.create",
@@ -245,8 +344,14 @@ final class HarnessViewModel: ObservableObject {
     }
 
     func prepareWorkspace() async {
-        guard let project = selectedProject, let scenario = selectedScenario else { return }
-        await perform(activity: "Preparing isolated Workspace… This can take several minutes.") {
+        guard let project = selectedProject, let scenario = selectedScenario else {
+            return refuse(.workspace, "Select a Scenario first.")
+        }
+        await performMutation(
+            activity: "Planning the isolated Workspace…",
+            scope: .workspace,
+            success: "Workspace is ready."
+        ) {
             let target = self.scenarioTarget(projectID: project.id, scenarioID: scenario.id)
             let planned = try await self.client.call(
                 HarnessCall(
@@ -266,6 +371,9 @@ final class HarnessViewModel: ObservableObject {
                 let workspace = planned["workspace"] as? [String: Any],
                 let planDigest = workspace["plan_digest"] as? String
             else { throw HarnessIPCError.invalidReply }
+            self.activityText =
+                "Cloning repositories into the isolated Workspace… "
+                + "This is the long step and can take a few minutes."
             let provisioned = try await self.client.call(
                 HarnessCall(
                     operation: "workspace.provision",
@@ -287,8 +395,16 @@ final class HarnessViewModel: ObservableObject {
     }
 
     func openScenario() async {
-        guard let project = selectedProject, let scenario = selectedScenario else { return }
-        await perform {
+        guard let project = selectedProject, let scenario = selectedScenario else {
+            return refuse(.scenarioLifecycle, "Select a Scenario first.")
+        }
+        // The Host allows this up to 360s while it restores each participant's
+        // previous conversation, so it must never run without something on screen.
+        await performMutation(
+            activity: "Resuming \(scenario.id)… restoring each participant's previous session.",
+            scope: .scenarioLifecycle,
+            success: "Resumed \(scenario.id)."
+        ) {
             let result = try await self.client.call(
                 HarnessCall(
                     operation: "scenario.open",
@@ -305,9 +421,15 @@ final class HarnessViewModel: ObservableObject {
     }
 
     func closeScenario() async {
-        guard let project = selectedProject, let scenario = selectedScenario else { return }
+        guard let project = selectedProject, let scenario = selectedScenario else {
+            return refuse(.scenarioLifecycle, "Select a Scenario first.")
+        }
         let progressSessionID = UUID()
-        await perform(activity: "Closing Scenario safely…") {
+        await performMutation(
+            activity: "Closing \(scenario.id) safely…",
+            scope: .scenarioLifecycle,
+            success: "Closed \(scenario.id)."
+        ) {
             self.activeProgressSessionID = progressSessionID
             defer {
                 if self.activeProgressSessionID == progressSessionID {
@@ -364,18 +486,36 @@ final class HarnessViewModel: ObservableObject {
     }
 
     func repairScenario() async {
-        await mutateScenario(operation: "scenario.repair", extraPayload: [:])
+        await mutateScenario(
+            operation: "scenario.repair",
+            activity: "Repairing the Scenario… WIP and history are preserved.",
+            success: "Repair finished.",
+            extraPayload: [:]
+        )
     }
 
     func addParticipant() async {
-        guard
-            let project = selectedProject,
-            let scenario = selectedScenario,
-            let template = selectedTemplate
-        else { return }
+        guard let project = selectedProject, let scenario = selectedScenario else {
+            return refuse(.participantAdd, "Select a Scenario first.")
+        }
+        guard let template = selectedTemplate else {
+            return refuse(.participantAdd, "Choose a template for the new participant.")
+        }
         let participantID = newParticipantID.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !participantID.isEmpty else { return }
-        await perform {
+        guard !participantID.isEmpty else {
+            return refuse(.participantAdd, "Give the participant a name.")
+        }
+        guard !participants.contains(where: { $0.id == participantID }) else {
+            return refuse(
+                .participantAdd,
+                "This Scenario already has a participant named “\(participantID)”."
+            )
+        }
+        await performMutation(
+            activity: "Adding \(participantID)…",
+            scope: .participantAdd,
+            success: "Added \(participantID)."
+        ) {
             _ = try await self.client.call(
                 HarnessCall(
                     operation: "participant.add",
@@ -398,27 +538,77 @@ final class HarnessViewModel: ObservableObject {
     }
 
     func startParticipant(_ participant: ParticipantRecord) async {
-        await mutateParticipant(operation: "participant.start", participant: participant)
+        guard participant.canStart else {
+            return refuse(
+                .participantAction,
+                "\(participant.id) is \(Self.humanState(participant.observedState).lowercased()); "
+                    + "only a stopped participant can be started."
+            )
+        }
+        await mutateParticipant(
+            operation: "participant.start",
+            participant: participant,
+            activity: "Starting \(participant.id)…",
+            success: "\(participant.id) is running."
+        )
     }
 
     func stopParticipant(_ participant: ParticipantRecord) async {
-        await mutateParticipant(operation: "participant.stop", participant: participant)
+        guard participant.canStop else {
+            return refuse(
+                .participantAction,
+                "\(participant.id) is \(Self.humanState(participant.observedState).lowercased()); "
+                    + "there is nothing to stop."
+            )
+        }
+        await mutateParticipant(
+            operation: "participant.stop",
+            participant: participant,
+            activity: "Stopping \(participant.id)…",
+            success: "\(participant.id) is stopped."
+        )
     }
 
     func recoverParticipant(_ participant: ParticipantRecord) async {
-        await mutateParticipant(operation: "participant.recover", participant: participant)
+        guard participant.canRecover else {
+            return refuse(.participantAction, "\(participant.id) has nothing to recover.")
+        }
+        await mutateParticipant(
+            operation: "participant.recover",
+            participant: participant,
+            activity: "Recovering \(participant.id)…",
+            success: "Recovered \(participant.id)."
+        )
     }
 
     func forceStopParticipant(_ participant: ParticipantRecord) async {
-        guard participant.canForceStop else { return }
-        await mutateParticipant(operation: "participant.force-stop", participant: participant)
+        guard participant.canForceStop else {
+            return refuse(
+                .participantAction,
+                "\(participant.id) has no Harness-owned process to force stop."
+            )
+        }
+        await mutateParticipant(
+            operation: "participant.force-stop",
+            participant: participant,
+            activity: "Force stopping \(participant.id)…",
+            success: "Force stopped \(participant.id)."
+        )
     }
 
-    func replaceParticipant(_ participant: ParticipantRecord) async {
-        guard let template = selectedTemplate else { return }
+    /// The template is passed in explicitly. It used to be read from
+    /// `selectedTemplate`, which belongs to the unrelated "add participant" form,
+    /// so Replace could silently rebuild a participant from whichever template
+    /// that picker happened to be showing.
+    func replaceParticipant(
+        _ participant: ParticipantRecord,
+        template: ParticipantTemplate
+    ) async {
         await mutateParticipant(
             operation: "participant.replace",
             participant: participant,
+            activity: "Replacing \(participant.id) with \(template.displayName)…",
+            success: "Replaced \(participant.id) with \(template.displayName).",
             extraPayload: [
                 "launch_spec": template.launchSpec,
                 "presentation_driver_id": template.presentationDriverID ?? NSNull(),
@@ -427,12 +617,26 @@ final class HarnessViewModel: ObservableObject {
     }
 
     func recreateParticipantWithHandoff(_ participant: ParticipantRecord) async {
-        guard participant.canRecreateWithHandoff else { return }
-        let matchingTemplate = templates.first {
-            ($0.launchSpec["runtime_profile_ref"] as? String)
-                == participant.runtimeProfileRef
+        guard participant.canRecreateWithHandoff else {
+            return refuse(
+                .participantAction,
+                "\(participant.id) is not waiting on a failed conversation recovery."
+            )
         }
-        guard let template = matchingTemplate ?? selectedTemplate else { return }
+        // Deliberately no fallback to `selectedTemplate`: recreating against an
+        // unrelated template would hand the participant a different runtime.
+        guard
+            let template = templates.first(where: {
+                ($0.launchSpec["runtime_profile_ref"] as? String)
+                    == participant.runtimeProfileRef
+            })
+        else {
+            return refuse(
+                .participantAction,
+                "No installed template matches \(participant.id)'s runtime "
+                    + "(\(participant.runtimeProfileRef ?? "driver default")), so it cannot be recreated."
+            )
+        }
         var launchSpec = template.launchSpec
         launchSpec["continuity_mode"] = "explicit_recreate"
         launchSpec["continuity_binding_ref"] = NSNull()
@@ -450,6 +654,8 @@ final class HarnessViewModel: ObservableObject {
         await mutateParticipant(
             operation: "participant.replace",
             participant: participant,
+            activity: "Recreating \(participant.id) with a new conversation…",
+            success: "\(participant.id) now has a new Agent conversation.",
             extraPayload: [
                 "launch_spec": launchSpec,
                 "presentation_driver_id": template.presentationDriverID ?? NSNull(),
@@ -458,12 +664,17 @@ final class HarnessViewModel: ObservableObject {
     }
 
     func breakResource(_ resource: ResourceLeaseRecord) async {
-        guard
-            resource.canBreak,
-            let project = selectedProject,
-            let scenario = selectedScenario
-        else { return }
-        await perform {
+        guard let project = selectedProject, let scenario = selectedScenario else {
+            return refuse(.resource, "Select a Scenario first.")
+        }
+        guard resource.canBreak else {
+            return refuse(.resource, "This lease is not stale, so it will not be released.")
+        }
+        await performMutation(
+            activity: "Releasing the stale \(resource.resourceClass) lease…",
+            scope: .resource,
+            success: "Released the stale \(resource.resourceClass) lease."
+        ) {
             _ = try await self.client.call(
                 HarnessCall(
                     operation: "resource.break",
@@ -485,8 +696,10 @@ final class HarnessViewModel: ObservableObject {
     }
 
     func loadDestroyPreview() async {
-        guard let project = selectedProject, let scenario = selectedScenario else { return }
-        await perform {
+        guard let project = selectedProject, let scenario = selectedScenario else {
+            return refuse(.scenarioLifecycle, "Select a Scenario first.")
+        }
+        await performRead {
             let result = try await self.client.call(
                 HarnessCall(
                     operation: "scenario.destroy.preview",
@@ -504,8 +717,20 @@ final class HarnessViewModel: ObservableObject {
     }
 
     func destroyScenario() async {
-        guard let project = selectedProject, let scenario = selectedScenario else { return }
-        await perform {
+        guard let project = selectedProject, let scenario = selectedScenario else {
+            return refuse(.scenarioLifecycle, "Select a Scenario first.")
+        }
+        guard destroyPreviewEligible else {
+            return refuse(
+                .scenarioLifecycle,
+                "Load the destroy preview first so the exact effect is known."
+            )
+        }
+        await performMutation(
+            activity: "Deleting \(scenario.id)…",
+            scope: .scenarioLifecycle,
+            success: "Deleted \(scenario.id)."
+        ) {
             _ = try await self.client.call(
                 HarnessCall(
                     operation: "scenario.destroy",
@@ -525,8 +750,14 @@ final class HarnessViewModel: ObservableObject {
     }
 
     func forceDestroyScenario(_ scenario: ScenarioRecord) async {
-        guard let project = selectedProject else { return }
-        await perform(activity: "Force deleting \(scenario.id)…") {
+        guard let project = selectedProject else {
+            return refuse(.scenarioLifecycle, "Select a project first.")
+        }
+        await performMutation(
+            activity: "Force deleting \(scenario.id)…",
+            scope: .scenarioLifecycle,
+            success: "Deleted \(scenario.id) and its isolated Workspace."
+        ) {
             _ = try await self.client.call(
                 HarnessCall(
                     operation: "scenario.force-destroy",
@@ -549,7 +780,7 @@ final class HarnessViewModel: ObservableObject {
     }
 
     func refreshSelectedScenario() async {
-        await perform { try await self.refreshSelectedScenarioValues() }
+        await performRead { try await self.refreshSelectedScenarioValues() }
     }
 
     func selectPolicyTemplate(_ id: String?) {
@@ -559,12 +790,16 @@ final class HarnessViewModel: ObservableObject {
     }
 
     func planSelectedPolicy() async {
-        guard
-            let project = selectedProject,
-            let scenario = selectedScenario,
-            let template = selectedPolicyTemplate
-        else { return }
-        await perform {
+        guard let project = selectedProject, let scenario = selectedScenario else {
+            return refuse(.policy, "Select a Scenario first.")
+        }
+        guard let template = selectedPolicyTemplate else {
+            return refuse(.policy, "Choose a team template to preview.")
+        }
+        await performMutation(
+            activity: "Previewing the \(template.displayName) plan…",
+            scope: .policy
+        ) {
             let result = try await self.client.call(
                 HarnessCall(
                     operation: "policy.plan",
@@ -591,17 +826,40 @@ final class HarnessViewModel: ObservableObject {
     }
 
     func applySelectedPolicyPlan() async {
+        guard let project = selectedProject, let scenario = selectedScenario else {
+            return refuse(.policy, "Select a Scenario first.")
+        }
+        guard let template = selectedPolicyTemplate else {
+            return refuse(.policy, "Choose a team template first.")
+        }
+        guard let plan = policyPlan else {
+            return refuse(.policy, "Preview the plan before applying it.")
+        }
+        guard plan.templateID == template.id else {
+            return refuse(
+                .policy,
+                "The previewed plan is for a different template. Preview \(template.displayName) again."
+            )
+        }
+        guard plan.canApply else {
+            return refuse(.policy, "This plan is blocked. Resolve the listed requirements, then preview again.")
+        }
+        // This is the branch that used to fail silently while the button stayed
+        // enabled: the Scenario moved on after the preview was taken.
         guard
-            let project = selectedProject,
-            let scenario = selectedScenario,
-            let template = selectedPolicyTemplate,
-            let plan = policyPlan,
-            plan.canApply,
-            plan.templateID == template.id,
             plan.scenarioGeneration == scenario.generation,
             plan.scenarioStateRevision == scenario.stateRevision
-        else { return }
-        await perform {
+        else {
+            return refuse(
+                .policy,
+                "The Scenario changed after this plan was previewed. Preview it again to pick up the current state."
+            )
+        }
+        await performMutation(
+            activity: "Applying the \(template.displayName) plan…",
+            scope: .policy,
+            success: "Applied the \(template.displayName) policy."
+        ) {
             _ = try await self.client.call(
                 HarnessCall(
                     operation: "policy.apply-plan",
@@ -628,8 +886,8 @@ final class HarnessViewModel: ObservableObject {
             let project = selectedProject,
             let scenario = selectedScenario,
             let cursor = nextDeliveryPage
-        else { return }
-        await perform {
+        else { return refuse(.delivery, "There are no further delivery records to load.") }
+        await performRead {
             let page = try await self.fetchDeliveries(
                 project: project,
                 scenario: scenario,
@@ -679,12 +937,17 @@ final class HarnessViewModel: ObservableObject {
     }
 
     func retryDelivery(_ delivery: DeliveryRecord) async {
-        guard
-            delivery.retryEligible,
-            let project = selectedProject,
-            let scenario = selectedScenario
-        else { return }
-        await perform {
+        guard let project = selectedProject, let scenario = selectedScenario else {
+            return refuse(.delivery, "Select a Scenario first.")
+        }
+        guard delivery.retryEligible else {
+            return refuse(.delivery, "This delivery is not eligible for a retry.")
+        }
+        await performMutation(
+            activity: "Retrying delivery \(String(delivery.id.prefix(12)))…",
+            scope: .delivery,
+            success: "Delivery retry accepted."
+        ) {
             _ = try await self.client.call(
                 HarnessCall(
                     operation: "delivery.retry",
@@ -702,9 +965,20 @@ final class HarnessViewModel: ObservableObject {
         }
     }
 
-    private func mutateScenario(operation: String, extraPayload: [String: Any]) async {
-        guard let project = selectedProject, let scenario = selectedScenario else { return }
-        await perform {
+    private func mutateScenario(
+        operation: String,
+        activity: String,
+        success: String,
+        extraPayload: [String: Any]
+    ) async {
+        guard let project = selectedProject, let scenario = selectedScenario else {
+            return refuse(.scenarioLifecycle, "Select a Scenario first.")
+        }
+        await performMutation(
+            activity: activity,
+            scope: .scenarioLifecycle,
+            success: success
+        ) {
             var payload = self.scenarioFencePayload(scenario)
             payload.merge(extraPayload) { _, new in new }
             _ = try await self.client.call(
@@ -723,10 +997,18 @@ final class HarnessViewModel: ObservableObject {
     private func mutateParticipant(
         operation: String,
         participant: ParticipantRecord,
+        activity: String,
+        success: String,
         extraPayload: [String: Any] = [:]
     ) async {
-        guard let project = selectedProject, let scenario = selectedScenario else { return }
-        await perform {
+        guard let project = selectedProject, let scenario = selectedScenario else {
+            return refuse(.participantAction, "Select a Scenario first.")
+        }
+        await performMutation(
+            activity: activity,
+            scope: .participantAction,
+            success: success
+        ) {
             var payload: [String: Any] = [
                 "scenario_generation": scenario.generation,
                 "scenario_state_revision": scenario.stateRevision,
@@ -1060,15 +1342,42 @@ final class HarnessViewModel: ObservableObject {
         operationProgressText = "\(progress.state) · \(unitText)\(participantText)"
     }
 
-    private func perform(
-        activity: String? = nil,
+    /// Read-only refreshes. Deliberately does not take the mutation lock and does
+    /// not set `isBusy`, so browsing stays responsive while a mutation runs.
+    private func performRead(
         _ work: @escaping @MainActor () async throws -> Void
     ) async {
-        guard !isBusy else { return }
+        do {
+            try await work()
+            hostStatus = "ready"
+        } catch {
+            report(error)
+        }
+    }
+
+    /// Mutations. `activity` is required rather than optional so that every
+    /// mutation is structurally guaranteed to put something on screen while it
+    /// runs — the long ones included. A second mutation is refused with a visible
+    /// reason instead of being swallowed.
+    private func performMutation(
+        activity: String,
+        scope: ValidationScope,
+        success: String? = nil,
+        _ work: @escaping @MainActor () async throws -> Void
+    ) async {
+        guard !isBusy else {
+            refuse(
+                scope,
+                "\(activityText ?? "Another operation") is still running. "
+                    + "Wait for it to finish, then try again."
+            )
+            return
+        }
         isBusy = true
         activityText = activity
         errorMessage = nil
         actionableError = nil
+        validation = nil
         defer {
             activityText = nil
             isBusy = false
@@ -1076,11 +1385,52 @@ final class HarnessViewModel: ObservableObject {
         do {
             try await work()
             hostStatus = "ready"
+            if let success { noteSuccess(success) }
         } catch {
-            let actionable = ActionableErrorRecord(error)
-            actionableError = actionable
-            errorMessage = actionable.message
-            if case HarnessIPCError.hostUnavailable = error { hostStatus = "unavailable" }
+            report(error)
+        }
+    }
+
+    private func report(_ error: Error) {
+        let actionable = ActionableErrorRecord(error)
+        actionableError = actionable
+        errorMessage = actionable.message
+        if case HarnessIPCError.hostUnavailable = error { hostStatus = "unavailable" }
+    }
+
+    /// Explains why a control could not act. Every branch that used to `return`
+    /// silently now routes through here.
+    private func refuse(_ scope: ValidationScope, _ reason: String) {
+        validation = ValidationNotice(scope: scope, message: reason)
+    }
+
+    func dismissError() {
+        actionableError = nil
+        errorMessage = nil
+    }
+
+    func dismissSuccess() {
+        successMessage = nil
+    }
+
+    func dismissValidation() {
+        validation = nil
+    }
+
+    /// The refusal for a scope, if that is the one currently showing.
+    func validationMessage(for scope: ValidationScope) -> String? {
+        guard let validation, validation.scope == scope else { return nil }
+        return validation.message
+    }
+
+    private func noteSuccess(_ message: String) {
+        successMessage = message
+        let token = UUID()
+        successToken = token
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(4))
+            guard let self, self.successToken == token else { return }
+            self.successMessage = nil
         }
     }
 

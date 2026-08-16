@@ -91,7 +91,14 @@ def test_app_live_refreshes_selected_scenario_deliveries_without_full_page_polli
 def test_app_exposes_participant_replace_without_detach() -> None:
     content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
     view_model = (APP_ROOT / "HarnessViewModel.swift").read_text(encoding="utf-8")
-    assert 'Button("Replace")' in content
+    # Asserts the affordance, not the control that renders it: Replace has been a
+    # plain button and is now a template submenu, and either satisfies the
+    # guarantee. Naming the call also pins the explicit-template signature, so a
+    # regression back to reading the unrelated "add participant" picker fails here.
+    assert "model.replaceParticipant(" in content
+    # The template is a parameter, so Replace cannot silently rebuild a
+    # participant from whichever template the unrelated "add" picker was showing.
+    assert "template: ParticipantTemplate" in view_model
     assert 'operation: "participant.replace"' in view_model
     assert '"launch_spec": template.launchSpec' in view_model
     # Detach ended a participant permanently while offering nothing stop does
@@ -118,7 +125,9 @@ def test_app_exposes_scenario_focus_and_topology_without_vendor_logic() -> None:
     view_model = (APP_ROOT / "HarnessViewModel.swift").read_text(encoding="utf-8")
     models = (APP_ROOT / "HarnessModels.swift").read_text(encoding="utf-8")
     ipc = (APP_ROOT / "HarnessIPC.swift").read_text(encoding="utf-8")
-    assert 'GroupBox("Window Topology")' in content
+    # The section must exist and be labelled; whether it renders as a GroupBox or
+    # a collapsible section is layout, not contract.
+    assert '"Window Topology"' in content
     assert 'Button("Focus & Restore")' in content
     assert 'operation: "scenario.topology"' in view_model
     assert 'operation: "scenario.focus"' in view_model
