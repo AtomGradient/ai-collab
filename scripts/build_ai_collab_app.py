@@ -131,10 +131,25 @@ def _sign_nested(app: Path, identity: str) -> None:
     )
 
 
+def _selected_interpreter(python_executable: Path) -> Path:
+    """Normalise the build interpreter without leaving its environment.
+
+    Only the containing directory is resolved. Resolving the executable itself
+    would follow a virtual environment's ``bin/python`` symlink out to the base
+    interpreter, whose ``site-packages`` does not carry the environment's
+    dependencies, so the payload would be built against the wrong packages.
+    """
+    candidate = python_executable.expanduser()
+    candidate = candidate.parent.resolve(strict=True) / candidate.name
+    if not candidate.is_file() or not os.access(candidate, os.X_OK):
+        raise SystemExit("the selected Python executable is unavailable")
+    return candidate
+
+
 def build(output: Path, integration_root: Path, python_executable: Path) -> None:
     output = output.expanduser().resolve()
     integration_root = integration_root.expanduser().resolve(strict=True)
-    python_executable = python_executable.expanduser().resolve(strict=True)
+    python_executable = _selected_interpreter(python_executable)
     if output.exists() or output.is_symlink():
         raise SystemExit("output already exists; choose a fresh path")
     if output.suffix != ".app":
