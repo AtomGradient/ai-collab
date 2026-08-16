@@ -3,6 +3,7 @@
   "profiles": [
     {
       "profile_id": "runtime-profile.inert",
+      "display_name": "Inert (test fixture)",
       "executable": "/usr/bin/tail",
       "arguments": ["-f", "/dev/null"],
       "working_directory": ".",
@@ -17,6 +18,7 @@
     },
     {
       "profile_id": "runtime-profile.codex-dogfood",
+      "display_name": "Codex",
       "executable": "codex",
       "arguments": ["--dangerously-bypass-approvals-and-sandbox", "--no-alt-screen"],
       "working_directory": "bundle/EdgeStudio",
@@ -41,6 +43,7 @@
     },
     {
       "profile_id": "runtime-profile.claude-dogfood",
+      "display_name": "Claude",
       "executable": "claude",
       "arguments": ["--dangerously-skip-permissions", "--system-prompt", "."],
       "working_directory": "bundle/EdgeStudio",

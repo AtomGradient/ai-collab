@@ -230,6 +230,67 @@ def test_participant_templates_are_driver_data_not_host_vendor_logic() -> None:
         )
 
 
+def test_template_display_names_are_registry_data_not_transformed_ids() -> None:
+    """The label used to be the profile id with its prefix stripped and title
+    cased, so ``runtime-profile.inert`` reached the employee picker as "Inert" —
+    indistinguishable from a real agent."""
+    names = {
+        item["template_id"]: item["display_name"]
+        for item in participant_driver.list_templates({})["templates"]
+    }
+    for template_id, display_name in names.items():
+        assert display_name == participant_driver._runtime_profiles()[template_id][
+            "display_name"
+        ]
+        assert "runtime-profile" not in display_name
+
+    # The fixture must announce itself wherever it is shown, because it accepts
+    # no delivery, opens no window and can never resume a conversation.
+    assert "fixture" in names["runtime-profile.inert"].lower()
+    assert names["runtime-profile.claude-dogfood"] == "Claude"
+    assert names["runtime-profile.codex-dogfood"] == "Codex"
+
+
+def test_only_the_inert_fixture_is_headless() -> None:
+    """The App groups the picker on ``interaction_mode``, so this is the property
+    that keeps the fixture out of the list an employee chooses from."""
+    headless = {
+        item["template_id"]
+        for item in participant_driver.list_templates({})["templates"]
+        if item["launch_spec"]["interaction_mode"] == "headless"
+    }
+    assert headless == {"runtime-profile.inert"}
+
+
+def test_a_runtime_profile_without_a_display_name_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = json.loads(
+        participant_driver.PROFILE_PATH.read_text(encoding="utf-8")
+    )
+    for profile in registry["profiles"]:
+        del profile["display_name"]
+    path = tmp_path / "profiles.json"
+    path.write_text(json.dumps(registry), encoding="utf-8")
+    monkeypatch.setattr(participant_driver, "PROFILE_PATH", path)
+    with pytest.raises(participant_driver.DriverError):
+        participant_driver._runtime_profiles()
+
+
+def test_a_runtime_profile_with_a_blank_display_name_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = json.loads(
+        participant_driver.PROFILE_PATH.read_text(encoding="utf-8")
+    )
+    registry["profiles"][0]["display_name"] = "   "
+    path = tmp_path / "profiles.json"
+    path.write_text(json.dumps(registry), encoding="utf-8")
+    monkeypatch.setattr(participant_driver, "PROFILE_PATH", path)
+    with pytest.raises(participant_driver.DriverError):
+        participant_driver._runtime_profiles()
+
+
 @pytest.mark.parametrize(
     ("automation_status", "authorized", "socket_ready", "expected", "remediation"),
     (

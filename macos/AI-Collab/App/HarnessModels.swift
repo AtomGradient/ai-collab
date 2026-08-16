@@ -419,6 +419,14 @@ struct ParticipantTemplate: Identifiable {
     let launchSpec: [String: Any]
     let presentationDriverID: String?
 
+    /// A headless template gets no window, so nobody can work with it the way the
+    /// product intends. Today that is only the inert test fixture, and its
+    /// display name says so; the grouping is kept on this one property so both
+    /// the add form and the replace menu decide the same way.
+    var isHeadless: Bool {
+        (launchSpec["interaction_mode"] as? String) == "headless"
+    }
+
     init?(_ value: [String: Any]) {
         guard
             let id = value["template_id"] as? String,

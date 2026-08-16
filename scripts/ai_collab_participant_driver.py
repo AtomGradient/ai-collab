@@ -214,9 +214,11 @@ def list_templates(payload: Mapping[str, Any]) -> dict[str, Any]:
         templates.append(
             {
                 "template_id": profile_id,
-                "display_name": profile_id.removeprefix("runtime-profile.").replace(
-                    "-dogfood", ""
-                ).replace("-", " ").title(),
+                # Registry data, not a transformed identifier. Deriving the label
+                # from the profile id meant "runtime-profile.inert" reached the
+                # employee-facing picker as "Inert", reading like a role rather
+                # than the do-nothing fixture it is.
+                "display_name": profile["display_name"],
                 "launch_spec": {
                     "driver_id": "runtime.generic-process",
                     "driver_contract_version": 2,
@@ -462,6 +464,7 @@ def _runtime_profiles() -> dict[str, dict[str, Any]]:
             or set(row)
             != {
                 "profile_id",
+                "display_name",
                 "executable",
                 "arguments",
                 "working_directory",
@@ -472,6 +475,8 @@ def _runtime_profiles() -> dict[str, dict[str, Any]]:
                 "startup_gate",
             }
             or not isinstance(row["profile_id"], str)
+            or not isinstance(row["display_name"], str)
+            or not row["display_name"].strip()
             or not isinstance(row["executable"], str)
             or not row["executable"]
             or not isinstance(row["arguments"], list)

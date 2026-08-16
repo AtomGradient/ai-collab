@@ -155,21 +155,18 @@ struct ContentView: View {
                 set: { id in Task { await model.selectScenario(id) } }
             )) {
                 ForEach(model.scenarios) { scenario in
-                    HStack {
-                        VStack(alignment: .leading) {
-                            Text(scenario.id)
+                    ScenarioRoomCard(scenario: scenario)
+                        .tag(scenario.id)
+                        .listRowInsets(EdgeInsets(top: 3, leading: 6, bottom: 3, trailing: 6))
+                        .listRowSeparator(.hidden)
+                        .contextMenu {
+                            Button("Force Delete Scenario…", role: .destructive) {
+                                highRiskIntent = .forceDestroyScenario(scenario)
+                            }
                         }
-                        Spacer()
-                        StateBadge(state: scenario.observedState)
-                    }
-                    .tag(scenario.id)
-                    .contextMenu {
-                        Button("Force Delete Scenario…", role: .destructive) {
-                            highRiskIntent = .forceDestroyScenario(scenario)
-                        }
-                    }
                 }
             }
+            .listStyle(.plain)
         }
         .navigationTitle("Scenarios")
     }
@@ -292,8 +289,16 @@ struct ContentView: View {
                             Task { await model.addParticipant() }
                         }
                     Picker("Template", selection: $model.selectedTemplateID) {
-                        ForEach(model.templates) { template in
+                        ForEach(model.interactiveTemplates) { template in
                             Text(template.displayName).tag(Optional(template.id))
+                        }
+                        if !model.diagnosticTemplates.isEmpty {
+                            Divider()
+                            Section("Advanced") {
+                                ForEach(model.diagnosticTemplates) { template in
+                                    Text(template.displayName).tag(Optional(template.id))
+                                }
+                            }
                         }
                     }
                     .frame(minWidth: 180)
@@ -386,12 +391,26 @@ struct ContentView: View {
                 }
                 if ["stopped", "ready", "degraded", "detached"].contains(state) {
                     Menu("Replace with") {
-                        ForEach(model.templates) { template in
+                        ForEach(model.interactiveTemplates) { template in
                             Button(template.displayName) {
                                 Task {
                                     await model.replaceParticipant(
                                         participant, template: template
                                     )
+                                }
+                            }
+                        }
+                        if !model.diagnosticTemplates.isEmpty {
+                            Divider()
+                            Section("Advanced") {
+                                ForEach(model.diagnosticTemplates) { template in
+                                    Button(template.displayName) {
+                                        Task {
+                                            await model.replaceParticipant(
+                                                participant, template: template
+                                            )
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -995,6 +1014,156 @@ private struct StateBadge: View {
             .padding(.vertical, 3)
             .foregroundStyle(color)
             .background(color.opacity(0.12), in: Capsule())
+    }
+}
+
+// MARK: - ScenarioRoomCard
+
+private struct ScenarioRoomCard: View {
+    let scenario: ScenarioRecord
+
+    private var stateColor: Color {
+        switch scenario.observedState {
+        case "ready", "running":
+            .green
+        case "degraded", "blocked":
+            .orange
+        case "provision_failed", "failed":
+            .red
+        default:
+            .gray
+        }
+    }
+
+    private var isLive: Bool {
+        ["ready", "running"].contains(scenario.observedState)
+    }
+
+    private var needsAttention: Bool {
+        ["degraded", "provision_failed", "failed", "blocked"].contains(scenario.observedState)
+    }
+
+    private var statusSummary: String {
+        let count = scenario.participantIDs.count
+        switch scenario.observedState {
+        case "ready", "running":
+            return "\(count) participant\(count == 1 ? "" : "s")"
+        case "closed":
+            return "closed · \(count) participant\(count == 1 ? "" : "s")"
+        case "degraded":
+            return "\(count) participant\(count == 1 ? "" : "s") · degraded"
+        case "provision_failed":
+            return "workspace setup failed"
+        default:
+            return HarnessViewModel.humanState(scenario.observedState)
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            RoundedRectangle(cornerRadius: 2)
+                .fill(stateColor)
+                .frame(width: 4)
+                .padding(.vertical, 2)
+                .opacity(needsAttention ? 1.0 : 1.0)
+
+            VStack(alignment: .leading, spacing: 5) {
+                HStack {
+                    Text(scenario.id)
+                        .font(.system(.body, weight: .semibold))
+                        .lineLimit(1)
+                    Spacer()
+                    StateBadge(state: scenario.observedState)
+                }
+                HStack(spacing: 8) {
+                    HStack(spacing: -4) {
+                        ForEach(
+                            Array(scenario.participantIDs.prefix(4).enumerated()),
+                            id: \.offset
+                        ) { _, participantID in
+                            ParticipantInitialsView(id: participantID)
+                        }
+                        if scenario.participantIDs.count > 4 {
+                            Text("+\(scenario.participantIDs.count - 4)")
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 20, height: 20)
+                                .background(.secondary.opacity(0.15), in: Circle())
+                                .padding(.leading, -2)
+                        }
+                    }
+
+                    if isLive {
+                        Circle()
+                            .fill(.green)
+                            .frame(width: 6, height: 6)
+                            .modifier(PulseModifier())
+                    }
+
+                    Text(statusSummary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+        }
+        .background(.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+// MARK: - ParticipantInitialsView
+
+private struct ParticipantInitialsView: View {
+    let id: String
+
+    private var initials: String {
+        let cleaned = id.replacingOccurrences(of: "-", with: " ")
+        let words = cleaned.split(separator: " ")
+        if words.count >= 2 {
+            return String(words[0].prefix(1) + words[1].prefix(1)).uppercased()
+        }
+        return String(id.prefix(2)).uppercased()
+    }
+
+    private var color: Color {
+        let hash = id.unicodeScalars.reduce(0) { $0 &+ Int($1.value) }
+        let colors: [Color] = [
+            .purple, .orange, .green, .pink, .cyan, .indigo, .mint, .teal
+        ]
+        return colors[abs(hash) % colors.count]
+    }
+
+    var body: some View {
+        Text(initials)
+            .font(.system(size: 9, weight: .bold))
+            .foregroundStyle(.white)
+            .frame(width: 20, height: 20)
+            .background(color, in: Circle())
+            .overlay(Circle().stroke(.background, lineWidth: 2))
+    }
+}
+
+// MARK: - PulseModifier
+
+private struct PulseModifier: ViewModifier {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isPulsing = false
+
+    func body(content: Content) -> some View {
+        if reduceMotion {
+            content
+        } else {
+            content
+                .scaleEffect(isPulsing ? 1.0 : 0.7)
+                .opacity(isPulsing ? 1.0 : 0.5)
+                .animation(
+                    .easeInOut(duration: 2.0).repeatForever(autoreverses: true),
+                    value: isPulsing
+                )
+                .onAppear { isPulsing = true }
+        }
     }
 }
 

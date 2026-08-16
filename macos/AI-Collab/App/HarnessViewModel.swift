@@ -100,6 +100,19 @@ final class HarnessViewModel: ObservableObject {
         policyTemplates.first { $0.id == selectedPolicyTemplateID }
     }
 
+    /// Templates an employee is meant to pick from. A headless template has no
+    /// window and cannot take part in the collaboration the product exists for,
+    /// so it does not belong beside the real agents. Both the add form and the
+    /// replace menu read this, so the two can never drift apart.
+    var interactiveTemplates: [ParticipantTemplate] {
+        templates.filter { !$0.isHeadless }
+    }
+
+    /// Diagnostic templates, for an explicitly advanced surface only.
+    var diagnosticTemplates: [ParticipantTemplate] {
+        templates.filter(\.isHeadless)
+    }
+
     var runningParticipantCount: Int {
         participants.filter { $0.observedState == "ready" }.count
     }
