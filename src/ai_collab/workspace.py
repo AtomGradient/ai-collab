@@ -729,13 +729,24 @@ class WorkspaceCoordinator:
             "wip_summary_digest": observation.get("wip_summary_digest"),
             "canonical_source_wip_mutation": False,
         }
+        # The probe re-verifies the observation the owner is about to confirm.
+        # Binding that to the literal "aligned" made a forced teardown of a
+        # drifted workspace unprovable by construction, so the expectation is
+        # the observed state itself for the forced path. The WIP digest and the
+        # receipt digest remain bound to the same observation either way, so
+        # nothing about the WIP fence is weakened.
+        expected_state = (
+            observation.get("state")
+            if operation == "scenario.force-destroy"
+            else "aligned"
+        )
         subject = {
             "subject_kind": "project-storage",
             "bundle_path": str(workspace_path / "bundle"),
             "plan": plan,
             "receipt": receipt,
             "expected_wip_summary_digest": observation.get("wip_summary_digest"),
-            "expected_workspace_state": "aligned",
+            "expected_workspace_state": expected_state,
         }
         return preview, subject
 
@@ -855,6 +866,7 @@ class WorkspaceCoordinator:
         scenario_generation: int,
         workspace_path: Path,
         expected_wip_summary_digest: str,
+        force: bool = False,
     ) -> tuple[str, dict[str, Any]]:
         key = _binding_key(project_instance_id, scenario_id)
         with self._lock:
@@ -876,6 +888,10 @@ class WorkspaceCoordinator:
             binding["pending_expected_wip_summary_digest"] = (
                 expected_wip_summary_digest
             )
+            # Persisted so a crash-recovery replay reissues the identical
+            # request. A replay that silently dropped force would re-impose the
+            # alignment gate on an operation the owner already confirmed.
+            binding["pending_force"] = bool(force)
             state["requests"][request_id] = {
                 "request_digest": request_digest,
                 "operation_id": operation_id,
@@ -894,6 +910,7 @@ class WorkspaceCoordinator:
                     "plan": plan,
                     "receipt": receipt,
                     "expected_wip_summary_digest": expected_wip_summary_digest,
+                    "force": bool(force),
                 },
             )
             if set(external) != {"journal", "observation"}:
@@ -970,17 +987,22 @@ class WorkspaceCoordinator:
                 )
                 continue
             current_workspace_path = workspace_path(binding["workspace_id"])
+            resumed_payload = {
+                "operation_id": operation_id,
+                "bundle_path": str(current_workspace_path / "bundle"),
+                "plan": copy.deepcopy(binding["plan"]),
+                "receipt": copy.deepcopy(binding["receipt"]),
+                "expected_wip_summary_digest": expected_wip,
+            }
+            if kind != "repairing":
+                # Reissue the destroy exactly as it was first sent. repair has a
+                # different payload field set and must not gain this key.
+                resumed_payload["force"] = bool(binding.get("pending_force", False))
             try:
                 external = self._call_adapter(
                     binding["project_instance_id"],
                     "repair" if kind == "repairing" else "destroy",
-                    {
-                        "operation_id": operation_id,
-                        "bundle_path": str(current_workspace_path / "bundle"),
-                        "plan": copy.deepcopy(binding["plan"]),
-                        "receipt": copy.deepcopy(binding["receipt"]),
-                        "expected_wip_summary_digest": expected_wip,
-                    },
+                    resumed_payload,
                 )
                 if kind == "repairing":
                     self._validate_repair_result(

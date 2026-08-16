@@ -1030,10 +1030,16 @@ class ScenarioStore:
             reports = copy.deepcopy(reports)
             revision = record["state_revision"]
             all_closed = all(entry["closed"] is True for entry in reports)
-            event = "external_succeeded" if all_closed else "external_failed"
+            # A safe close must still fail closed when a participant cannot be
+            # proven closed. A forced close is the owner-confirmed teardown of a
+            # Scenario that is already broken, so an unprovable participant is
+            # recorded honestly in the reports but does not abort the teardown;
+            # otherwise the only exit closes exactly when it is needed.
+            close_completed = all_closed or (force_stop_used and not cancelled)
+            event = "external_succeeded" if close_completed else "external_failed"
             failure_code = (
                 None
-                if all_closed
+                if close_completed
                 else "operation.cancelled"
                 if cancelled
                 else "lifecycle.close-incomplete"
@@ -1141,12 +1147,15 @@ class ScenarioStore:
                 "summary_digest": canonical_json_sha256(reports),
             }
             item.setdefault("close_history", []).append(copy.deepcopy(close_summary))
-            record["observed_state"] = "closed" if all_closed else "degraded"
+            # close_summary above keeps all_closed and the per-participant
+            # reports verbatim, so the record of what could not be proven
+            # survives even when a forced close is allowed to complete.
+            record["observed_state"] = "closed" if close_completed else "degraded"
             record["active_operation_id"] = None
             record["state_revision"] += 1
             record["degraded"] = (
                 None
-                if all_closed
+                if close_completed
                 else {
                     "reason": "cleanup_pending",
                     "cleanup_pending": True,
@@ -1167,7 +1176,7 @@ class ScenarioStore:
             record["journal_head_sequence"] = state["journal_head_sequence"]
             request = state["requests"][request_id]
             request.pop("pending_external_result", None)
-            if all_closed:
+            if close_completed:
                 operation["state"] = "succeeded"
                 operation["mutation_state"] = "committed"
                 result = {
@@ -2293,12 +2302,15 @@ class ScenarioStore:
             previous = self._previous_request(state, request_id, request_digest)
             if previous is not None:
                 return previous[0], previous[1], None
+            # Re-check against the operation actually being performed. Checking
+            # a force destroy against the conservative prerequisites reimposed
+            # exactly the conditions a force destroy exists to bypass.
             preview = self.scenario_high_risk_preview(
                 project_instance_id=project_instance_id,
                 scenario_id=scenario_id,
                 scenario_generation=scenario_generation,
                 scenario_state_revision=scenario_state_revision,
-                operation="scenario.destroy",
+                operation=operation_kind,
             )
             if not preview["eligible"]:
                 raise StoreError(

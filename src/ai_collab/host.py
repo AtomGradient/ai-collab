@@ -2087,6 +2087,7 @@ class HarnessHost:
                 expected_wip_summary_digest=effect_preview["workspace"][
                     "wip_summary_digest"
                 ],
+                force=True,
             )
             result = self.store.finalize_scenario_destroy(
                 project_instance_id=project_instance_id,
@@ -2422,17 +2423,21 @@ class HarnessHost:
                     workspace_path=workspace_path,
                     operation=operation,
                 )
-        eligible = store_preview["eligible"] and workspace_preview["state"] == "aligned"
+        # force-destroy exists to remove a Scenario that is already broken, so a
+        # workspace that no longer observes as aligned cannot be a prerequisite
+        # for it without closing the only exit. The drift stays visible in the
+        # workspace observation the owner confirms; it just stops blocking.
+        alignment_blocks = (
+            operation != "scenario.force-destroy"
+            and workspace_preview["state"] != "aligned"
+        )
+        eligible = store_preview["eligible"] and not alignment_blocks
         effect_preview = {
             **store_preview,
             "eligible": eligible,
             "blockers": sorted(
                 set(store_preview["blockers"])
-                | (
-                    set()
-                    if workspace_preview["state"] == "aligned"
-                    else {"workspace.not-aligned"}
-                )
+                | ({"workspace.not-aligned"} if alignment_blocks else set())
             ),
             "workspace": workspace_preview,
         }

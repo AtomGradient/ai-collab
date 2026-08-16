@@ -2726,6 +2726,92 @@ def test_force_destroy_cleanup_uses_exact_frozen_participant_binding(
         assert stopped["runtime_binding_id"] is None
 
 
+def test_forced_close_completes_when_a_participant_cannot_be_proven_closed(
+    tmp_path: Path,
+) -> None:
+    """A forced teardown must not be blocked by an unprovable participant.
+
+    The owner has already confirmed the destruction of a Scenario that is
+    already broken. Requiring proof of a clean close at that point left the
+    Scenario impossible to remove from any entry point. The report still
+    records honestly that the outcome was unknown; only the gate is relaxed,
+    and only for the forced path.
+    """
+    state_root = tmp_path / "state"
+    with running_host(state_root) as (host, client, driver):
+        created = client.create_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            project_binding_digest=PROJECT_DIGEST,
+            request_id="unprovable-create",
+        )["scenario"]
+        added = _add_test_participant(
+            client,
+            scenario=created,
+            participant_id=PARTICIPANT_ID,
+            request_prefix="unprovable",
+        )
+        opened = client.open_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=created["scenario_generation"],
+            scenario_state_revision=created["state_revision"],
+            request_id="unprovable-open",
+        )["scenario"]
+        _start_test_participant(
+            client,
+            scenario=opened,
+            participant=added,
+            participant_id=PARTICIPANT_ID,
+            request_prefix="unprovable",
+        )
+        current = client.scenario_status(
+            project_instance_id=PROJECT_ID, scenario_id=SCENARIO_ID
+        )["scenario"]
+        operation_id, _replay, executions = host.store.begin_scenario_close(
+            request_id="unprovable-cleanup",
+            request_digest="b" * 64,
+            host_generation=host.host_generation,
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=current["scenario_generation"],
+            scenario_state_revision=current["state_revision"],
+            drain_timeout_ms=1,
+            force=True,
+        )
+        assert executions is not None
+        assert host.participants is not None
+
+        # The owned process can no longer be acted on, so the driver cannot
+        # prove the outcome either way.
+        driver.fail_stop = True
+        reports = host.participants.force_close_scenario_participants(executions)
+        assert reports[0]["closed"] is False
+        assert reports[0]["action_outcome_known"] is False
+
+        host.store.record_scenario_close_reports(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            request_id="unprovable-cleanup",
+            operation_id=operation_id,
+            reports=reports,
+            force_stop_used=True,
+        )
+        result = host.store.finalize_scenario_close(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            request_id="unprovable-cleanup",
+            operation_id=operation_id,
+            reports=reports,
+            force_stop_used=True,
+        )
+
+        assert result["scenario"]["observed_state"] == "closed"
+        # What could not be proven is still on the record.
+        assert result["close_summary"]["all_closed"] is False
+        assert result["close_summary"]["auto_force_stop_used"] is True
+
+
 def test_force_destroy_cleanup_rejects_unproven_live_binding(tmp_path: Path) -> None:
     store = ScenarioStore(tmp_path / "state")
     driver = FakeDriver()

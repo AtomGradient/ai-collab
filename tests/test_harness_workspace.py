@@ -682,21 +682,16 @@ def test_high_risk_precondition_failure_names_its_blockers(tmp_path: Path) -> No
     assert "scenario.not-closed" in str(rejected.value)
 
 
-def test_force_destroy_is_blocked_while_the_workspace_observation_drifts(
+def test_force_destroy_removes_a_scenario_whose_workspace_drifted(
     tmp_path: Path,
 ) -> None:
-    """Reproduce a Scenario that cannot be removed from the App at all.
+    """The escape hatch must stay open exactly when the Scenario is broken.
 
     A workspace whose environment fingerprint drifted - for example because an
     App update swapped the embedded interpreter every Scenario venv links to -
-    observes as degraded. force-destroy is the documented escape hatch for a
-    broken Scenario, and its own store blockers are deliberately relaxed, but
-    the workspace-alignment conjunct is applied to every high-risk operation,
-    so the escape hatch closes exactly when it is needed.
-
-    This pins the current behaviour. Whether force-destroy should tolerate a
-    drifted workspace is a product decision, and this is the single place to
-    flip once that is settled.
+    observes as degraded. Requiring alignment before a force destroy closed the
+    only exit at the moment it was needed, leaving a Scenario that could not be
+    removed from any entry point.
     """
     state_root = tmp_path / "state"
     adapter = FakeAdapter()
@@ -715,33 +710,49 @@ def test_force_destroy_is_blocked_while_the_workspace_observation_drifts(
         adapter.observed_state = "degraded"
         adapter.drift_codes = ["environment.content-drift"]
 
-        with pytest.raises(HarnessClientError) as rejected:
-            client.force_destroy_scenario(
-                project_instance_id="project",
-                scenario_id="scenario",
-                scenario_generation=opened["scenario_generation"],
-                scenario_state_revision=opened["state_revision"],
-                request_id="drifted-force-destroy",
-            )
-
-        assert rejected.value.code == "operation.precondition-failed"
-        assert "workspace.not-aligned" in str(rejected.value)
-
-        # The Scenario survives, so the App has no way to remove it.
-        remaining = client.list_scenarios(project_instance_id="project")["scenarios"]
-        assert [item["scenario_id"] for item in remaining] == ["scenario"]
-
-        # Re-aligning the workspace is the only currently available exit.
-        adapter.observed_state = "aligned"
-        adapter.drift_codes = []
         client.force_destroy_scenario(
             project_instance_id="project",
             scenario_id="scenario",
             scenario_generation=opened["scenario_generation"],
             scenario_state_revision=opened["state_revision"],
-            request_id="realigned-force-destroy",
+            request_id="drifted-force-destroy",
         )
+
         assert client.list_scenarios(project_instance_id="project")["scenarios"] == []
+
+
+def test_conservative_destroy_still_refuses_a_drifted_workspace(
+    tmp_path: Path,
+) -> None:
+    """Only the forced path is relaxed; the safe path still fails closed."""
+    state_root = tmp_path / "state"
+    adapter = FakeAdapter()
+    with running_high_risk_host(state_root, adapter=adapter) as (host, client):
+        created, _ = _provision_host_workspace(client)
+        opened = client.open_scenario(
+            project_instance_id="project",
+            scenario_id="scenario",
+            scenario_generation=created["scenario_generation"],
+            scenario_state_revision=created["state_revision"],
+            request_id="safe-drifted-open",
+        )["scenario"]
+        host.participants = EmptyForceCloseCoordinator()  # type: ignore[assignment]
+        adapter.observed_state = "degraded"
+        adapter.drift_codes = ["environment.content-drift"]
+
+        with pytest.raises(HarnessClientError) as rejected:
+            client.destroy_scenario(
+                project_instance_id="project",
+                scenario_id="scenario",
+                scenario_generation=opened["scenario_generation"],
+                scenario_state_revision=opened["state_revision"],
+                request_id="safe-drifted-destroy",
+            )
+
+        assert rejected.value.code == "operation.precondition-failed"
+        assert "workspace.not-aligned" in str(rejected.value)
+        remaining = client.list_scenarios(project_instance_id="project")["scenarios"]
+        assert [item["scenario_id"] for item in remaining] == ["scenario"]
 
 
 def test_force_destroy_with_a_stale_revision_is_a_distinct_fence_failure(
