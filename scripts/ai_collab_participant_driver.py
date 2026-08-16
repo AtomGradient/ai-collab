@@ -3135,6 +3135,25 @@ def stop(payload: Mapping[str, Any]) -> dict[str, Any]:
     return {"stopped": True, "owned_resource_evidence_sha256": evidence}
 
 
+def _owned_process_is_absent(state: Mapping[str, Any]) -> bool:
+    """Report whether the owned process is provably gone.
+
+    Only a definite ProcessLookupError counts. If any process still holds the
+    recorded pid the answer is False, even when it is a different process that
+    reused the number, so identity validation still refuses to act on it.
+    """
+    pid = state.get("pid")
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 1:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
 def force_stop(payload: Mapping[str, Any]) -> dict[str, Any]:
     """Force-stop only the exact Harness-owned binding supplied by Host."""
 
@@ -3156,6 +3175,25 @@ def force_stop(payload: Mapping[str, Any]) -> dict[str, Any]:
             "stopped": True,
             "owned_resource_evidence_sha256": state["stop_evidence_sha256"],
         }
+    if _owned_process_is_absent(state):
+        # A force stop has nothing left to terminate. Recording the binding as
+        # stopped is evidence that the process is gone, not an assumption that
+        # it was closed, so the evidence claims only what was observed. Without
+        # this the binding can never be released: identity validation rejects a
+        # vanished process, the close reports back as an unknown outcome, and
+        # the Scenario becomes impossible to destroy from any entry point.
+        evidence = digest(
+            {
+                "runtime_binding_id": state["runtime_binding_id"],
+                "presentation_instance_id": state["presentation_instance_id"],
+                "process_absent": True,
+                "termination_mode": "force-stop-process-absent",
+            }
+        )
+        state["status"] = "stopped"
+        state["stop_evidence_sha256"] = evidence
+        _write_private(state_path, state)
+        return {"stopped": True, "owned_resource_evidence_sha256": evidence}
     _validate_process_state(state)
     if state.get("interaction_mode") == "tui":
         module = _ensure_iterm_module(private_root)
