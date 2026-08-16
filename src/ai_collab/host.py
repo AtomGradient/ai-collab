@@ -2437,10 +2437,15 @@ class HarnessHost:
             "workspace": workspace_preview,
         }
         if require_eligible and not eligible:
+            # Name the blockers. Without them the caller cannot tell an
+            # unaligned workspace from an open Scenario, and the two need
+            # completely different recovery steps.
+            detail = ", ".join(effect_preview["blockers"])
             raise ProtocolError(
                 "operation.precondition-failed",
                 "operation",
-                "Scenario high-risk operation prerequisites differ",
+                "Scenario high-risk operation prerequisites differ"
+                + (f": {detail}" if detail else ""),
             )
         return effect_preview, subject
 

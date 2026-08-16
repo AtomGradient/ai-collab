@@ -639,6 +639,33 @@ def test_host_repair_is_conservative_and_destroy_unregisters_with_audit(
         assert len(workspace_state["history"]) == 1
 
 
+def test_high_risk_precondition_failure_names_its_blockers(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    with running_high_risk_host(state_root) as (_host, client):
+        created, _ = _provision_host_workspace(client)
+        opened = client.open_scenario(
+            project_instance_id="project",
+            scenario_id="scenario",
+            scenario_generation=created["scenario_generation"],
+            scenario_state_revision=created["state_revision"],
+            request_id="blocker-detail-open",
+        )["scenario"]
+
+        with pytest.raises(HarnessClientError) as rejected:
+            client.destroy_scenario(
+                project_instance_id="project",
+                scenario_id="scenario",
+                scenario_generation=opened["scenario_generation"],
+                scenario_state_revision=opened["state_revision"],
+                request_id="blocker-detail-destroy",
+            )
+
+    assert rejected.value.code == "operation.precondition-failed"
+    # The caller must be able to tell which prerequisite failed; an unaligned
+    # workspace and an open Scenario need different recovery steps.
+    assert "scenario.not-closed" in str(rejected.value)
+
+
 def test_force_destroy_closes_running_scenario_with_one_authorization(
     tmp_path: Path,
 ) -> None:
