@@ -293,17 +293,8 @@ class ScenarioStore:
                     # An incomplete close is itself a fully reconciled durable
                     # result; start_host must not reclassify it as unknown.
                     pass
-            elif kind in {
-                "participant.stop",
-                "participant.force-stop",
-                "participant.detach",
-            }:
-                finalizer = (
-                    self.finalize_participant_detach
-                    if kind == "participant.detach"
-                    else self.finalize_participant_stop
-                )
-                finalizer(
+            elif kind in {"participant.stop", "participant.force-stop"}:
+                self.finalize_participant_stop(
                     project_instance_id=external["project_instance_id"],
                     scenario_id=target["scenario_id"],
                     participant_id=target["participant_id"],
@@ -2916,99 +2907,6 @@ class ScenarioStore:
                 record,
                 supervision_observation,
             )
-            self._append_operation_event(
-                state,
-                operation,
-                event="finalize_committed",
-                before_revision=revision,
-                after_revision=record["state_revision"],
-                mutation_state="committed",
-            )
-            record["journal_head_sequence"] = state["journal_head_sequence"]
-            operation["state"] = "succeeded"
-            operation["mutation_state"] = "committed"
-            participants, _ = self._participant_maps(item)
-            if (
-                scenario["desired_state"] == "running"
-                and scenario["observed_state"] == "degraded"
-                and scenario.get("degraded", {}).get("reason")
-                in {"participant_fault", "participant_restore_incomplete"}
-                and not any(
-                    participant["observed_state"] == "degraded"
-                    for participant in participants.values()
-                )
-            ):
-                scenario["observed_state"] = "running"
-                scenario["degraded"] = None
-                scenario["state_revision"] += 1
-                scenario["journal_head_sequence"] = state[
-                    "journal_head_sequence"
-                ]
-            result = {"participant": copy.deepcopy(record)}
-            request = state["requests"][request_id]
-            request.pop("pending_external_result", None)
-            request["status"] = "completed"
-            request["result"] = result
-            state["state_revision"] += 1
-            self._write_state(state)
-            return result
-
-    def finalize_participant_detach(
-        self,
-        *,
-        project_instance_id: str,
-        scenario_id: str,
-        participant_id: str,
-        request_id: str,
-        operation_id: str,
-        release_evidence_sha256: str,
-    ) -> dict[str, Any]:
-        key = self._scenario_key(project_instance_id, scenario_id)
-        with self._lock:
-            state = self._read_state()
-            item, scenario, record, artifact = self._participant_state(
-                state, key, participant_id
-            )
-            operation = state["operations"][operation_id]
-            if (
-                operation["operation_kind"] != "participant.detach"
-                or record["active_operation_id"] != operation_id
-                or record["desired_state"] != "detached"
-                or record["observed_state"] != "stopping"
-            ):
-                raise StoreError(
-                    "participant.stale-fence", "participant callback fence differs"
-                )
-            revision = record["state_revision"]
-            self._append_operation_event(
-                state,
-                operation,
-                event="external_succeeded",
-                before_revision=revision,
-                after_revision=revision,
-                mutation_state="committed",
-            )
-            self._release_participant_resources(
-                item, record, release_evidence_sha256
-            )
-            record.update(
-                {
-                    "observed_state": "detached",
-                    "runtime_binding_id": None,
-                    "presentation_binding_id": None,
-                    "active_operation_id": None,
-                    "degraded": None,
-                    "state_revision": revision + 1,
-                }
-            )
-            for field in (
-                "runtime_create_request",
-                "prepared_runtime_launch",
-                "runtime_ready_ack",
-                "presentation_create_request",
-                "presentation_create_ack",
-            ):
-                artifact[field] = None
             self._append_operation_event(
                 state,
                 operation,
