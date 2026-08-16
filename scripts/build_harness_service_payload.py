@@ -32,6 +32,13 @@ REQUIRED_INTEGRATION_FILES = (
     "scripts/validate_ai_collab_project_descriptor.py",
     "scripts/validate_ai_collab_repo_manifest.py",
 )
+# Third-party packages vendored into the embedded interpreter. This must cover
+# every runtime dependency declared in pyproject.toml that product code imports,
+# including from ai_collab.cli, which the embedded CLI entry point loads.
+VENDORED_SITE_PACKAGES = (
+    "yaml",
+    "platformdirs",
+)
 
 
 def _copy(source: Path, destination: Path) -> None:
@@ -82,7 +89,13 @@ def build(destination: Path, integration_root: Path) -> None:
     elif embedded_site_packages.exists() and not embedded_site_packages.is_dir():
         raise SystemExit("embedded Python site-packages path is not a directory")
     embedded_site_packages.mkdir(parents=True, exist_ok=True)
-    _copy(site_packages / "yaml", embedded_site_packages / "yaml")
+    for package in VENDORED_SITE_PACKAGES:
+        source = site_packages / package
+        if not source.is_dir():
+            raise SystemExit(
+                f"the selected Python runtime is missing a vendored dependency: {package}"
+            )
+        _copy(source, embedded_site_packages / package)
     for relative in REQUIRED_PRODUCT_FILES:
         _copy(PRODUCT_ROOT / relative, destination / relative)
     for relative in REQUIRED_INTEGRATION_FILES:

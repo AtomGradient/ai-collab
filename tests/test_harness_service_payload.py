@@ -54,3 +54,11 @@ def test_embedded_payload_copies_pingagent_client_and_transport(
     assert Path("HarnessService/ai_collab_team_policies.json") in targets
     assert Path("HarnessService/scripts/ai_collab_macos_automation_preflight.py") in targets
     assert Path("HarnessService/python/ai_collab") in targets
+
+    # Every declared runtime dependency must land in the embedded interpreter,
+    # otherwise ai_collab.cli fails at import time inside the App payload.
+    vendored = {
+        target.name for _, target in copied if "site-packages" in target.parts
+    }
+    assert vendored == set(module.VENDORED_SITE_PACKAGES)
+    assert "platformdirs" in vendored
