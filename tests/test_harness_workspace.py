@@ -82,6 +82,18 @@ def test_external_workspace_root_preserves_legacy_bindings_and_hosts_new_ones(
 
 
 class FakeAdapter:
+    def __init__(
+        self,
+        *,
+        observed_state: str = "aligned",
+        drift_codes: tuple[str, ...] = (),
+    ) -> None:
+        # Injectable so a test can observe a workspace that is not aligned.
+        # Without this every high-risk test saw a perfectly aligned workspace,
+        # which is how the force-destroy gate stayed uncovered.
+        self.observed_state = observed_state
+        self.drift_codes = list(drift_codes)
+
     def call(self, operation: str, payload: Mapping[str, Any]) -> dict[str, Any]:
         if operation == "plan":
             plan = {
@@ -130,8 +142,8 @@ class FakeAdapter:
                     "operation_id": payload["operation_id"],
                     "receipt_digest": canonical_json_sha256(receipt),
                     "journal_digest": canonical_json_sha256(journal),
-                    "state": "aligned",
-                    "drift_codes": [],
+                    "state": self.observed_state,
+                    "drift_codes": list(self.drift_codes),
                     "wip_summary_digest": canonical_json_sha256({"wip": "stable"}),
                 },
             }
@@ -238,12 +250,16 @@ class EmptyForceCloseCoordinator:
 @contextmanager
 def running_high_risk_host(
     state_root: Path,
+    *,
+    adapter: FakeAdapter | None = None,
 ) -> Iterator[tuple[HarnessHost, HarnessClient]]:
     with tempfile.TemporaryDirectory(prefix="harness-high-risk-") as runtime:
         socket_path = Path(runtime) / "host.sock"
         host = HarnessHost(state_root, socket_path)
         host.projects.validate_binding = lambda _project, _digest: None  # type: ignore[method-assign]
-        host.workspace = WorkspaceCoordinator(state_root, FakeAdapter())  # type: ignore[arg-type]
+        host.workspace = WorkspaceCoordinator(  # type: ignore[arg-type]
+            state_root, adapter or FakeAdapter()
+        )
         host.security = SecurityCoordinator(state_root, FakeSecurityAdapter())  # type: ignore[arg-type]
         errors: list[BaseException] = []
 
@@ -664,6 +680,105 @@ def test_high_risk_precondition_failure_names_its_blockers(tmp_path: Path) -> No
     # The caller must be able to tell which prerequisite failed; an unaligned
     # workspace and an open Scenario need different recovery steps.
     assert "scenario.not-closed" in str(rejected.value)
+
+
+def test_force_destroy_is_blocked_while_the_workspace_observation_drifts(
+    tmp_path: Path,
+) -> None:
+    """Reproduce a Scenario that cannot be removed from the App at all.
+
+    A workspace whose environment fingerprint drifted - for example because an
+    App update swapped the embedded interpreter every Scenario venv links to -
+    observes as degraded. force-destroy is the documented escape hatch for a
+    broken Scenario, and its own store blockers are deliberately relaxed, but
+    the workspace-alignment conjunct is applied to every high-risk operation,
+    so the escape hatch closes exactly when it is needed.
+
+    This pins the current behaviour. Whether force-destroy should tolerate a
+    drifted workspace is a product decision, and this is the single place to
+    flip once that is settled.
+    """
+    state_root = tmp_path / "state"
+    adapter = FakeAdapter()
+    with running_high_risk_host(state_root, adapter=adapter) as (host, client):
+        created, _ = _provision_host_workspace(client)
+        opened = client.open_scenario(
+            project_instance_id="project",
+            scenario_id="scenario",
+            scenario_generation=created["scenario_generation"],
+            scenario_state_revision=created["state_revision"],
+            request_id="drifted-open",
+        )["scenario"]
+        host.participants = EmptyForceCloseCoordinator()  # type: ignore[assignment]
+
+        # The workspace drifts after it was provisioned.
+        adapter.observed_state = "degraded"
+        adapter.drift_codes = ["environment.content-drift"]
+
+        with pytest.raises(HarnessClientError) as rejected:
+            client.force_destroy_scenario(
+                project_instance_id="project",
+                scenario_id="scenario",
+                scenario_generation=opened["scenario_generation"],
+                scenario_state_revision=opened["state_revision"],
+                request_id="drifted-force-destroy",
+            )
+
+        assert rejected.value.code == "operation.precondition-failed"
+        assert "workspace.not-aligned" in str(rejected.value)
+
+        # The Scenario survives, so the App has no way to remove it.
+        remaining = client.list_scenarios(project_instance_id="project")["scenarios"]
+        assert [item["scenario_id"] for item in remaining] == ["scenario"]
+
+        # Re-aligning the workspace is the only currently available exit.
+        adapter.observed_state = "aligned"
+        adapter.drift_codes = []
+        client.force_destroy_scenario(
+            project_instance_id="project",
+            scenario_id="scenario",
+            scenario_generation=opened["scenario_generation"],
+            scenario_state_revision=opened["state_revision"],
+            request_id="realigned-force-destroy",
+        )
+        assert client.list_scenarios(project_instance_id="project")["scenarios"] == []
+
+
+def test_force_destroy_with_a_stale_revision_is_a_distinct_fence_failure(
+    tmp_path: Path,
+) -> None:
+    """A caller holding an out-of-date revision must not look like a blocked one.
+
+    The two failures need opposite responses: refresh and retry, versus repair
+    the Scenario. They are only distinguishable by their error code, so pin
+    that a stale revision never reports itself as a precondition failure.
+    """
+    state_root = tmp_path / "state"
+    with running_high_risk_host(state_root) as (host, client):
+        created, _ = _provision_host_workspace(client)
+        opened = client.open_scenario(
+            project_instance_id="project",
+            scenario_id="scenario",
+            scenario_generation=created["scenario_generation"],
+            scenario_state_revision=created["state_revision"],
+            request_id="stale-open",
+        )["scenario"]
+        host.participants = EmptyForceCloseCoordinator()  # type: ignore[assignment]
+
+        stale_revision = created["state_revision"]
+        assert stale_revision != opened["state_revision"]
+
+        with pytest.raises(HarnessClientError) as rejected:
+            client.force_destroy_scenario(
+                project_instance_id="project",
+                scenario_id="scenario",
+                scenario_generation=opened["scenario_generation"],
+                scenario_state_revision=stale_revision,
+                request_id="stale-force-destroy",
+            )
+
+    assert rejected.value.code != "operation.precondition-failed"
+    assert "fence" in rejected.value.code or "stale" in rejected.value.code
 
 
 def test_force_destroy_closes_running_scenario_with_one_authorization(
