@@ -15,7 +15,6 @@ final class HarnessContractTests: XCTestCase {
         XCTAssertEqual(HarnessContract.capabilities["participant.list"], "participant.read")
         XCTAssertEqual(HarnessContract.capabilities["participant.recover"], "participant.manage")
         XCTAssertEqual(HarnessContract.capabilities["participant.replace"], "participant.manage")
-        XCTAssertEqual(HarnessContract.capabilities["participant.detach"], "participant.manage")
         XCTAssertEqual(HarnessContract.capabilities["participant.force-stop"], "participant.force-stop")
         XCTAssertEqual(HarnessContract.capabilities["scenario.repair"], "scenario.repair")
         XCTAssertEqual(HarnessContract.capabilities["scenario.destroy"], "scenario.destroy")

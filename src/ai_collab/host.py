@@ -1845,19 +1845,6 @@ class HarnessHost:
                                 "state_revision"
                             ],
                         )
-                elif operation == "participant.detach":
-                    operation_id, result = self.participants.detach(
-                        request_id=request["request_id"],
-                        request_digest=request_digest,
-                        host_generation=self.host_generation,
-                        **common,
-                    )
-                    self.participant_auth.revoke(
-                        project_instance_id=target["project_instance_id"],
-                        scenario_id=target["scenario_id"],
-                        participant_id=target["participant_id"],
-                        participant_generation=participant_generation,
-                    )
                 elif operation == "participant.force-stop":
                     try:
                         operation_id, result = self.participants.force_stop(

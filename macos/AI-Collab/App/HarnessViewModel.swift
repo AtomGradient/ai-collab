@@ -457,10 +457,6 @@ final class HarnessViewModel: ObservableObject {
         )
     }
 
-    func detachParticipant(_ participant: ParticipantRecord) async {
-        await mutateParticipant(operation: "participant.detach", participant: participant)
-    }
-
     func breakResource(_ resource: ResourceLeaseRecord) async {
         guard
             resource.canBreak,

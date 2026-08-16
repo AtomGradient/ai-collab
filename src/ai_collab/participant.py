@@ -522,57 +522,6 @@ class ParticipantCoordinator:
     def stop(self, **values: Any) -> tuple[str, dict[str, Any]]:
         return self._stop_with_driver("stop", values)
 
-    def detach(self, **values: Any) -> tuple[str, dict[str, Any]]:
-        """Detach one record after exact normal cleanup, retaining its history."""
-
-        operation_id, replay, execution = self.store.begin_participant_detach(
-            **values
-        )
-        if replay is not None:
-            return operation_id, replay
-        assert execution is not None
-        try:
-            stopped = self.driver.call("stop", execution)
-            self._validate_stop_result(stopped)
-            self.store.record_participant_stop_evidence(
-                project_instance_id=values["project_instance_id"],
-                scenario_id=values["scenario_id"],
-                participant_id=values["participant_id"],
-                request_id=values["request_id"],
-                operation_id=operation_id,
-                owned_resource_evidence_sha256=stopped[
-                    "owned_resource_evidence_sha256"
-                ],
-            )
-            result = self.store.finalize_participant_detach(
-                project_instance_id=values["project_instance_id"],
-                scenario_id=values["scenario_id"],
-                participant_id=values["participant_id"],
-                request_id=values["request_id"],
-                operation_id=operation_id,
-                release_evidence_sha256=stopped[
-                    "owned_resource_evidence_sha256"
-                ],
-            )
-            return operation_id, result
-        except (ParticipantError, OSError, StoreError, KeyError, TypeError) as exc:
-            self._fail_committed(
-                values=values,
-                operation_id=operation_id,
-                reason="stop_failed",
-                failure_code="lifecycle.detach-cleanup-failed",
-                cleanup_pending=True,
-            )
-            if isinstance(exc, StoreError):
-                raise
-            raise ParticipantError(
-                "participant.detach-failed",
-                "participant detach cleanup failed",
-                retryable=True,
-                mutation_state="committed",
-                operation_id=operation_id,
-            ) from exc
-
     def force_stop(self, **values: Any) -> tuple[str, dict[str, Any]]:
         """Invoke the distinct exact force-stop driver action after Host auth."""
 

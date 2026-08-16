@@ -349,14 +349,6 @@ struct ContentView: View {
                                                 participant.observedState
                                             )
                                         )
-                                        Button("Detach") {
-                                            Task { await model.detachParticipant(participant) }
-                                        }
-                                        .disabled(
-                                            !["stopped", "ready", "degraded"].contains(
-                                                participant.observedState
-                                            )
-                                        )
                                     }
                                     Divider()
                                 }

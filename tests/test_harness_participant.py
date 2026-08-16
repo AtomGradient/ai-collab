@@ -725,6 +725,70 @@ def _start_test_participant(
     )["participant"]
 
 
+def test_a_detached_record_is_not_a_dead_end(tmp_path: Path) -> None:
+    """A record left detached by an older Host must still be startable.
+
+    Detach used to end a participant permanently: start required "stopped",
+    replace and recover rejected it, and the name stayed taken so it could not
+    be added again. The operation is gone, but records written by earlier
+    versions remain, and they have to lead somewhere.
+    """
+    state_root = tmp_path / "state"
+    with running_host(state_root) as (host, client, _driver):
+        created = client.create_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            project_binding_digest=PROJECT_DIGEST,
+            request_id="detached-create",
+        )["scenario"]
+        added = _add_test_participant(
+            client,
+            scenario=created,
+            participant_id=PARTICIPANT_ID,
+            request_prefix="detached",
+        )
+        opened = client.open_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=created["scenario_generation"],
+            scenario_state_revision=created["state_revision"],
+            request_id="detached-open",
+        )["scenario"]
+
+        # Stand in for a record an older Host left behind: no binding, no
+        # runtime artifacts, but the declaration and its launch_spec intact.
+        state = json.loads((state_root / "host-state.json").read_text())
+        key = next(iter(state["scenarios"]))
+        record = state["scenarios"][key]["participants"][PARTICIPANT_ID]
+        record["observed_state"] = "detached"
+        record["desired_state"] = "detached"
+        record["runtime_binding_id"] = None
+        record["presentation_binding_id"] = None
+        artifact = state["scenarios"][key]["participant_artifacts"][PARTICIPANT_ID]
+        for field in (
+            "runtime_create_request",
+            "prepared_runtime_launch",
+            "runtime_ready_ack",
+            "presentation_create_request",
+            "presentation_create_ack",
+        ):
+            artifact[field] = None
+        (state_root / "host-state.json").write_text(json.dumps(state))
+
+        assert record["observed_state"] == "detached"
+        assert artifact["launch_spec"] is not None
+
+        started = _start_test_participant(
+            client,
+            scenario=opened,
+            participant=record,
+            participant_id=PARTICIPANT_ID,
+            request_prefix="detached-revive",
+        )
+        assert started["observed_state"] == "ready"
+        assert started["runtime_binding_id"] is not None
+
+
 def test_real_ipc_participant_add_start_status_stop(tmp_path: Path) -> None:
     state_root = tmp_path / "state"
     with running_host(state_root) as (_, client, driver):
@@ -1214,98 +1278,6 @@ def test_participant_replace_keeps_stopped_intent_and_post_cas_failure_is_new_ge
         assert driver.stop_calls == [ready["runtime_binding_id"]]
         assert driver.start_generations == [1, 2]
         assert list((failed_root / "participant-contexts").glob("*.json")) == []
-
-
-def test_participant_detach_handles_stopped_and_active_without_deleting_history(
-    tmp_path: Path,
-) -> None:
-    state_root = tmp_path / "state"
-    with running_host(state_root) as (_, client, driver):
-        created = client.create_scenario(
-            project_instance_id=PROJECT_ID,
-            scenario_id=SCENARIO_ID,
-            project_binding_digest=PROJECT_DIGEST,
-            request_id="detach-create",
-        )["scenario"]
-        stopped = _add_test_participant(
-            client,
-            scenario=created,
-            participant_id=PARTICIPANT_ID,
-            request_prefix="detach-stopped",
-        )
-        detached = client.detach_participant(
-            project_instance_id=PROJECT_ID,
-            scenario_id=SCENARIO_ID,
-            participant_id=PARTICIPANT_ID,
-            scenario_generation=created["scenario_generation"],
-            scenario_state_revision=created["state_revision"],
-            participant_generation=stopped["participant_generation"],
-            participant_state_revision=stopped["state_revision"],
-            request_id="detach-stopped",
-        )["participant"]
-        assert detached["desired_state"] == "detached"
-        assert detached["observed_state"] == "detached"
-        assert detached["participant_generation"] == 1
-        assert driver.stop_calls == []
-        assert client.list_participants(
-            project_instance_id=PROJECT_ID, scenario_id=SCENARIO_ID
-        )["participants"] == [detached]
-
-    active_root = tmp_path / "active-state"
-    with running_host(active_root) as (_, client, driver):
-        opened, ready = _start_ready_participant(client)
-        detached = client.detach_participant(
-            project_instance_id=PROJECT_ID,
-            scenario_id=SCENARIO_ID,
-            participant_id=PARTICIPANT_ID,
-            scenario_generation=opened["scenario_generation"],
-            scenario_state_revision=opened["state_revision"],
-            participant_generation=ready["participant_generation"],
-            participant_state_revision=ready["state_revision"],
-            request_id="detach-active",
-        )["participant"]
-        assert detached["desired_state"] == "detached"
-        assert detached["observed_state"] == "detached"
-        assert detached["participant_generation"] == 1
-        assert detached["runtime_binding_id"] is None
-        assert driver.stop_calls == [ready["runtime_binding_id"]]
-        assert list((active_root / "participant-contexts").glob("*.json")) == []
-        durable = json.loads(
-            (active_root / "host-state.json").read_text(encoding="utf-8")
-        )
-        item = next(iter(durable["scenarios"].values()))
-        assert PARTICIPANT_ID in item["participants"]
-        assert item["participant_artifacts"][PARTICIPANT_ID]["history"]
-
-
-def test_participant_detach_failure_commits_intent_and_retains_cleanup_evidence(
-    tmp_path: Path,
-) -> None:
-    state_root = tmp_path / "state"
-    with running_host(state_root) as (_, client, driver):
-        opened, ready = _start_ready_participant(client)
-        driver.fail_stop = True
-        with pytest.raises(HarnessClientError) as failed:
-            client.detach_participant(
-                project_instance_id=PROJECT_ID,
-                scenario_id=SCENARIO_ID,
-                participant_id=PARTICIPANT_ID,
-                scenario_generation=opened["scenario_generation"],
-                scenario_state_revision=opened["state_revision"],
-                participant_generation=ready["participant_generation"],
-                participant_state_revision=ready["state_revision"],
-                request_id="detach-cleanup-failed",
-            )
-        assert failed.value.code == "operation.external-failure"
-        after = client.list_participants(
-            project_instance_id=PROJECT_ID, scenario_id=SCENARIO_ID
-        )["participants"][0]
-        assert after["participant_generation"] == 1
-        assert after["desired_state"] == "detached"
-        assert after["observed_state"] == "degraded"
-        assert after["runtime_binding_id"] == ready["runtime_binding_id"]
-        assert after["degraded"]["cleanup_pending"] is True
-        assert after["degraded"]["repair_action"] == "participant.recover"
 
 
 def test_real_ipc_participant_can_be_added_and_started_while_scenario_runs(
@@ -3859,7 +3831,7 @@ def test_cli_controls_generic_participant_lifecycle(
             [
                 "harness",
                 "participant",
-                "detach",
+                "status",
                 PARTICIPANT_ID,
                 "--scenario-id",
                 SCENARIO_ID,
@@ -3876,6 +3848,6 @@ def test_cli_controls_generic_participant_lifecycle(
                 *connection,
             ]
         ) == 0
-        detached = json.loads(capsys.readouterr().out)["participant"]
-        assert detached["desired_state"] == "detached"
-        assert detached["observed_state"] == "detached"
+        observed = json.loads(capsys.readouterr().out)["participant"]
+        assert observed["participant_generation"] == 2
+        assert observed["observed_state"] == "stopped"

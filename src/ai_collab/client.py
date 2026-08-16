@@ -669,30 +669,6 @@ class HarnessClient:
             request_id=request_id,
         )
 
-    def detach_participant(
-        self,
-        *,
-        project_instance_id: str,
-        scenario_id: str,
-        participant_id: str,
-        scenario_generation: int,
-        scenario_state_revision: int,
-        participant_generation: int,
-        participant_state_revision: int,
-        request_id: str | None = None,
-    ) -> dict[str, Any]:
-        return self._participant_operation(
-            "participant.detach",
-            project_instance_id=project_instance_id,
-            scenario_id=scenario_id,
-            participant_id=participant_id,
-            scenario_generation=scenario_generation,
-            scenario_state_revision=scenario_state_revision,
-            participant_generation=participant_generation,
-            participant_state_revision=participant_state_revision,
-            request_id=request_id,
-        )
-
     def apply_policy(
         self,
         *,

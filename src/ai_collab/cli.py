@@ -262,7 +262,6 @@ def add_harness_parser(subparsers: Any) -> None:
         ("status", "Inspect one exact participant generation"),
         ("stop", "Stop one exact participant generation"),
         ("recover", "Recover one degraded participant into a new stopped generation"),
-        ("detach", "Detach one participant while retaining its audit history"),
         ("force-stop", "Confirm force-stop of one exact owned participant"),
     ):
         command = participant_commands.add_parser(command_name, help=help_text)
@@ -661,10 +660,6 @@ def run_harness_command(args: argparse.Namespace) -> int:
                         launch_spec=launch_spec,
                         presentation_driver_id=args.presentation_driver_id,
                         request_id=args.request_id,
-                    )
-                elif args.participant_command == "detach":
-                    result = client.detach_participant(
-                        **common, request_id=args.request_id
                     )
                 elif args.participant_command == "force-stop":
                     result = client.force_stop_participant(

@@ -88,14 +88,16 @@ def test_app_live_refreshes_selected_scenario_deliveries_without_full_page_polli
     assert "Task.sleep(nanoseconds: 2_000_000_000)" in monitor
 
 
-def test_app_exposes_participant_replace_and_detach() -> None:
+def test_app_exposes_participant_replace_without_detach() -> None:
     content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
     view_model = (APP_ROOT / "HarnessViewModel.swift").read_text(encoding="utf-8")
     assert 'Button("Replace")' in content
-    assert 'Button("Detach")' in content
     assert 'operation: "participant.replace"' in view_model
-    assert 'operation: "participant.detach"' in view_model
     assert '"launch_spec": template.launchSpec' in view_model
+    # Detach ended a participant permanently while offering nothing stop does
+    # not, so the App must not surface it again.
+    assert 'Button("Detach")' not in content
+    assert "participant.detach" not in view_model
 
 
 def test_app_requires_explicit_confirmation_before_recreate_handoff() -> None:

@@ -47,7 +47,6 @@ APP_OPERATIONS = (
     "participant.stop",
     "participant.recover",
     "participant.replace",
-    "participant.detach",
     "participant.force-stop",
     "resource.list",
     "resource.break",

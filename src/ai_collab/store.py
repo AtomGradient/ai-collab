@@ -2744,7 +2744,11 @@ class ScenarioStore:
                     "participant.invalid-transition",
                     "participant start requires a resumable running Scenario",
                 )
-            if record["observed_state"] != "stopped":
+            # A detached record is inert in exactly the way a stopped one is:
+            # no binding, no owned process. Its launch_spec survives, and start
+            # builds fresh runtime artifacts anyway, so treating the two alike
+            # is what keeps a detached participant from becoming a dead end.
+            if record["observed_state"] not in {"stopped", "detached"}:
                 raise StoreError(
                     "participant.invalid-transition", "participant is not stopped"
                 )
@@ -2948,156 +2952,6 @@ class ScenarioStore:
             state["state_revision"] += 1
             self._write_state(state)
             return result
-
-    def begin_participant_detach(
-        self,
-        *,
-        request_id: str,
-        request_digest: str,
-        host_generation: int,
-        project_instance_id: str,
-        scenario_id: str,
-        participant_id: str,
-        scenario_generation: int,
-        scenario_state_revision: int,
-        participant_generation: int,
-        participant_state_revision: int,
-    ) -> tuple[str, dict[str, Any] | None, dict[str, Any] | None]:
-        """Commit desired detached before any active binding cleanup."""
-
-        key = self._scenario_key(project_instance_id, scenario_id)
-        with self._lock:
-            state = self._read_state()
-            previous = self._previous_request(state, request_id, request_digest)
-            if previous is not None:
-                return previous[0], previous[1], None
-            item, scenario, record, artifact = self._participant_state(
-                state, key, participant_id
-            )
-            del item
-            self._check_scenario_fence(
-                scenario, scenario_generation, scenario_state_revision
-            )
-            self._check_participant_fence(
-                record, participant_generation, participant_state_revision
-            )
-            if record["observed_state"] not in {
-                "stopped",
-                "ready",
-                "degraded",
-            }:
-                raise StoreError(
-                    "participant.invalid-transition",
-                    "participant detach requires stopped, ready, or degraded state",
-                )
-            operation = self._new_participant_operation(
-                state,
-                request_id=request_id,
-                request_digest=request_digest,
-                host_generation=host_generation,
-                operation_kind="participant.detach",
-                scenario_id=scenario_id,
-                participant_id=participant_id,
-                scenario_generation=scenario_generation,
-                scenario_state_revision=scenario_state_revision,
-                participant_generation=participant_generation,
-                participant_state_revision=participant_state_revision,
-                desired_state_after="detached",
-                requested_continuity_mode=None,
-                resulting_participant_generation=participant_generation,
-            )
-            source_state = record["observed_state"]
-            record["desired_state"] = "detached"
-            record["degraded"] = None
-            record["state_revision"] += 1
-            self._append_operation_event(
-                state,
-                operation,
-                event="desired_state_committed",
-                before_revision=participant_state_revision,
-                after_revision=record["state_revision"],
-                mutation_state="committed",
-            )
-            if source_state == "stopped":
-                record["observed_state"] = "detached"
-                record["active_operation_id"] = None
-                self._append_operation_event(
-                    state,
-                    operation,
-                    event="finalize_committed",
-                    before_revision=record["state_revision"],
-                    after_revision=record["state_revision"],
-                    mutation_state="committed",
-                )
-                record["journal_head_sequence"] = state[
-                    "journal_head_sequence"
-                ]
-                operation["state"] = "succeeded"
-                operation["mutation_state"] = "committed"
-                result = {"participant": copy.deepcopy(record)}
-                state["requests"][request_id] = {
-                    "request_digest": request_digest,
-                    "operation_id": operation["operation_id"],
-                    "status": "completed",
-                    "result": result,
-                    "error": None,
-                }
-                state["state_revision"] += 1
-                self._write_state(state)
-                return operation["operation_id"], result, None
-            record["observed_state"] = "stopping"
-            record["active_operation_id"] = operation["operation_id"]
-            self._append_operation_event(
-                state,
-                operation,
-                event="external_started",
-                before_revision=record["state_revision"],
-                after_revision=record["state_revision"],
-                mutation_state="committed",
-            )
-            record["journal_head_sequence"] = state["journal_head_sequence"]
-            operation["state"] = "executing_external"
-            operation["mutation_state"] = "committed"
-            state["requests"][request_id] = {
-                "request_digest": request_digest,
-                "operation_id": operation["operation_id"],
-                "status": "pending",
-                "result": None,
-                "error": None,
-            }
-            state["state_revision"] += 1
-            self._write_state(state)
-            return operation["operation_id"], None, {
-                "context": {
-                    "scenario_id": scenario_id,
-                    "participant_id": participant_id,
-                    "participant_generation": participant_generation,
-                    "operation_id": operation["operation_id"],
-                    "operation_generation": operation["operation_generation"],
-                    "driver_registry_digest": artifact["resolved_driver"][
-                        "driver_registry_digest"
-                    ],
-                    "capability_snapshot_digest": artifact["resolved_driver"][
-                        "capability_snapshot_digest"
-                    ],
-                },
-                "launch_spec": copy.deepcopy(artifact["launch_spec"]),
-                "resolved_driver": copy.deepcopy(artifact["resolved_driver"]),
-                "runtime_ready_ack": copy.deepcopy(
-                    artifact["runtime_ready_ack"]
-                ),
-                "presentation_create_ack": copy.deepcopy(
-                    artifact["presentation_create_ack"]
-                ),
-                "private_root": str(
-                    self.participant_private_path(
-                        project_instance_id,
-                        scenario_id,
-                        participant_id,
-                        participant_generation,
-                    )
-                ),
-            }
 
     def finalize_participant_detach(
         self,
@@ -3653,14 +3507,21 @@ class ScenarioStore:
             if (
                 scenario["observed_state"] not in {"closed", "running", "degraded"}
                 or scenario.get("active_operation_id") is not None
-                or record["observed_state"] not in {"stopped", "ready", "degraded"}
-                or record["desired_state"] not in {"stopped", "running"}
+                or record["observed_state"]
+                not in {"stopped", "detached", "ready", "degraded"}
+                or record["desired_state"] not in {"stopped", "detached", "running"}
             ):
                 raise StoreError(
                     "participant.invalid-transition",
                     "participant replacement requires a stable replaceable generation",
                 )
-            desired_after = record["desired_state"]
+            # A replacement generation is never born detached: that state only
+            # describes a record whose binding was already released.
+            desired_after = (
+                "stopped"
+                if record["desired_state"] == "detached"
+                else record["desired_state"]
+            )
             next_generation = participant_generation + 1
             operation = self._new_participant_operation(
                 state,

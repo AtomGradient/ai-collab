@@ -793,19 +793,6 @@ OPERATION_DESCRIPTORS = (
         result_schema=PARTICIPANT_RESULT_SCHEMA,
     ),
     _descriptor(
-        "participant.detach",
-        capability="participant.manage",
-        target_scope="participant",
-        required_fences=[
-            "host_generation",
-            "operation_generation",
-            "participant_generation",
-        ],
-        mutation_class="external_effect",
-        request_schema=PARTICIPANT_EXISTING_REQUEST_SCHEMA,
-        result_schema=PARTICIPANT_RESULT_SCHEMA,
-    ),
-    _descriptor(
         "participant.force-stop",
         capability="participant.force-stop",
         target_scope="participant",
