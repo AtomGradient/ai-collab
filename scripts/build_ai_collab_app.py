@@ -146,14 +146,26 @@ def _selected_interpreter(python_executable: Path) -> Path:
     return candidate
 
 
-def build(output: Path, integration_root: Path, python_executable: Path) -> None:
+def build(
+    output: Path,
+    integration_root: Path | None,
+    python_executable: Path,
+    disk_image: Path | None,
+) -> None:
     output = output.expanduser().resolve()
-    integration_root = integration_root.expanduser().resolve(strict=True)
+    if integration_root is not None:
+        integration_root = integration_root.expanduser().resolve(strict=True)
     python_executable = _selected_interpreter(python_executable)
     if output.exists() or output.is_symlink():
         raise SystemExit("output already exists; choose a fresh path")
     if output.suffix != ".app":
         raise SystemExit("output must end in .app")
+    if disk_image is not None:
+        disk_image = disk_image.expanduser().resolve()
+        if disk_image.exists() or disk_image.is_symlink():
+            raise SystemExit("disk image already exists; choose a fresh path")
+        if disk_image.suffix != ".dmg":
+            raise SystemExit("disk image must end in .dmg")
     identity = _signing_identity()
     with tempfile.TemporaryDirectory(prefix="ai-collab-app-build.") as temporary:
         derived_data = Path(temporary) / "DerivedData"
@@ -178,17 +190,15 @@ def build(output: Path, integration_root: Path, python_executable: Path) -> None
         if not app.is_dir():
             raise SystemExit("Xcode did not produce AI Collab.app")
         service = app / "Contents/Resources/HarnessService"
-        _run(
-            [
-                str(python_executable),
-                str(ROOT / "scripts/build_harness_service_payload.py"),
-                "--destination",
-                str(service),
-                "--integration-root",
-                str(integration_root),
-            ],
-            cwd=ROOT,
-        )
+        payload_argv = [
+            str(python_executable),
+            str(ROOT / "scripts/build_harness_service_payload.py"),
+            "--destination",
+            str(service),
+        ]
+        if integration_root is not None:
+            payload_argv += ["--integration-root", str(integration_root)]
+        _run(payload_argv, cwd=ROOT)
         info = app / "Contents/Info.plist"
         with info.open("rb") as stream:
             metadata = plistlib.load(stream)
@@ -205,15 +215,38 @@ def build(output: Path, integration_root: Path, python_executable: Path) -> None
             cwd=ROOT,
         )
     print(output)
+    if disk_image is not None:
+        disk_image.parent.mkdir(parents=True, exist_ok=True)
+        _run(
+            [
+                "/usr/bin/hdiutil",
+                "create",
+                "-volname",
+                "AI Collab",
+                "-srcfolder",
+                str(output),
+                "-format",
+                "UDZO",
+                str(disk_image),
+            ],
+            cwd=ROOT,
+        )
+        print(disk_image)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--integration-root", type=Path, required=True)
+    parser.add_argument("--integration-root", type=Path, default=None)
     parser.add_argument("--python-executable", type=Path, default=Path(sys.executable))
+    parser.add_argument("--dmg", type=Path, default=None)
     arguments = parser.parse_args()
-    build(arguments.output, arguments.integration_root, arguments.python_executable)
+    build(
+        arguments.output,
+        arguments.integration_root,
+        arguments.python_executable,
+        arguments.dmg,
+    )
     return 0
 
 

@@ -50,9 +50,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--state-root", type=Path, default=None)
     parser.add_argument("--workspace-root", type=Path, default=None)
     parser.add_argument("--socket-path", type=Path, default=None)
-    parser.add_argument("--adapter-config", type=Path, required=True)
+    # The project and security adapters are optional, exactly as they are for
+    # the underlying Host: without them the Host still serves, and project
+    # registration or confirmation-gated operations answer with their typed
+    # refusals instead of the service refusing to start. The participant
+    # driver stays required because every build ships it; its absence means
+    # the installation itself is broken.
+    parser.add_argument("--adapter-config", type=Path, default=None)
     parser.add_argument("--participant-driver-config", type=Path, required=True)
-    parser.add_argument("--security-adapter-config", type=Path, required=True)
+    parser.add_argument("--security-adapter-config", type=Path, default=None)
     return parser
 
 

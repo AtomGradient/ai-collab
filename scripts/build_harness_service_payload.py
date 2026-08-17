@@ -21,9 +21,14 @@ PRODUCT_ROOT = Path(__file__).resolve().parents[1]
 REQUIRED_PRODUCT_FILES = (
     "ai_collab_runtime_profiles.json",
     "ai_collab_team_policies.json",
+    "scripts/ai_collab_default_security_adapter.py",
     "scripts/ai_collab_iterm_adapter_lock.json",
     "scripts/ai_collab_macos_automation_preflight.py",
     "scripts/ai_collab_participant_driver.py",
+    "scripts/ai_collab_project_adapter.py",
+    "scripts/ai_collab_project_descriptor.py",
+    "scripts/ai_collab_project_support.py",
+    "scripts/ai_collab_repo_manifest.py",
     "scripts/ai_collab_window_topology_screens.swift",
 )
 REQUIRED_INTEGRATION_FILES = (
@@ -55,11 +60,12 @@ def _copy(source: Path, destination: Path) -> None:
         shutil.copy2(source, destination, follow_symlinks=False)
 
 
-def build(destination: Path, integration_root: Path) -> None:
+def build(destination: Path, integration_root: Path | None) -> None:
     destination = destination.resolve()
     if destination.exists():
         raise SystemExit("destination already exists; use a fresh build directory")
-    integration_root = integration_root.resolve(strict=True)
+    if integration_root is not None:
+        integration_root = integration_root.resolve(strict=True)
     runtime_source = Path(sys.base_prefix).resolve(strict=True)
     stdlib = Path(sysconfig.get_path("stdlib")).resolve(strict=True)
     site_packages = Path(sysconfig.get_path("purelib")).resolve(strict=True)
@@ -69,10 +75,11 @@ def build(destination: Path, integration_root: Path) -> None:
         source = PRODUCT_ROOT / relative
         if source.is_symlink() or not source.is_file():
             raise SystemExit(f"AI Collab payload is missing: {relative}")
-    for relative in REQUIRED_INTEGRATION_FILES:
-        source = integration_root / relative
-        if source.is_symlink() or not source.is_file():
-            raise SystemExit(f"integration payload is missing: {relative}")
+    if integration_root is not None:
+        for relative in REQUIRED_INTEGRATION_FILES:
+            source = integration_root / relative
+            if source.is_symlink() or not source.is_file():
+                raise SystemExit(f"integration payload is missing: {relative}")
 
     destination.mkdir(parents=True, mode=0o755)
     _copy(runtime_source, destination / "runtime")
@@ -99,8 +106,9 @@ def build(destination: Path, integration_root: Path) -> None:
         _copy(source, embedded_site_packages / package)
     for relative in REQUIRED_PRODUCT_FILES:
         _copy(PRODUCT_ROOT / relative, destination / relative)
-    for relative in REQUIRED_INTEGRATION_FILES:
-        _copy(integration_root / relative, destination / relative)
+    if integration_root is not None:
+        for relative in REQUIRED_INTEGRATION_FILES:
+            _copy(integration_root / relative, destination / relative)
 
     ping_bin = PRODUCT_ROOT / "pingagent/bin"
     for command in ("ai-harness-transport", "ai-ping"):
@@ -109,16 +117,31 @@ def build(destination: Path, integration_root: Path) -> None:
             raise SystemExit(f"PingAgent command is unavailable: {command}")
         _copy(source, destination.parent / f"PingAgent/bin/{command}")
 
-    embedded_configs = {
-        "ai_collab_harness_adapter.json": {
-            "schema_version": 1,
+    # Without an integration payload the bundle points at the generic,
+    # config-driven adapters that ship as product files, so a public build is
+    # usable out of the box against any project that provides the descriptor,
+    # manifest, and collaboration template files at its canonical root. An
+    # integration build replaces both configs with the integration project's
+    # own adapters.
+    if integration_root is not None:
+        project_adapter_config = {
             "adapter_id": "ai-collab-edgestudio-bundle-v1",
-            "command": [
-                "runtime/bin/python3",
-                "scripts/ai_collab_edgestudio_adapter.py",
-            ],
-            "working_directory": ".",
-        },
+            "script": "scripts/ai_collab_edgestudio_adapter.py",
+        }
+        security_adapter_config = {
+            "adapter_id": "edgestudio-security-adapter",
+            "script": "scripts/ai_collab_security_adapter.py",
+        }
+    else:
+        project_adapter_config = {
+            "adapter_id": "ai-collab-project-adapter-v1",
+            "script": "scripts/ai_collab_project_adapter.py",
+        }
+        security_adapter_config = {
+            "adapter_id": "ai-collab-security-adapter",
+            "script": "scripts/ai_collab_default_security_adapter.py",
+        }
+    embedded_configs = {
         "ai_collab_participant_driver.json": {
             "schema_version": 1,
             "adapter_id": "ai-collab-participant-driver",
@@ -128,12 +151,21 @@ def build(destination: Path, integration_root: Path) -> None:
             ],
             "working_directory": ".",
         },
-        "ai_collab_security_adapter.json": {
+        "ai_collab_harness_adapter.json": {
             "schema_version": 1,
-            "adapter_id": "edgestudio-security-adapter",
+            "adapter_id": project_adapter_config["adapter_id"],
             "command": [
                 "runtime/bin/python3",
-                "scripts/ai_collab_security_adapter.py",
+                project_adapter_config["script"],
+            ],
+            "working_directory": ".",
+        },
+        "ai_collab_security_adapter.json": {
+            "schema_version": 1,
+            "adapter_id": security_adapter_config["adapter_id"],
+            "command": [
+                "runtime/bin/python3",
+                security_adapter_config["script"],
             ],
             "working_directory": ".",
         },
@@ -157,9 +189,7 @@ def build(destination: Path, integration_root: Path) -> None:
         "schema_version": 1,
         "python_version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
         "host_module": "ai_collab.service",
-        "project_adapter_id": "ai-collab-edgestudio-bundle-v1",
-        "participant_driver_id": "ai-collab-participant-driver",
-        "security_adapter_id": "edgestudio-security-adapter",
+        "integration_embedded": integration_root is not None,
         "source_paths_embedded": False,
     }
     (destination / "payload-manifest.json").write_text(
@@ -174,12 +204,47 @@ def build(destination: Path, integration_root: Path) -> None:
             path = Path(root) / name
             mode = path.stat().st_mode
             os.chmod(path, 0o755 if mode & stat.S_IXUSR else 0o644)
+    if integration_root is None:
+        _assert_no_integration_content(destination)
+
+
+def _assert_no_integration_content(destination: Path) -> None:
+    """Prove a public payload carries nothing from the integration project.
+
+    A payload built without ``--integration-root`` is what ships to the
+    public. Construction above already skips the integration files and points
+    the adapter configs at the generic product adapters, but a future edit
+    could silently regress either, so both properties are asserted from the
+    finished tree rather than trusted from the code path that produced it.
+    """
+    unexpected = [
+        relative
+        for relative in REQUIRED_INTEGRATION_FILES
+        if (destination / relative).exists() or (destination / relative).is_symlink()
+    ]
+    if unexpected:
+        raise SystemExit(
+            "public payload contains integration files: " + ", ".join(unexpected)
+        )
+    for name in (
+        "ai_collab_harness_adapter.json",
+        "ai_collab_participant_driver.json",
+        "ai_collab_security_adapter.json",
+        "ai_collab_runtime_profiles.json",
+        "payload-manifest.json",
+    ):
+        text = (destination / name).read_text(encoding="utf-8").lower()
+        for marker in ("edgestudio", "edge-studio", "dogfood"):
+            if marker in text:
+                raise SystemExit(
+                    f"public payload leaks integration content: {name} contains {marker!r}"
+                )
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--destination", type=Path, required=True)
-    parser.add_argument("--integration-root", type=Path, required=True)
+    parser.add_argument("--integration-root", type=Path, default=None)
     arguments = parser.parse_args()
     build(arguments.destination, arguments.integration_root)
     return 0

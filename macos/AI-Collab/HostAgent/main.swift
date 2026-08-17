@@ -32,14 +32,39 @@ private let service = contents
 private let runtime = service.appending(path: "runtime", directoryHint: .isDirectory)
 private let python = runtime.appending(path: "bin/python3")
 private let pythonPath = service.appending(path: "python", directoryHint: .isDirectory)
-private let adapter = service.appending(path: "ai_collab_harness_adapter.json")
-private let participant = service.appending(path: "ai_collab_participant_driver.json")
-private let security = service.appending(path: "ai_collab_security_adapter.json")
+// Adapter configurations resolve user-first: an owner-supplied file in
+// Application Support replaces the bundled one, exactly like the runtime
+// profile overlay. The project and security adapters are optional — a build
+// without an embedded integration payload starts the Host without them and
+// project registration reports a typed refusal instead of the agent dying
+// here. The participant driver ships in every build, so its absence still
+// means the bundle itself is broken.
+private let userConfigurationDirectory = FileManager.default
+    .homeDirectoryForCurrentUser
+    .appending(path: "Library/Application Support/AI Collab", directoryHint: .isDirectory)
 
-for required in [python, pythonPath, adapter, participant, security] {
+private func resolvedConfiguration(_ name: String) -> URL? {
+    let supplied = userConfigurationDirectory.appending(path: name)
+    if FileManager.default.fileExists(atPath: supplied.path) {
+        return supplied
+    }
+    let bundled = service.appending(path: name)
+    if FileManager.default.fileExists(atPath: bundled.path) {
+        return bundled
+    }
+    return nil
+}
+
+private let adapter = resolvedConfiguration("ai_collab_harness_adapter.json")
+private let security = resolvedConfiguration("ai_collab_security_adapter.json")
+
+for required in [python, pythonPath] {
     guard FileManager.default.fileExists(atPath: required.path) else {
         fail("embedded service payload is incomplete", .bundleLayout)
     }
+}
+guard let participant = resolvedConfiguration("ai_collab_participant_driver.json") else {
+    fail("embedded service payload is incomplete", .bundleLayout)
 }
 
 setenv("PYTHONHOME", runtime.path, 1)
@@ -89,17 +114,19 @@ private func configureSystemProxyEnvironment() {
 
 configureSystemProxyEnvironment()
 
-let arguments = [
+var arguments = [
     python.path,
     "-m",
     "ai_collab.service",
-    "--adapter-config",
-    adapter.path,
     "--participant-driver-config",
     participant.path,
-    "--security-adapter-config",
-    security.path,
 ]
+if let adapter {
+    arguments += ["--adapter-config", adapter.path]
+}
+if let security {
+    arguments += ["--security-adapter-config", security.path]
+}
 let duplicated = arguments.map { strdup($0) }
 defer { duplicated.forEach { free($0) } }
 var argv = duplicated + [nil]

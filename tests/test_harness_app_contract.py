@@ -198,6 +198,21 @@ def test_app_embeds_separate_current_user_host_agent_contract() -> None:
     assert "root" not in launch_agent.lower()
 
 
+def test_host_agent_resolves_user_supplied_adapter_configs() -> None:
+    """The agent looks in Application Support first and treats the project and
+    security adapter configs as optional, so a build without an embedded
+    integration payload still starts the Host and a user-supplied config can
+    replace a bundled one without touching the signed bundle."""
+    helper = HOST_AGENT.read_text(encoding="utf-8")
+    assert "Application Support/AI Collab" in helper
+    assert "resolvedConfiguration" in helper
+    assert "if let adapter" in helper
+    assert "if let security" in helper
+    # The participant driver ships in every build; its absence still means the
+    # bundle itself is broken.
+    assert "guard let participant" in helper
+
+
 def test_app_reregisters_changed_embedded_service() -> None:
     controller = (APP_ROOT / "HarnessServiceController.swift").read_text(
         encoding="utf-8"
