@@ -32,6 +32,24 @@ import ai_collab_participant_driver as participant_driver  # noqa: E402
 import validate_ai_collab_policy_delivery_contract as frozen  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _ignore_any_real_runtime_profile_overlay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Point the overlay at a path that does not exist, for every test here.
+
+    Runtime profiles are now the sum of the shipped registry and an operator's
+    overlay file. Without this, whether the profile assertions below pass would
+    depend on whether the person running the suite happens to have an overlay in
+    their own application-support directory. Tests that exercise the overlay set
+    this variable again, and the later value wins.
+    """
+    monkeypatch.setenv(
+        participant_driver.PROFILE_OVERLAY_ENVIRONMENT_KEY,
+        str(tmp_path / "no-such-overlay.json"),
+    )
+
+
 def _participant(participant_id: str) -> dict[str, Any]:
     return {
         "scenario_id": "scenario-m4",
@@ -289,6 +307,117 @@ def test_a_runtime_profile_with_a_blank_display_name_is_rejected(
     monkeypatch.setattr(participant_driver, "PROFILE_PATH", path)
     with pytest.raises(participant_driver.DriverError):
         participant_driver._runtime_profiles()
+
+
+def _overlay(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, document: Any) -> Path:
+    path = tmp_path / "overlay.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    monkeypatch.setenv(
+        participant_driver.PROFILE_OVERLAY_ENVIRONMENT_KEY, str(path)
+    )
+    return path
+
+
+def test_an_overlay_replaces_the_vendor_arguments_the_bundle_ships(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reason this mechanism exists.
+
+    The shipped Codex profile passes an approval-bypass flag. The registry that
+    carries it sits inside the signed bundle, so editing it there invalidates the
+    signature; an operator who wants the vendor's own confirmations back has to be
+    able to say so from a writable file.
+    """
+    shipped = participant_driver._runtime_profiles()  # noqa: SLF001
+    assert any(
+        argument.startswith("--dangerously")
+        for argument in shipped["runtime-profile.codex-dogfood"]["arguments"]
+    )
+    replacement = copy.deepcopy(shipped["runtime-profile.codex-dogfood"])
+    replacement["arguments"] = [
+        argument
+        for argument in replacement["arguments"]
+        if not argument.startswith("--dangerously")
+    ]
+    _overlay(tmp_path, monkeypatch, {"schema_version": 1, "profiles": [replacement]})
+
+    profiles = participant_driver._runtime_profiles()  # noqa: SLF001
+
+    assert not any(
+        argument.startswith("--dangerously")
+        for argument in profiles["runtime-profile.codex-dogfood"]["arguments"]
+    )
+    # Replacing one profile leaves the rest of the registry alone.
+    assert set(profiles) == set(shipped)
+    assert profiles["runtime-profile.claude-dogfood"] == (
+        shipped["runtime-profile.claude-dogfood"]
+    )
+
+
+def test_an_overlay_can_add_a_profile_the_bundle_does_not_ship(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Harness that only ever drives the two CLIs we happen to use is not
+    project-neutral. Adding a profile must not require a new build."""
+    shipped = participant_driver._runtime_profiles()  # noqa: SLF001
+    added = copy.deepcopy(shipped["runtime-profile.inert"])
+    added["profile_id"] = "runtime-profile.local-tool"
+    added["display_name"] = "Local Tool"
+    _overlay(tmp_path, monkeypatch, {"schema_version": 1, "profiles": [added]})
+
+    profiles = participant_driver._runtime_profiles()  # noqa: SLF001
+
+    assert set(profiles) == set(shipped) | {"runtime-profile.local-tool"}
+    assert profiles["runtime-profile.local-tool"]["display_name"] == "Local Tool"
+
+
+def test_a_broken_overlay_fails_instead_of_being_ignored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ignoring an unreadable overlay would launch the vendor CLI with the
+    shipped approval flags after the operator had already decided otherwise."""
+    path = tmp_path / "overlay.json"
+    path.write_text("{ not json", encoding="utf-8")
+    monkeypatch.setenv(
+        participant_driver.PROFILE_OVERLAY_ENVIRONMENT_KEY, str(path)
+    )
+    with pytest.raises(participant_driver.DriverError) as failure:
+        participant_driver._runtime_profiles()  # noqa: SLF001
+    assert "overlay" in str(failure.value)
+
+
+def test_an_overlay_is_held_to_the_registry_rules(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same validation both sides. An operator-supplied profile cannot be looser
+    than a shipped one, so a typo cannot quietly produce a half-configured
+    participant."""
+    shipped = participant_driver._runtime_profiles()  # noqa: SLF001
+    loose = copy.deepcopy(shipped["runtime-profile.codex-dogfood"])
+    loose["display_name"] = "   "
+    _overlay(tmp_path, monkeypatch, {"schema_version": 1, "profiles": [loose]})
+    with pytest.raises(participant_driver.DriverError):
+        participant_driver._runtime_profiles()  # noqa: SLF001
+
+    missing_key = copy.deepcopy(shipped["runtime-profile.codex-dogfood"])
+    del missing_key["process_match"]
+    _overlay(tmp_path, monkeypatch, {"schema_version": 1, "profiles": [missing_key]})
+    with pytest.raises(participant_driver.DriverError):
+        participant_driver._runtime_profiles()  # noqa: SLF001
+
+
+def test_no_overlay_means_the_shipped_registry_is_what_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(
+        participant_driver.PROFILE_OVERLAY_ENVIRONMENT_KEY,
+        str(tmp_path / "absent.json"),
+    )
+    profiles = participant_driver._runtime_profiles()  # noqa: SLF001
+    registry = json.loads(
+        participant_driver.PROFILE_PATH.read_text(encoding="utf-8")
+    )
+    assert set(profiles) == {row["profile_id"] for row in registry["profiles"]}
 
 
 @pytest.mark.parametrize(

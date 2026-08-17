@@ -34,6 +34,17 @@ from ai_collab_macos_automation_preflight import (
     private_unix_socket_status,
 )
 
+try:
+    from platformdirs import user_config_dir
+except ModuleNotFoundError:  # pragma: no cover - both shipping runtimes have it
+    # The bundled interpreter and the project venv both provide platformdirs.
+    # A bare `python3` on some machines does not, and this driver must not stop
+    # launching participants over the location of an optional overlay file. The
+    # fallback repeats what platformdirs returns on macOS, which is the only
+    # platform this driver supports (it drives iTerm2).
+    def user_config_dir(app_name: str) -> str:
+        return str(Path.home() / "Library" / "Application Support" / app_name)
+
 
 ADAPTER_PROTOCOL_VERSION = 1
 STATE_SCHEMA_VERSION = 1
@@ -44,6 +55,14 @@ ROOT = Path(__file__).resolve().parents[1]
 LOCK_PATH = ROOT / "scripts" / "ai_collab_iterm_adapter_lock.json"
 TOPOLOGY_HELPER = ROOT / "scripts" / "ai_collab_window_topology_screens.swift"
 PROFILE_PATH = ROOT / "ai_collab_runtime_profiles.json"
+# The shipped registry above lives inside the signed application bundle, where
+# editing it breaks the code signature. Operators change runtime profiles here
+# instead: arguments (including the vendor approval flags), working directory,
+# or an entirely new profile for a vendor CLI we do not ship.
+PROFILE_OVERLAY_ENVIRONMENT_KEY = "AI_COLLAB_RUNTIME_PROFILES_OVERLAY"
+PROFILE_OVERLAY_PATH = (
+    Path(user_config_dir("AI Collab")).expanduser() / "runtime_profiles.overlay.json"
+)
 _SOURCE_TRANSPORT = ROOT / "pingagent" / "bin" / "ai-harness-transport"
 _EMBEDDED_TRANSPORT = ROOT.parent / "PingAgent" / "bin" / "ai-harness-transport"
 PINGAGENT_TRANSPORT = (
@@ -445,18 +464,45 @@ def _record_sender_auth_failure(
         pass
 
 
+def _runtime_profile_overlay_path() -> Path:
+    override = os.environ.get(PROFILE_OVERLAY_ENVIRONMENT_KEY, "").strip()
+    if override:
+        return Path(override).expanduser()
+    return PROFILE_OVERLAY_PATH
+
+
 def _runtime_profiles() -> dict[str, dict[str, Any]]:
+    result = _validated_runtime_profiles(PROFILE_PATH, "registry")
+    overlay_path = _runtime_profile_overlay_path()
+    if overlay_path.is_file():
+        # A present-but-broken overlay fails the operation. Ignoring it would
+        # silently launch a vendor CLI with the shipped approval flags after the
+        # operator had already decided otherwise.
+        result.update(_validated_runtime_profiles(overlay_path, "overlay"))
+    if "runtime-profile.inert" not in result:
+        raise DriverError("runtime profile registry lacks inert baseline")
+    return result
+
+
+def _validated_runtime_profiles(
+    path: Path, source: str
+) -> dict[str, dict[str, Any]]:
+    """Read one profile document. The overlay is held to the registry's rules.
+
+    Both documents go through this single function so an operator-supplied
+    profile cannot be looser than a shipped one.
+    """
     try:
-        value = json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
+        value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise DriverError("runtime profile registry is unavailable") from exc
+        raise DriverError(f"runtime profile {source} is unavailable") from exc
     rows = value.get("profiles") if isinstance(value, dict) else None
     if (
         not isinstance(value, dict)
         or value.get("schema_version") != 1
         or not isinstance(rows, list)
     ):
-        raise DriverError("runtime profile registry is invalid")
+        raise DriverError(f"runtime profile {source} is invalid")
     result: dict[str, dict[str, Any]] = {}
     for row in rows:
         if (
@@ -491,10 +537,8 @@ def _runtime_profiles() -> dict[str, dict[str, Any]]:
             or not _valid_startup_gate(row["startup_gate"])
             or row["profile_id"] in result
         ):
-            raise DriverError("runtime profile registry is invalid")
+            raise DriverError(f"runtime profile {source} is invalid")
         result[row["profile_id"]] = row
-    if "runtime-profile.inert" not in result:
-        raise DriverError("runtime profile registry lacks inert baseline")
     return result
 
 
