@@ -106,6 +106,16 @@ PROJECT_LIST_RESULT_SCHEMA = {
     "required": ["projects"],
     "properties": {"projects": {"type": "array"}},
 }
+PROJECT_UNREGISTER_REQUEST_SCHEMA = {
+    "type": "object",
+    "required": ["project_instance_id"],
+    "properties": {"project_instance_id": {"type": "string"}},
+}
+PROJECT_UNREGISTER_RESULT_SCHEMA = {
+    "type": "object",
+    "required": ["unregistered"],
+    "properties": {"unregistered": {"type": "object"}},
+}
 CREATE_REQUEST_SCHEMA = {
     "type": "object",
     "required": ["project_binding_digest"],
@@ -534,6 +544,15 @@ OPERATION_DESCRIPTORS = (
         mutation_class="read_only",
         request_schema=EMPTY_OBJECT_SCHEMA,
         result_schema=PROJECT_LIST_RESULT_SCHEMA,
+    ),
+    _descriptor(
+        "project.unregister",
+        capability="project.manage",
+        target_scope="host",
+        required_fences=["host_generation", "operation_generation"],
+        mutation_class="durable_state",
+        request_schema=PROJECT_UNREGISTER_REQUEST_SCHEMA,
+        result_schema=PROJECT_UNREGISTER_RESULT_SCHEMA,
     ),
     _descriptor(
         "scenario.create",
@@ -1229,6 +1248,25 @@ def _validate_payload(operation: str, value: Any) -> None:
                 "ipc.operation-schema-mismatch",
                 "protocol",
                 "project registration path is invalid",
+            )
+        return
+    if operation == "project.unregister":
+        payload = _require_exact_fields(
+            value,
+            {"project_instance_id"},
+            label="project unregister payload",
+        )
+        identity = payload["project_instance_id"]
+        if (
+            not isinstance(identity, str)
+            or not identity
+            or "\x00" in identity
+            or len(identity) > 256
+        ):
+            raise ProtocolError(
+                "ipc.operation-schema-mismatch",
+                "protocol",
+                "project instance identity is invalid",
             )
         return
     if operation == "scenario.create":

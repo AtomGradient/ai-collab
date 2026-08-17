@@ -1045,6 +1045,29 @@ class HarnessHost:
         elif operation == "project.list":
             result = self.projects.list()
             operation_id = f"read-{request['request_id']}"
+        elif operation == "project.unregister":
+            if request["fence"]["operation_generation"] != 0:
+                raise ProtocolError(
+                    "fence.stale-operation-generation",
+                    "fencing",
+                    "project unregistration requires an absent-request fence",
+                    retryable=True,
+                )
+            project_instance_id = request["payload"]["project_instance_id"]
+            # Unregistering never disposes of anything: a project that still
+            # owns durable Scenarios keeps its registration until the owner
+            # has explicitly destroyed every one of them.
+            if self.store.list_scenarios(project_instance_id)["scenarios"]:
+                raise ProtocolError(
+                    "project.scenarios-exist",
+                    "operation",
+                    "project still owns durable Scenarios; destroy them first",
+                )
+            operation_id, result = self.projects.unregister(
+                request_id=request["request_id"],
+                request_digest=request_digest,
+                project_instance_id=project_instance_id,
+            )
         elif operation == "scenario.list":
             result = self.store.list_scenarios(target["project_instance_id"])
             operation_id = f"read-{request['request_id']}"

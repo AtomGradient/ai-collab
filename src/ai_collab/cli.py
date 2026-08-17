@@ -81,6 +81,13 @@ def add_harness_parser(subparsers: Any) -> None:
     _add_connection_options(project_register)
     project_list = project_commands.add_parser("list", help="List registered projects")
     _add_connection_options(project_list)
+    project_unregister = project_commands.add_parser(
+        "unregister",
+        help="Remove one registered project that owns no remaining Scenarios",
+    )
+    project_unregister.add_argument("project_instance_id")
+    project_unregister.add_argument("--request-id")
+    _add_connection_options(project_unregister)
 
     scenario = commands.add_parser("scenario", help="Manage durable Harness Scenarios")
     scenario_commands = scenario.add_subparsers(dest="scenario_command", required=True)
@@ -440,6 +447,11 @@ def run_harness_command(args: argparse.Namespace) -> int:
             if args.project_command == "register":
                 result = client.register_project(
                     canonical_project_path=str(args.canonical_project_path),
+                    request_id=args.request_id,
+                )
+            elif args.project_command == "unregister":
+                result = client.unregister_project(
+                    project_instance_id=args.project_instance_id,
                     request_id=args.request_id,
                 )
             else:

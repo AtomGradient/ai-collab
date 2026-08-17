@@ -242,3 +242,70 @@ def test_private_canonical_root_is_revalidated_before_adapter_dispatch(
         project_root.rmdir()
         with pytest.raises(ProjectError, match="unavailable"):
             host.projects.canonical_root(project_id)
+
+
+def test_unregister_removes_only_a_scenario_free_project(tmp_path: Path) -> None:
+    """Unregistering forgets the registration record and nothing else; a
+    project that still owns durable Scenarios keeps it until every one of
+    them is explicitly destroyed."""
+    state_root = tmp_path / "state"
+    busy_root = tmp_path / "busy-project"
+    idle_root = tmp_path / "idle-project"
+    busy_root.mkdir()
+    idle_root.mkdir()
+    with running_host(state_root) as (_, client):
+        busy = client.register_project(
+            canonical_project_path=str(busy_root), request_id="register-busy"
+        )["project"]
+        idle = client.register_project(
+            canonical_project_path=str(idle_root), request_id="register-idle"
+        )["project"]
+        client.create_scenario(
+            project_instance_id=busy["project_instance_id"],
+            scenario_id="scenario-busy",
+            project_binding_digest=PROJECT_DIGEST,
+            request_id="create-busy",
+        )
+
+        with pytest.raises(HarnessClientError) as blocked:
+            client.unregister_project(
+                project_instance_id=busy["project_instance_id"],
+                request_id="unregister-busy",
+            )
+        assert blocked.value.code == "project.scenarios-exist"
+        assert len(client.list_projects()["projects"]) == 2
+
+        removed = client.unregister_project(
+            project_instance_id=idle["project_instance_id"],
+            request_id="unregister-idle",
+        )
+        assert removed["unregistered"] == {
+            "project_instance_id": idle["project_instance_id"],
+            "project_key": idle["project_key"],
+            "registration_revision": idle["registration_revision"],
+        }
+        assert client.list_projects() == {"projects": [busy]}
+
+        # Exact replay returns the durable result instead of failing.
+        assert (
+            client.unregister_project(
+                project_instance_id=idle["project_instance_id"],
+                request_id="unregister-idle",
+            )
+            == removed
+        )
+        # A fresh request against the forgotten project is a typed refusal
+        # (project.not-found is translated to the identity-scoped IPC code).
+        with pytest.raises(HarnessClientError) as missing:
+            client.unregister_project(
+                project_instance_id=idle["project_instance_id"],
+                request_id="unregister-gone",
+            )
+        assert missing.value.code == "target.project-not-found"
+
+        # The project can simply be registered again, as a fresh record.
+        back = client.register_project(
+            canonical_project_path=str(idle_root), request_id="register-idle-again"
+        )["project"]
+        assert back["registration_revision"] == 1
+        assert len(client.list_projects()["projects"]) == 2

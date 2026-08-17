@@ -114,10 +114,30 @@ class ProjectRegistry:
                     or not isinstance(request["operation_id"], str)
                     or not request["operation_id"]
                     or not isinstance(request["result"], dict)
-                    or set(request["result"]) != {"project"}
+                    or set(request["result"]) not in ({"project"}, {"unregistered"})
                 ):
                     raise ValueError
-                self._validate_record(request["result"]["project"])
+                if "project" in request["result"]:
+                    self._validate_record(request["result"]["project"])
+                else:
+                    removal = request["result"]["unregistered"]
+                    if (
+                        not isinstance(removal, dict)
+                        or set(removal)
+                        != {
+                            "project_instance_id",
+                            "project_key",
+                            "registration_revision",
+                        }
+                        or not isinstance(removal["project_instance_id"], str)
+                        or not removal["project_instance_id"]
+                        or not isinstance(removal["project_key"], str)
+                        or not removal["project_key"]
+                        or not isinstance(removal["registration_revision"], int)
+                        or isinstance(removal["registration_revision"], bool)
+                        or removal["registration_revision"] < 1
+                    ):
+                        raise ValueError
         except (KeyError, TypeError, ValueError, ProjectError) as exc:
             raise ProjectError(
                 "project.state-invalid", "project registry records differ"
@@ -256,6 +276,49 @@ class ProjectRegistry:
                     ),
                 )
             }
+
+    def unregister(
+        self,
+        *,
+        request_id: str,
+        request_digest: str,
+        project_instance_id: str,
+    ) -> tuple[str, dict[str, Any]]:
+        """Remove one registration record.
+
+        The Host has already proven the project owns no durable Scenarios;
+        this only forgets the redacted record and the private canonical-root
+        binding. Nothing on disk outside the registry is touched, and the
+        project can simply be registered again.
+        """
+        with self._lock:
+            state = self._read_state()
+            previous = state["requests"].get(request_id)
+            if previous is not None:
+                if previous["request_digest"] != request_digest:
+                    raise ProjectError("ipc.request-reused", "request identity was reused")
+                return previous["operation_id"], copy.deepcopy(previous["result"])
+            item = state["projects"].get(project_instance_id)
+            if item is None:
+                raise ProjectError("project.not-found", "project is not registered")
+            record = item["record"]
+            result = {
+                "unregistered": {
+                    "project_instance_id": project_instance_id,
+                    "project_key": record["project_key"],
+                    "registration_revision": record["registration_revision"],
+                }
+            }
+            del state["projects"][project_instance_id]
+            operation_id = f"project-op-{uuid.uuid4().hex}"
+            state["requests"][request_id] = {
+                "request_digest": request_digest,
+                "operation_id": operation_id,
+                "result": copy.deepcopy(result),
+            }
+            state["state_revision"] += 1
+            self._write_state(state)
+            return operation_id, result
 
     def collaboration_templates(self, project_instance_id: str) -> dict[str, Any]:
         """Load project-provided team/policy data without exposing its root."""
