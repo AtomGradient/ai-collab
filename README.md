@@ -124,6 +124,15 @@ With those four files in place, registering the project in the App (or
 `ai-collab harness project register <path>`) succeeds, and Scenarios provision
 isolated clones of every managed repository plus a bound venv.
 
+One more step makes participants start *inside* your project instead of one
+level above it. Inside a provisioned Scenario the project materializes at
+`bundle/<your canonical directory name>`, but the shipped runtime profiles
+launch vendor CLIs in `bundle/` — the registry is product-generic and cannot
+know your directory name, and a CLI started in `bundle/` will not see the
+`AGENTS.md` / `CLAUDE.md` at your project root. Copy the shipped profile rows
+into the overlay described below and set their `working_directory` to
+`bundle/myproject`.
+
 `scripts/ai_collab_project_descriptor.py --repo-root <path>` and
 `scripts/ai_collab_repo_manifest.py --repo-root <path>` validate the two YAML
 files standalone and print exact reasons on failure.
@@ -172,7 +181,10 @@ accepts typed delivery, and whether it can resume a previous vendor session.
 The shipped `runtime-profile.codex` and `runtime-profile.claude` profiles pass
 `--dangerously-bypass-approvals-and-sandbox` and `--dangerously-skip-permissions`.
 That is a deliberate default for unattended collaboration, and it means the
-participant will not stop to ask you for approval.
+participant will not stop to ask you for approval. Their `working_directory`
+is `bundle`, the one path that exists in every provisioned Scenario; an
+overlay row pointing it at `bundle/<your project directory>` is part of normal
+project setup (see the previous section).
 
 To change it, do not edit the file in an installed App — it lives inside the
 signed bundle and editing it there breaks the signature. Write an overlay
