@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+# Copyright © 2026 AtomGradient
+# 版权所有 © 2026 质子梯度（北京）科技有限公司
 # PingAgent installer
 # 默认 symlink 到 ~/.local/bin/，git pull 后自动生效。
 # 用 --copy 改为拷贝（适合不想依赖 repo 路径的场景）。

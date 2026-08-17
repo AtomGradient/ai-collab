@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+// Copyright © 2026 AtomGradient
+// 版权所有 © 2026 质子梯度（北京）科技有限公司
+
 import CryptoKit
 import Darwin
 import Foundation

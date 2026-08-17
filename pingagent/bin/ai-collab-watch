@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+# Copyright © 2026 AtomGradient
+# 版权所有 © 2026 质子梯度（北京）科技有限公司
 # ai-collab-watch <role> <mailbox-dir>
 # 监听 .ai-mailbox/inbox/<role>/ 的新消息文件，用 osascript 把短通知注入本 pane。
 # 通常由 ai-pane-register 自动启动，不需要手动跑。
