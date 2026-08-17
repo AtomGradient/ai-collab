@@ -1178,7 +1178,9 @@ def _validate_participant_client(value: Mapping[str, Any]) -> None:
         raise DriverError("participant client context is unsafe")
 
 
-def _workspace_path(raw: Any, profile: Mapping[str, Any]) -> Path:
+def _workspace_path(
+    raw: Any, profile: Mapping[str, Any], declared: Any = None
+) -> Path:
     if not isinstance(raw, str):
         raise DriverError("workspace path is invalid")
     path = Path(raw)
@@ -1187,11 +1189,23 @@ def _workspace_path(raw: Any, profile: Mapping[str, Any]) -> Path:
     details = path.stat()
     if details.st_uid != os.getuid() or stat.S_IMODE(details.st_mode) & 0o022:
         raise DriverError("workspace path is invalid")
-    relative = profile["working_directory"]
+    # The workspace receipt's declared project directory wins over the
+    # profile's static working directory: the registry is product-generic and
+    # cannot know where a given project materializes inside the bundle, while
+    # the adapter that provisioned the workspace knows exactly.
+    if declared is None:
+        relative = profile["working_directory"]
+    elif isinstance(declared, str) and declared:
+        relative = declared
+    else:
+        raise DriverError("declared participant working directory is invalid")
     parts = Path(relative).parts
     if Path(relative).is_absolute() or any(part in {"", ".."} for part in parts):
         raise DriverError("runtime working directory is invalid")
-    candidate = path.joinpath(*parts).resolve(strict=True)
+    try:
+        candidate = path.joinpath(*parts).resolve(strict=True)
+    except OSError as exc:
+        raise DriverError("runtime working directory is invalid") from exc
     if (
         not candidate.is_relative_to(path)
         or not candidate.is_dir()
@@ -2123,13 +2137,17 @@ def start(payload: Mapping[str, Any]) -> dict[str, Any]:
         "workspace_path",
         "participant_client",
     }
-    if set(payload) != required:
+    if not required <= set(payload) or set(payload) - required - {
+        "participant_working_directory"
+    }:
         raise DriverError("start payload differs")
     private_root = _private_root(payload["private_root"])
     context = payload["context"]
     launch_spec = payload["launch_spec"]
     workspace_path = _workspace_path(
-        payload["workspace_path"], _runtime_profile(launch_spec)
+        payload["workspace_path"],
+        _runtime_profile(launch_spec),
+        payload.get("participant_working_directory"),
     )
     resolved = payload["resolved_driver"]
     participant_client = payload["participant_client"]

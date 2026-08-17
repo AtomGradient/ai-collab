@@ -407,7 +407,8 @@
         "finalization",
         "state",
         "residual_owned_resources",
-        "project_payload_digest"
+        "project_payload_digest",
+        "participant_working_directory"
       ],
       "properties": {
         "receipt_contract_version": {"const": 1},
@@ -432,7 +433,11 @@
         "finalization": {"$ref": "#/$defs/finalization_receipt"},
         "state": {"const": "ready"},
         "residual_owned_resources": {"const": 0},
-        "project_payload_digest": {"$ref": "#/$defs/sha256"}
+        "project_payload_digest": {"$ref": "#/$defs/sha256"},
+        "participant_working_directory": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$"
+        }
       },
       "additionalProperties": false
     },

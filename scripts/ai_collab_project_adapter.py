@@ -896,6 +896,10 @@ def _provision(payload: Mapping[str, Any]) -> dict[str, Any]:
         "operation_id": plan["operation_id"],
         "base_receipt_digest": None,
         "scenario": plan["scenario"],
+        # Where participants belong: the provisioned project root checkout.
+        # The staging tree is published as "bundle", so this is the
+        # workspace-root-relative path the driver launches vendor CLIs in.
+        "participant_working_directory": f"bundle/{ROOT.name}",
         "project_key": plan["project_key"],
         "workspace_adapter": plan["workspace_adapter"],
         "environment_adapter": plan["environment_adapter"],

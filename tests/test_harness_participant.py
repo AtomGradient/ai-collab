@@ -265,6 +265,7 @@ class FakeDriver:
         self.start_calls = 0
         self.start_generations: list[int] = []
         self.start_participant_clients: list[dict[str, str]] = []
+        self.start_working_directories: list[object] = []
         self.stop_calls: list[str] = []
         self.force_stop_calls: list[str] = []
         self.repair_calls: list[int] = []
@@ -351,6 +352,9 @@ class FakeDriver:
             self.start_generations.append(payload["context"]["participant_generation"])
             self.start_participant_clients.append(
                 dict(payload["participant_client"])
+            )
+            self.start_working_directories.append(
+                payload.get("participant_working_directory")
             )
             if (
                 self.fail_start
@@ -3852,3 +3856,87 @@ def test_cli_controls_generic_participant_lifecycle(
         observed = json.loads(capsys.readouterr().out)["participant"]
         assert observed["participant_generation"] == 2
         assert observed["observed_state"] == "stopped"
+
+
+def test_bind_workspace_directory_prefers_the_receipt_declaration() -> None:
+    """The provisioned receipt, not the runtime profile, decides where a
+    participant launches; without a declaration the execution is untouched."""
+
+    def summary(_project: str, _scenario: str) -> dict[str, object]:
+        return {"receipt": {"participant_working_directory": "bundle/someproject"}}
+
+    coordinator = ParticipantCoordinator(
+        None, None, workspace_summary=summary  # type: ignore[arg-type]
+    )
+    execution: dict[str, object] = {"workspace_path": "/tmp/ws"}
+    coordinator._bind_workspace_directory(execution, "project-1", "scenario-1")
+    assert execution["participant_working_directory"] == "bundle/someproject"
+
+
+def test_bind_workspace_directory_leaves_execution_alone_without_declaration() -> None:
+    cases = [
+        lambda _p, _s: None,  # no workspace binding at all
+        lambda _p, _s: {"receipt": None},  # planned but never provisioned
+        lambda _p, _s: {"receipt": {}},  # receipt predates the field
+        lambda _p, _s: {"receipt": {"participant_working_directory": 7}},
+        lambda _p, _s: {"receipt": {"participant_working_directory": ""}},
+    ]
+    for summary in cases:
+        coordinator = ParticipantCoordinator(
+            None, None, workspace_summary=summary  # type: ignore[arg-type]
+        )
+        execution: dict[str, object] = {"workspace_path": "/tmp/ws"}
+        coordinator._bind_workspace_directory(execution, "project-1", "scenario-1")
+        assert "participant_working_directory" not in execution
+    coordinator = ParticipantCoordinator(None, None)  # type: ignore[arg-type]
+    execution = {"workspace_path": "/tmp/ws"}
+    coordinator._bind_workspace_directory(execution, "project-1", "scenario-1")
+    assert "participant_working_directory" not in execution
+
+
+def test_start_execution_carries_the_provisioned_working_directory(
+    tmp_path: Path,
+) -> None:
+    """The coordinator injects the receipt-declared project directory into the
+    driver's start payload. The driver-side preference for that value over the
+    profile's static working directory is covered by the driver tests."""
+    state_root = tmp_path / "state"
+    with running_host(state_root) as (host, client, driver):
+        assert host.participants is not None
+        host.participants._workspace_summary = lambda _project, _scenario: {
+            "receipt": {"participant_working_directory": "bundle/someproject"}
+        }
+        created = client.create_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            project_binding_digest=PROJECT_DIGEST,
+            request_id="create",
+        )["scenario"]
+        added = client.add_participant(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            participant_id=PARTICIPANT_ID,
+            scenario_generation=created["scenario_generation"],
+            scenario_state_revision=created["state_revision"],
+            launch_spec=_launch_spec(),
+            presentation_driver_id="presentation.iterm2",
+            request_id="add",
+        )["participant"]
+        opened = client.open_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=created["scenario_generation"],
+            scenario_state_revision=created["state_revision"],
+            request_id="open",
+        )["scenario"]
+        client.start_participant(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            participant_id=PARTICIPANT_ID,
+            scenario_generation=opened["scenario_generation"],
+            scenario_state_revision=opened["state_revision"],
+            participant_generation=added["participant_generation"],
+            participant_state_revision=added["state_revision"],
+            request_id="start",
+        )
+        assert driver.start_working_directories == ["bundle/someproject"]

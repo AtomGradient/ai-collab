@@ -81,9 +81,42 @@ class ParticipantDriverCommand:
 class ParticipantCoordinator:
     """Compose a generic versioned driver with durable participant lifecycle state."""
 
-    def __init__(self, store: ScenarioStore, driver: ParticipantDriverCommand):
+    def __init__(
+        self,
+        store: ScenarioStore,
+        driver: ParticipantDriverCommand,
+        *,
+        workspace_summary: Callable[[str, str], dict[str, Any] | None] | None = None,
+    ):
         self.store = store
         self.driver = driver
+        self._workspace_summary = workspace_summary
+
+    def _bind_workspace_directory(
+        self,
+        execution: dict[str, Any],
+        project_instance_id: str,
+        scenario_id: str,
+    ) -> None:
+        """Launch the participant inside the provisioned project checkout.
+
+        The workspace receipt is where the adapter declares which directory
+        inside the published bundle is the project root; the runtime profile
+        registry is product-generic and cannot know it. Receipts provisioned
+        before the field existed simply leave the profile's own working
+        directory in effect.
+        """
+        if self._workspace_summary is None:
+            return
+        summary = self._workspace_summary(project_instance_id, scenario_id)
+        receipt = summary.get("receipt") if isinstance(summary, dict) else None
+        value = (
+            receipt.get("participant_working_directory")
+            if isinstance(receipt, dict)
+            else None
+        )
+        if isinstance(value, str) and value:
+            execution["participant_working_directory"] = value
 
     def add(
         self,
@@ -276,6 +309,9 @@ class ParticipantCoordinator:
             return operation_id, replay
         assert execution is not None
         execution["participant_client"] = copy.deepcopy(dict(participant_client))
+        self._bind_workspace_directory(
+            execution, values["project_instance_id"], values["scenario_id"]
+        )
         artifacts: dict[str, Any] | None = None
         try:
             self._ensure_private_root(Path(execution["private_root"]))
@@ -661,6 +697,11 @@ class ParticipantCoordinator:
             self._validate_participant_client(participant_client)
             start_execution["participant_client"] = copy.deepcopy(
                 dict(participant_client)
+            )
+            self._bind_workspace_directory(
+                start_execution,
+                values["project_instance_id"],
+                values["scenario_id"],
             )
             self._ensure_private_root(Path(start_execution["private_root"]))
             artifacts = self.driver.call("start", start_execution)

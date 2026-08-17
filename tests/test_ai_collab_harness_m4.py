@@ -2305,3 +2305,33 @@ def test_vendor_session_hook_captures_and_reuses_exact_identity(
         resumed_session_id,
         True,
     ) == hashlib.sha256(session_id.encode()).hexdigest()
+
+
+def test_workspace_path_prefers_the_declared_project_directory(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "bundle" / "someproject").mkdir(parents=True)
+    profile = {"working_directory": "bundle"}
+    chosen = participant_driver._workspace_path(
+        str(tmp_path), profile, "bundle/someproject"
+    )
+    assert chosen == (tmp_path / "bundle" / "someproject").resolve()
+
+
+def test_workspace_path_falls_back_to_the_profile_without_declaration(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "bundle").mkdir()
+    profile = {"working_directory": "bundle"}
+    chosen = participant_driver._workspace_path(str(tmp_path), profile)
+    assert chosen == (tmp_path / "bundle").resolve()
+
+
+def test_workspace_path_rejects_invalid_declared_directories(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "bundle").mkdir()
+    profile = {"working_directory": "bundle"}
+    for declared in ("", "../outside", "/absolute", 7, "bundle/missing-dir"):
+        with pytest.raises(participant_driver.DriverError):
+            participant_driver._workspace_path(str(tmp_path), profile, declared)

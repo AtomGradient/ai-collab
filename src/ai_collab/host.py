@@ -257,7 +257,11 @@ class HarnessHost:
         )
         self.participants = (
             ParticipantCoordinator(
-                self.store, ParticipantDriverCommand(participant_driver_config)
+                self.store,
+                ParticipantDriverCommand(participant_driver_config),
+                workspace_summary=(
+                    self.workspace.summary if self.workspace is not None else None
+                ),
             )
             if participant_driver_config is not None
             else None

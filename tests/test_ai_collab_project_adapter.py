@@ -289,6 +289,10 @@ def test_plan_provision_status_destroy_full_cycle(tmp_path: Path) -> None:
     journal = provision_reply["result"]["journal"]
     snapshot = provision_reply["result"]["review_snapshot"]
 
+    # The receipt declares where participants launch: the provisioned
+    # project root checkout, derived from the canonical directory name.
+    assert receipt["participant_working_directory"] == f"bundle/{project.name}"
+
     # Workspace layout mirrors the canonical directory name, not any
     # hard-coded project name.
     assert (staging / project.name / "src" / "samplepkg" / "__init__.py").is_file()
