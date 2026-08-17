@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: LicenseRef-AtomGradient-Proprietary
-# Copyright (c) 2026 AtomGradient. All rights reserved.
-# 版权所有 (c) 2026 质子梯度（北京）科技有限公司。保留所有权利。
-# Unauthorized copying, distribution, or use is strictly prohibited.
-# 未经授权，禁止复制、分发或使用本文件。
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 AtomGradient
+# 版权所有 (c) 2026 质子梯度（北京）科技有限公司
 """Shared fail-closed evidence helpers for new AI Collab bootstrap spikes.
 
 The already-issued Stage 0, Immediate, and Gate 0 producers remain frozen so

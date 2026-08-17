@@ -18,10 +18,14 @@ The product is designed around five constraints:
 
 ## Repository status
 
-This repository is currently a private extraction staging area. It is not yet
-licensed for redistribution or ready for public use. Public release requires a
-separate license decision, source-header audit, secret scan, documentation
-review, and the complete two-agent Harness regression gate.
+Licensed under the MIT License (see `LICENSE`).
+
+Not yet usable standalone. A bare clone can run this repository's own test
+suite and start a Host through the CLI, but it cannot register a project or
+build `AI Collab.app`, because both require a project integration adapter and
+the only adapter that exists today lives in a private repository. Making the
+Harness usable against any project — not just its first one — is tracked work,
+not a finished property.
 
 ## Layout
 
