@@ -6,9 +6,10 @@ talk to each other through a typed, audited Host.
 
 ![The AI Collab App: a running Scenario with two participants, its collaboration policy, and the delivery journal](ai-collab.png)
 
-Two agents in one Scenario messaging each other through the Host:
+Four agents across two Scenarios messaging each other through the Host,
+without disturbing each other:
 
-![Two participant TUIs exchanging typed deliveries next to the App](ai-collab-with-tuis.png)
+![Four participant TUIs across two Scenarios exchanging typed deliveries next to the App](ai-collab-with-tuis.png)
 
 ## Quick start
 
