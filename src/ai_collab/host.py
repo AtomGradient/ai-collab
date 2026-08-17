@@ -1045,6 +1045,19 @@ class HarnessHost:
         elif operation == "project.list":
             result = self.projects.list()
             operation_id = f"read-{request['request_id']}"
+        elif operation == "project.bootstrap":
+            if request["fence"]["operation_generation"] != 0:
+                raise ProtocolError(
+                    "fence.stale-operation-generation",
+                    "fencing",
+                    "project bootstrap requires an absent-request fence",
+                    retryable=True,
+                )
+            operation_id, result = self.projects.bootstrap(
+                request_id=request["request_id"],
+                request_digest=request_digest,
+                canonical_project_path=request["payload"]["canonical_project_path"],
+            )
         elif operation == "project.unregister":
             if request["fence"]["operation_generation"] != 0:
                 raise ProtocolError(

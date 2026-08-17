@@ -81,6 +81,20 @@ class HarnessClient:
     def list_projects(self) -> dict[str, Any]:
         return self._call("project.list", {"scope": "host"}, {}, {})
 
+    def bootstrap_project(
+        self,
+        *,
+        canonical_project_path: str,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        return self._call(
+            "project.bootstrap",
+            {"scope": "host"},
+            {"operation_generation": 0},
+            {"canonical_project_path": canonical_project_path},
+            request_id=request_id,
+        )
+
     def unregister_project(
         self,
         *,

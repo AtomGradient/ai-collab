@@ -114,11 +114,14 @@ class ProjectRegistry:
                     or not isinstance(request["operation_id"], str)
                     or not request["operation_id"]
                     or not isinstance(request["result"], dict)
-                    or set(request["result"]) not in ({"project"}, {"unregistered"})
+                    or set(request["result"])
+                    not in ({"project"}, {"unregistered"}, {"bootstrap"})
                 ):
                     raise ValueError
                 if "project" in request["result"]:
                     self._validate_record(request["result"]["project"])
+                elif "bootstrap" in request["result"]:
+                    self._validate_bootstrap_result(request["result"]["bootstrap"])
                 else:
                     removal = request["result"]["unregistered"]
                     if (
@@ -276,6 +279,104 @@ class ProjectRegistry:
                     ),
                 )
             }
+
+    @staticmethod
+    def _validate_bootstrap_result(value: Any) -> None:
+        if (
+            not isinstance(value, dict)
+            or set(value) != {"created", "already_configured", "project_key"}
+            or not isinstance(value["created"], list)
+            or any(
+                not isinstance(item, str) or not item or "/" in item or ".." in item
+                for item in value["created"]
+            )
+            or not isinstance(value["already_configured"], bool)
+            or not (
+                value["project_key"] is None or isinstance(value["project_key"], str)
+            )
+        ):
+            raise ValueError
+
+    def bootstrap(
+        self,
+        *,
+        request_id: str,
+        request_digest: str,
+        canonical_project_path: str,
+    ) -> tuple[str, dict[str, Any]]:
+        """Ask the adapter to draft declaration files for a bare project.
+
+        The adapter never overwrites an existing file and deletes its own
+        drafts if they fail validation, so this either leaves a registrable
+        project or the directory exactly as it was.
+        """
+        if self.adapter is None:
+            raise ProjectError(
+                "project.adapter-unavailable",
+                "project adapter is not configured",
+                retryable=True,
+            )
+        with self._lock:
+            state = self._read_state()
+            previous = state["requests"].get(request_id)
+            if previous is not None:
+                if previous["request_digest"] != request_digest:
+                    raise ProjectError("ipc.request-reused", "request identity was reused")
+                return previous["operation_id"], copy.deepcopy(previous["result"])
+
+        supplied = Path(canonical_project_path).expanduser()
+        if supplied.is_symlink():
+            raise ProjectError("project.path-invalid", "project root must not be a symlink")
+        try:
+            root = supplied.resolve(strict=True)
+        except OSError as exc:
+            raise ProjectError("project.path-invalid", "project root is unavailable") from exc
+        if not root.is_dir() or root.stat().st_uid != os.getuid():
+            raise ProjectError("project.path-invalid", "project root owner differs")
+
+        try:
+            if isinstance(self.adapter, ProjectAdapterCommand):
+                observed = self.adapter.call(
+                    "bootstrap",
+                    {"canonical_project_path": str(root)},
+                    project_root=root,
+                )
+            else:
+                observed = self.adapter.call(
+                    "bootstrap", {"canonical_project_path": str(root)}
+                )
+        except WorkspaceError as exc:
+            raise ProjectError(
+                exc.code,
+                "project bootstrap failed",
+                exc.retryable,
+            ) from exc
+        if not isinstance(observed, dict) or set(observed) != {"bootstrap"}:
+            raise ProjectError("project.binding-drift", "bootstrap reply differs")
+        try:
+            self._validate_bootstrap_result(observed["bootstrap"])
+        except ValueError as exc:
+            raise ProjectError(
+                "project.binding-drift", "bootstrap reply differs"
+            ) from exc
+
+        with self._lock:
+            state = self._read_state()
+            previous = state["requests"].get(request_id)
+            if previous is not None:
+                if previous["request_digest"] != request_digest:
+                    raise ProjectError("ipc.request-reused", "request identity was reused")
+                return previous["operation_id"], copy.deepcopy(previous["result"])
+            operation_id = f"project-op-{uuid.uuid4().hex}"
+            result = {"bootstrap": copy.deepcopy(observed["bootstrap"])}
+            state["requests"][request_id] = {
+                "request_digest": request_digest,
+                "operation_id": operation_id,
+                "result": copy.deepcopy(result),
+            }
+            state["state_revision"] += 1
+            self._write_state(state)
+            return operation_id, result
 
     def unregister(
         self,

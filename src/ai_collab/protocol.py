@@ -111,6 +111,11 @@ PROJECT_UNREGISTER_REQUEST_SCHEMA = {
     "required": ["project_instance_id"],
     "properties": {"project_instance_id": {"type": "string"}},
 }
+PROJECT_BOOTSTRAP_RESULT_SCHEMA = {
+    "type": "object",
+    "required": ["bootstrap"],
+    "properties": {"bootstrap": {"type": "object"}},
+}
 PROJECT_UNREGISTER_RESULT_SCHEMA = {
     "type": "object",
     "required": ["unregistered"],
@@ -553,6 +558,15 @@ OPERATION_DESCRIPTORS = (
         mutation_class="durable_state",
         request_schema=PROJECT_UNREGISTER_REQUEST_SCHEMA,
         result_schema=PROJECT_UNREGISTER_RESULT_SCHEMA,
+    ),
+    _descriptor(
+        "project.bootstrap",
+        capability="project.manage",
+        target_scope="host",
+        required_fences=["host_generation", "operation_generation"],
+        mutation_class="durable_state",
+        request_schema=PROJECT_REGISTER_REQUEST_SCHEMA,
+        result_schema=PROJECT_BOOTSTRAP_RESULT_SCHEMA,
     ),
     _descriptor(
         "scenario.create",
@@ -1231,7 +1245,7 @@ def _validate_payload(operation: str, value: Any) -> None:
     }:
         _require_exact_fields(value, set(), label="operation payload")
         return
-    if operation == "project.register":
+    if operation in {"project.register", "project.bootstrap"}:
         payload = _require_exact_fields(
             value,
             {"canonical_project_path"},

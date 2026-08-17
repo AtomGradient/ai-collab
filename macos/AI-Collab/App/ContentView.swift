@@ -127,6 +127,32 @@ struct ContentView: View {
                 Task { await model.chooseAndRegisterProject() }
             }
         }
+        .confirmationDialog(
+            "Prepare this project?",
+            isPresented: Binding(
+                get: { model.pendingBootstrap != nil },
+                set: { if !$0 { model.pendingBootstrap = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            if let url = model.pendingBootstrap {
+                Button("Draft project files and register") {
+                    model.pendingBootstrap = nil
+                    Task { await model.bootstrapAndRegisterProject(url) }
+                }
+                Button("Cancel", role: .cancel) {}
+            }
+        } message: {
+            if let url = model.pendingBootstrap {
+                Text(
+                    "\(url.lastPathComponent) has no project declaration files yet. "
+                        + "AI Collab drafts project_descriptor.yaml, repo_manifest.yaml, "
+                        + "a gate registry, and starter collaboration templates from the "
+                        + "directory's Git repositories, then registers it. Existing "
+                        + "files are never overwritten."
+                )
+            }
+        }
         .safeAreaInset(edge: .bottom) {
             HStack {
                 Circle()

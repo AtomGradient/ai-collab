@@ -34,6 +34,15 @@ class FakeProjectAdapter:
         if operation == "collaboration_templates":
             assert payload == {}
             return {"templates": [_collaboration_template()]}
+        if operation == "bootstrap":
+            assert Path(payload["canonical_project_path"]).is_dir()
+            return {
+                "bootstrap": {
+                    "created": ["project_descriptor.yaml", "repo_manifest.yaml"],
+                    "already_configured": False,
+                    "project_key": "test-project",
+                }
+            }
         assert operation == "register"
         assert Path(payload["canonical_project_path"]).is_dir()
         return {
@@ -309,3 +318,21 @@ def test_unregister_removes_only_a_scenario_free_project(tmp_path: Path) -> None
         )["project"]
         assert back["registration_revision"] == 1
         assert len(client.list_projects()["projects"]) == 2
+
+
+def test_bootstrap_drafts_are_reported_and_replayed(tmp_path: Path) -> None:
+    project_root = tmp_path / "bare-project"
+    project_root.mkdir()
+    with running_host(tmp_path / "state") as (_, client):
+        drafted = client.bootstrap_project(
+            canonical_project_path=str(project_root), request_id="bootstrap-1"
+        )
+        assert drafted["bootstrap"]["already_configured"] is False
+        assert "project_descriptor.yaml" in drafted["bootstrap"]["created"]
+        # Exact replay returns the durable result.
+        assert (
+            client.bootstrap_project(
+                canonical_project_path=str(project_root), request_id="bootstrap-1"
+            )
+            == drafted
+        )

@@ -27,6 +27,7 @@ APP_OPERATIONS = (
     "project.register",
     "project.list",
     "project.unregister",
+    "project.bootstrap",
     "scenario.create",
     "scenario.list",
     "scenario.open",

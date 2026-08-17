@@ -88,6 +88,13 @@ def add_harness_parser(subparsers: Any) -> None:
     project_unregister.add_argument("project_instance_id")
     project_unregister.add_argument("--request-id")
     _add_connection_options(project_unregister)
+    project_bootstrap = project_commands.add_parser(
+        "bootstrap",
+        help="Draft the declaration files for a project that has none yet",
+    )
+    project_bootstrap.add_argument("canonical_project_path", type=Path)
+    project_bootstrap.add_argument("--request-id")
+    _add_connection_options(project_bootstrap)
 
     scenario = commands.add_parser("scenario", help="Manage durable Harness Scenarios")
     scenario_commands = scenario.add_subparsers(dest="scenario_command", required=True)
@@ -452,6 +459,11 @@ def run_harness_command(args: argparse.Namespace) -> int:
             elif args.project_command == "unregister":
                 result = client.unregister_project(
                     project_instance_id=args.project_instance_id,
+                    request_id=args.request_id,
+                )
+            elif args.project_command == "bootstrap":
+                result = client.bootstrap_project(
+                    canonical_project_path=str(args.canonical_project_path),
                     request_id=args.request_id,
                 )
             else:

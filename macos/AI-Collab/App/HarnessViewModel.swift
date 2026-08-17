@@ -28,6 +28,7 @@ final class HarnessViewModel: ObservableObject {
     @Published var hostStatus = "Connecting…"
     @Published var projects: [ProjectRecord] = []
     @Published var selectedProjectID: String?
+    @Published var pendingBootstrap: URL?
     @Published var scenarios: [ScenarioRecord] = []
     @Published var selectedScenarioID: String?
     @Published var participants: [ParticipantRecord] = []
@@ -189,29 +190,61 @@ final class HarnessViewModel: ObservableObject {
         panel.allowsMultipleSelection = false
         panel.prompt = "Register Project"
         guard panel.runModal() == .OK, let url = panel.url else { return }
+        // Cold start: a project that has never met the Harness has no
+        // declaration files. Offer to draft them instead of failing the
+        // registration with an opaque adapter error.
+        let descriptor = url.appendingPathComponent("project_descriptor.yaml")
+        if !FileManager.default.fileExists(atPath: descriptor.path) {
+            pendingBootstrap = url
+            return
+        }
         await performMutation(
             activity: "Registering \(url.lastPathComponent)…",
             scope: .project,
             success: "Registered \(url.lastPathComponent)."
         ) {
             try self.client.grantProjectDirectoryAccess(url)
-            let result = try await self.client.call(
+            try await self.registerGrantedProject(url)
+        }
+    }
+
+    func bootstrapAndRegisterProject(_ url: URL) async {
+        await performMutation(
+            activity: "Preparing \(url.lastPathComponent)…",
+            scope: .project,
+            success: "Drafted project files and registered \(url.lastPathComponent)."
+        ) {
+            try self.client.grantProjectDirectoryAccess(url)
+            _ = try await self.client.call(
                 HarnessCall(
-                    operation: "project.register",
+                    operation: "project.bootstrap",
                     target: ["scope": "host"],
                     fence: ["operation_generation": 0],
                     payload: ["canonical_project_path": url.path]
                 )
             )
-            guard
-                let raw = result["project"] as? [String: Any],
-                let project = ProjectRecord(raw)
-            else { throw HarnessIPCError.invalidReply }
-            try await self.reloadProjects()
-            self.selectedProjectID = project.id
-            try await self.reloadScenarios()
-            try await self.reloadPolicyTemplates()
+            try await self.registerGrantedProject(url)
         }
+    }
+
+    @MainActor
+    private func registerGrantedProject(_ url: URL) async throws {
+        let result = try await self.client.call(
+            HarnessCall(
+                operation: "project.register",
+                target: ["scope": "host"],
+                fence: ["operation_generation": 0],
+                payload: ["canonical_project_path": url.path]
+            )
+        )
+        guard
+            let raw = result["project"] as? [String: Any],
+            let project = ProjectRecord(raw)
+        else { throw HarnessIPCError.invalidReply }
+        try await self.reloadProjects()
+        self.selectedProjectID = project.id
+        try await self.reloadScenarios()
+        try await self.reloadPolicyTemplates()
     }
 
     func unregisterProject(_ project: ProjectRecord) async {

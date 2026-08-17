@@ -449,3 +449,77 @@ def test_environment_without_declared_bindings_is_a_plain_venv(
     )
     assert marker["source_bindings"] == []
     assert not list((staging / ".venv").rglob("ai_collab_scenario_sources.pth"))
+
+
+def test_bootstrap_drafts_a_registrable_project_from_a_bare_git_directory(
+    tmp_path: Path,
+) -> None:
+    """The cold-start path: a directory with nothing but Git repositories
+    becomes a registrable project in one bootstrap call."""
+    bare = tmp_path / "canonical" / "freshproject"
+    nested = bare / "helper-lib"
+    bare.mkdir(parents=True)
+    (bare / "README.md").write_text("hello\n", encoding="utf-8")
+    _init_repo(bare, "git@github.com:example/freshproject.git")
+    (nested / "lib.txt").parent.mkdir()
+    (nested / "lib.txt").write_text("lib\n", encoding="utf-8")
+    _init_repo(nested, "https://github.com/example/helper-lib.git")
+    project = bare.resolve()
+
+    code, reply, stderr = _call(
+        project, "bootstrap", {"canonical_project_path": str(project)}
+    )
+    assert code == 0, stderr
+    assert reply is not None
+    outcome = reply["result"]["bootstrap"]
+    assert outcome["already_configured"] is False
+    assert outcome["project_key"] == "freshproject"
+    assert set(outcome["created"]) == {
+        "project_descriptor.yaml",
+        "repo_manifest.yaml",
+        "gates.yaml",
+        "ai_collab_team_policies.json",
+    }
+
+    # The drafts register as-is: that is the entire point of bootstrap.
+    code, reply, stderr = _call(
+        project, "register", {"canonical_project_path": str(project)}
+    )
+    assert code == 0, stderr
+    assert reply is not None
+    observed = reply["result"]["project"]
+    assert observed["project_key"] == "freshproject"
+
+    manifest_text = (project / "repo_manifest.yaml").read_text(encoding="utf-8")
+    assert "repo_key: helper-lib" in manifest_text
+    assert "placement: project_child" in manifest_text
+
+    # A second bootstrap never touches the existing files.
+    code, reply, stderr = _call(
+        project, "bootstrap", {"canonical_project_path": str(project)}
+    )
+    assert code == 0, stderr
+    assert reply is not None
+    assert reply["result"]["bootstrap"]["already_configured"] is True
+    assert reply["result"]["bootstrap"]["created"] == []
+
+
+def test_bootstrap_leaves_no_residue_when_the_draft_cannot_validate(
+    tmp_path: Path,
+) -> None:
+    bare = tmp_path / "canonical" / "no-remote"
+    bare.mkdir(parents=True)
+    subprocess.run(
+        ["git", "-c", "init.defaultBranch=main", "init", str(bare)],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    # No origin remote: the manifest contract cannot be satisfied.
+    project = bare.resolve()
+    code, _, _ = _call(project, "bootstrap", {"canonical_project_path": str(project)})
+    assert code == 1
+    assert not (project / "project_descriptor.yaml").exists()
+    assert not (project / "repo_manifest.yaml").exists()
+    assert not (project / "gates.yaml").exists()
+    assert not (project / "ai_collab_team_policies.json").exists()

@@ -23,6 +23,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import time
 import venv
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
@@ -170,6 +171,176 @@ def _register(payload: Mapping[str, Any]) -> dict[str, Any]:
             ],
             "repo_manifest_digest": manifest_result["manifest_digest"],
             "adapter_capability_digest": canonical_json_sha256(descriptors),
+        }
+    }
+
+
+PRODUCT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_KEY_SANITIZE_RE = re.compile(r"[^a-z0-9-]+")
+
+
+def _bootstrap_project_key(root: Path) -> str:
+    candidate = PROJECT_KEY_SANITIZE_RE.sub("-", root.name.lower()).strip("-")
+    if not candidate or not candidate[0].isalpha():
+        candidate = f"project-{candidate}".strip("-")
+    candidate = candidate[:64].rstrip("-")
+    if descriptor_validator.PROJECT_KEY_RE.fullmatch(candidate) is None:
+        raise AdapterError("project name cannot become a project key")
+    return candidate
+
+
+def _bootstrap_repo_row(repo: Path, *, key: str, placement: str, path: str, order: int, after: list[str]) -> dict[str, Any] | None:
+    status, raw = _probe_git(repo, "config", "--get", "remote.origin.url")
+    remote = raw.decode().strip()
+    if status != 0 or not remote:
+        return None
+    if ".." in remote or not any(
+        pattern.fullmatch(remote) for pattern in manifest_validator.REMOTE_RES
+    ):
+        return None
+    branch_status, branch_raw = _probe_git(repo, "symbolic-ref", "--short", "HEAD")
+    branch = branch_raw.decode().strip() if branch_status == 0 else ""
+    if not branch or manifest_validator.BRANCH_RE.fullmatch(branch) is None:
+        branch = "main"
+    return {
+        "key": key,
+        "placement": placement,
+        "path": path,
+        "remote": remote,
+        "branch": branch,
+        "order": order,
+        "after": after,
+    }
+
+
+def _bootstrap(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Write valid draft declaration files for an undescribed project.
+
+    Cold start: a project that has never met the Harness has none of the
+    declaration files. This scans the canonical root (and its immediate
+    child Git repositories), writes drafts, and then validates them with the
+    same validators registration uses — a draft that would not register is
+    deleted again rather than left half-written. Files that already exist
+    are never touched.
+    """
+    if set(payload) != {"canonical_project_path"}:
+        raise AdapterError("bootstrap payload fields differ")
+    supplied = payload["canonical_project_path"]
+    if not isinstance(supplied, str) or not supplied:
+        raise AdapterError("canonical project path is invalid")
+    try:
+        root = Path(supplied).resolve(strict=True)
+    except OSError as exc:
+        raise AdapterError("canonical project path is unavailable") from exc
+    if root != ROOT or not root.is_dir():
+        raise AdapterError("canonical project root differs")
+
+    descriptor_path = root / descriptor_validator.DESCRIPTOR_RELATIVE_PATH
+    manifest_path = root / manifest_validator.MANIFEST_RELATIVE_PATH
+    if descriptor_path.exists() or manifest_path.exists():
+        return {
+            "bootstrap": {
+                "created": [],
+                "already_configured": True,
+                "project_key": None,
+            }
+        }
+    _run_git(root, "rev-parse", "--git-dir")
+    key = _bootstrap_project_key(root)
+    rows = [
+        _bootstrap_repo_row(
+            root, key=key, placement="project_root", path=".", order=0, after=[]
+        )
+    ]
+    if rows[0] is None:
+        raise AdapterError("project origin remote is missing or not canonical")
+    order = 10
+    for child in sorted(root.iterdir()):
+        if not child.is_dir() or child.is_symlink() or not (child / ".git").exists():
+            continue
+        if manifest_validator.PATH_PART_RE.fullmatch(child.name) is None:
+            continue
+        child_key = PROJECT_KEY_SANITIZE_RE.sub("-", child.name.lower()).strip("-")
+        if (
+            not child_key
+            or child_key == key
+            or manifest_validator.REPO_KEY_RE.fullmatch(child_key) is None
+        ):
+            continue
+        row = _bootstrap_repo_row(
+            child,
+            key=child_key,
+            placement="project_child",
+            path=child.name,
+            order=order,
+            after=[key],
+        )
+        if row is not None:
+            rows.append(row)
+            order += 10
+    date = time.strftime("%Y%m%d")
+    created: list[str] = []
+    try:
+        manifest_lines = ["schema_version: 1", f"project_key: {key}", "repos:"]
+        for row in rows:
+            manifest_lines += [
+                f"  - repo_key: {row['key']}",
+                f"    classification: required",
+                f"    placement: {row['placement']}",
+                f"    path: {row['path']}",
+                f"    remote: {row['remote']}",
+                f"    base_branch: {row['branch']}",
+                f"    provision_order: {row['order']}",
+                f"    provision_after: [{', '.join(row['after'])}]",
+                "    acceptance_layer: base",
+                "    smoke_policy: "
+                + ("required" if row["placement"] == "project_root" else "optional"),
+            ]
+        manifest_path.write_text("\n".join(manifest_lines) + "\n", encoding="utf-8")
+        created.append(manifest_validator.MANIFEST_RELATIVE_PATH)
+        descriptor_path.write_text(
+            "schema_version: 1\n"
+            f"project_key: {key}\n"
+            'product_contract_version: "1.0"\n'
+            f"workspace_adapter: {WORKSPACE_ADAPTER_ID}\n"
+            "repo_manifest: repo_manifest.yaml\n"
+            f"environment_adapter: {ENVIRONMENT_ADAPTER_ID}\n"
+            "gate_registry: gates.yaml\n"
+            "participant_driver_contract: 2\n"
+            "collaboration_policy_schema: 1\n",
+            encoding="utf-8",
+        )
+        created.append(descriptor_validator.DESCRIPTOR_RELATIVE_PATH)
+        gates_path = root / "gates.yaml"
+        if not gates_path.exists():
+            gates_path.write_text(
+                "schema_version: 1\n"
+                f"registry_id: ai-collab-scenario-harness-{key}-v1.0-{date}\n",
+                encoding="utf-8",
+            )
+            created.append("gates.yaml")
+        policies_path = root / "ai_collab_team_policies.json"
+        if not policies_path.exists():
+            shipped = PRODUCT_ROOT / "ai_collab_team_policies.json"
+            policies_path.write_text(
+                shipped.read_text(encoding="utf-8"), encoding="utf-8"
+            )
+            created.append("ai_collab_team_policies.json")
+        # The draft must be a registrable project, not merely plausible YAML.
+        descriptor_validator.validate_descriptor(repo_root=root)
+        manifest_validator.validate_manifest(repo_root=root)
+    except (AdapterError, OSError, ValueError) as exc:
+        for name in created:
+            try:
+                (root / name).unlink()
+            except OSError:
+                pass
+        raise AdapterError("bootstrap draft failed validation") from exc
+    return {
+        "bootstrap": {
+            "created": created,
+            "already_configured": False,
+            "project_key": key,
         }
     }
 
@@ -1496,6 +1667,8 @@ def _handle(request: Any) -> dict[str, Any]:
         raise AdapterError("adapter payload is invalid")
     if operation == "register":
         result = _register(payload)
+    elif operation == "bootstrap":
+        result = _bootstrap(payload)
     elif operation == "collaboration_templates":
         result = _collaboration_templates(payload)
     elif operation == "plan":
