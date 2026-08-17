@@ -4,6 +4,30 @@
 set -euo pipefail
 
 usage() {
+  # A Harness participant never touches the legacy mailbox, --from, or
+  # --wait; showing them here after a failed first send only teaches the
+  # Agent forbidden vocabulary. The participant sees exactly what works.
+  if [[ -n "${AI_COLLAB_HARNESS_CONTEXT:-}" ]]; then
+    cat <<'EOF'
+Usage: ai-ping <participant-id> [options] [<message words...>]
+
+Required:
+  <participant-id>     同 Scenario 的目标参与者（见你的 collaboration context）
+
+Options:
+  --message <text>     消息正文（与直接写在命令末尾等价）
+  --file <path>        从文件读消息正文（推荐：长内容/带代码块）
+  --kind <kind>        消息类型 (default: msg)
+  --reply-to <id>      回复某条收到的消息（保留其 delivery id）
+  --                   后续参数全部当成消息正文
+
+示例：
+  ai-ping reviewer --message "hello world"
+  ai-ping reviewer -- 你好，请审阅我刚推送的提交
+  ai-ping reviewer --kind review-request --file /tmp/req.md
+EOF
+    exit 1
+  fi
   cat <<'EOF'
 Usage: ai-ping <to> [options] [<message words...>]
 
@@ -12,6 +36,7 @@ Required:
 
 Options:
   --file <path>        从文件读消息正文（推荐：长内容/带代码块）
+  --message <text>     消息正文（与直接写在命令末尾等价）
   --kind <kind>        消息类型 (default: msg). e.g. review-request, review-response
   --reply-to <id>      这条是对某条消息的回复
   --from <role>        显式指定发送者（默认从当前 pane 自动检测）
@@ -56,6 +81,10 @@ MSG=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --file)      FILE="$2"; shift 2 ;;
+    # Agents guess --message on first contact more than any other spelling;
+    # refusing the obvious synonym costs every fresh participant one failed
+    # send, so it is accepted as an alias for the positional body.
+    --message)   MSG="${MSG:+$MSG }$2"; shift 2 ;;
     --kind)      KIND="$2"; shift 2 ;;
     --reply-to)  REPLY_TO="$2"; shift 2 ;;
     --from)      FROM="$2"; FROM_EXPLICIT=true; shift 2 ;;
@@ -78,6 +107,10 @@ validate_role() {
     exit 1
   fi
 }
+
+# Another first-contact guess: "--kind message". The registered default kind
+# is "msg"; the obvious long spelling means the same thing.
+[[ "$KIND" == "message" ]] && KIND="msg"
 
 validate_role "<to>" "$TO"
 if [[ -n "$FROM" ]]; then
