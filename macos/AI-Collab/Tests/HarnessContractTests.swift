@@ -12,6 +12,7 @@ final class HarnessContractTests: XCTestCase {
     func testGeneratedRegistryIncludesAppOperations() {
         XCTAssertEqual(HarnessContract.operationRegistryDigest.count, 64)
         XCTAssertEqual(HarnessContract.capabilities["project.register"], "project.manage")
+        XCTAssertEqual(HarnessContract.capabilities["project.unregister"], "project.manage")
         XCTAssertEqual(HarnessContract.capabilities["participant.list"], "participant.read")
         XCTAssertEqual(HarnessContract.capabilities["participant.recover"], "participant.manage")
         XCTAssertEqual(HarnessContract.capabilities["participant.replace"], "participant.manage")

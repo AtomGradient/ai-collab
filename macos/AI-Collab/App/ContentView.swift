@@ -7,6 +7,7 @@ private enum HighRiskIntent: Identifiable {
     case breakResource(ResourceLeaseRecord)
     case destroyScenario
     case forceDestroyScenario(ScenarioRecord)
+    case unregisterProject(ProjectRecord)
 
     var id: String {
         switch self {
@@ -18,6 +19,8 @@ private enum HighRiskIntent: Identifiable {
         case .destroyScenario: "scenario.destroy"
         case let .forceDestroyScenario(scenario):
             "scenario.force-destroy:\(scenario.id)"
+        case let .unregisterProject(project):
+            "project.unregister:\(project.id)"
         }
     }
 
@@ -29,6 +32,7 @@ private enum HighRiskIntent: Identifiable {
         case .breakResource: "Request stale resource release?"
         case .destroyScenario: "Request Scenario destruction?"
         case .forceDestroyScenario: "Force delete this Scenario?"
+        case .unregisterProject: "Unregister this project?"
         }
     }
 
@@ -46,6 +50,8 @@ private enum HighRiskIntent: Identifiable {
             "The Harness Host will independently verify the current target, fences, permissions, effect preview, and trusted single-use authorization."
         case let .forceDestroyScenario(scenario):
             "This permanently deletes Scenario \(scenario.id), its isolated Workspace and uncommitted Scenario WIP. Exact Harness-owned Agent windows, processes, and leases are force-cleaned first. The registered project source is never deleted; any unproven ownership or changed fence stops the operation."
+        case let .unregisterProject(project):
+            "This removes only the registration record for \(project.key). The Host refuses while the project still owns any Scenario, nothing on disk is touched, and the project can simply be registered again."
         }
     }
 }
@@ -107,6 +113,11 @@ struct ContentView: View {
                             .foregroundStyle(.secondary)
                     }
                     .tag(project.id)
+                    .contextMenu {
+                        Button("Unregister Project…", role: .destructive) {
+                            highRiskIntent = .unregisterProject(project)
+                        }
+                    }
                 }
             }
         }
@@ -980,6 +991,8 @@ struct ContentView: View {
             await model.destroyScenario()
         case let .forceDestroyScenario(scenario):
             await model.forceDestroyScenario(scenario)
+        case let .unregisterProject(project):
+            await model.unregisterProject(project)
         }
     }
 }

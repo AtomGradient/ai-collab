@@ -214,6 +214,35 @@ final class HarnessViewModel: ObservableObject {
         }
     }
 
+    func unregisterProject(_ project: ProjectRecord) async {
+        await performMutation(
+            activity: "Unregistering \(project.key)…",
+            scope: .project,
+            success: "Unregistered \(project.key)."
+        ) {
+            _ = try await self.client.call(
+                HarnessCall(
+                    operation: "project.unregister",
+                    target: ["scope": "host"],
+                    fence: ["operation_generation": 0],
+                    payload: ["project_instance_id": project.id]
+                )
+            )
+            if self.selectedProjectID == project.id {
+                self.selectedProjectID = nil
+                self.selectedScenarioID = nil
+                self.scenarios = []
+                self.participants = []
+                self.resources = []
+                self.preflight = nil
+                self.topology = nil
+                self.clearDestroyPreview()
+                self.clearCollaborationValues()
+            }
+            try await self.reloadProjects()
+        }
+    }
+
     func selectProject(_ id: String?) async {
         selectedProjectID = id
         selectedScenarioID = nil

@@ -26,6 +26,7 @@ APP_OPERATIONS = (
     "host.status",
     "project.register",
     "project.list",
+    "project.unregister",
     "scenario.create",
     "scenario.list",
     "scenario.open",

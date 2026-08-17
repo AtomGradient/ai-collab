@@ -11,6 +11,7 @@ enum HarnessContract {
         "host.status": "host.read",
         "project.register": "project.manage",
         "project.list": "project.read",
+        "project.unregister": "project.manage",
         "scenario.create": "scenario.manage",
         "scenario.list": "scenario.read",
         "scenario.open": "scenario.manage",
