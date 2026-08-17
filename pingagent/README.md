@@ -38,7 +38,12 @@
 ## 安装
 
 ```bash
-cd pingagent          # this directory, inside the ai-collab repo
+# 已经克隆了 ai-collab：这个目录就是 PingAgent，直接用
+cd pingagent
+
+# 或者单独安装（PingAgent 是公开仓库，无需 SSH key）：
+# git clone https://github.com/AtomGradient/PingAgent.git && cd PingAgent
+
 ./install.sh                  # 默认 symlink 到 ~/.local/bin/
 # 或 ./install.sh --copy      # 复制（不依赖 repo 路径）
 ```
