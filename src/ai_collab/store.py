@@ -2423,7 +2423,50 @@ class ScenarioStore:
             )
             state["state_revision"] += 1
             self._write_state(state)
+            self._remove_workspace_husk(record.get("workspace_binding_id"))
             return result
+
+    def _remove_workspace_husk(self, binding_id: Any) -> bool:
+        """Remove a destroyed Scenario's now-empty workspace directory.
+
+        The adapter has already proven the workspace bundle is absent; what
+        remains is only the container directory the Harness itself created.
+        Removal stays fail-closed: only the exact owned, non-symlink directory
+        resolved from the binding is removed, and only while it contains
+        nothing beyond Finder's ``.DS_Store`` metadata. Anything else means
+        the directory is not provably an empty husk and it is left in place
+        rather than disposed of. The durable destroy has already committed,
+        so a husk that cannot be removed never fails the operation.
+        """
+        if not isinstance(binding_id, str):
+            return False
+        try:
+            path = self.workspace_path(binding_id)
+        except StoreError:
+            return False
+        try:
+            details = path.lstat()
+        except OSError:
+            return False
+        if (
+            path.is_symlink()
+            or not stat.S_ISDIR(details.st_mode)
+            or details.st_uid != os.getuid()
+        ):
+            return False
+        try:
+            leftovers = [
+                entry for entry in path.iterdir() if entry.name != ".DS_Store"
+            ]
+            if leftovers:
+                return False
+            metadata = path / ".DS_Store"
+            if metadata.is_file() and not metadata.is_symlink():
+                metadata.unlink()
+            path.rmdir()
+        except OSError:
+            return False
+        return True
 
     def scenario_status(self, project_instance_id: str, scenario_id: str) -> dict[str, Any]:
         with self._lock:

@@ -635,6 +635,10 @@ def test_host_repair_is_conservative_and_destroy_unregisters_with_audit(
         )
         assert destroyed["unregistered"] is True
         assert not (workspace_path / "bundle").exists()
+        # The workspace container itself is removed too: after a committed
+        # destroy nothing of the Scenario remains on disk, not even the empty
+        # directory husk.
+        assert not workspace_path.exists()
         assert client.list_scenarios(project_instance_id="project") == {
             "scenarios": []
         }
@@ -1101,3 +1105,25 @@ def test_workspace_restart_fails_closed_when_pending_high_risk_fence_differs(
     assert binding["error_code"] == "workspace.repair-outcome-unknown"
     assert durable["requests"]["mismatch-repair"]["status"] == "failed"
     assert recovered.completed_request("mismatch-repair", "7" * 64) is None
+
+
+def test_workspace_husk_removal_is_fail_closed(tmp_path: Path) -> None:
+    """Only a provably empty workspace container is removed; Finder's
+    .DS_Store metadata does not count as content, anything else does."""
+    store = ScenarioStore(tmp_path / "state", workspace_root=tmp_path / "ws")
+
+    empty = store.workspace_path("workspace-husk-empty")
+    empty.mkdir(parents=True, mode=0o700)
+    (empty / ".DS_Store").write_bytes(b"finder metadata")
+    assert store._remove_workspace_husk("workspace-husk-empty") is True
+    assert not empty.exists()
+
+    occupied = store.workspace_path("workspace-husk-occupied")
+    occupied.mkdir(parents=True, mode=0o700)
+    (occupied / "real-content.txt").write_text("keep me\n", encoding="utf-8")
+    assert store._remove_workspace_husk("workspace-husk-occupied") is False
+    assert (occupied / "real-content.txt").is_file()
+
+    assert store._remove_workspace_husk("workspace-husk-absent") is False
+    assert store._remove_workspace_husk(None) is False
+    assert store._remove_workspace_husk("../escape") is False
