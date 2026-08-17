@@ -390,7 +390,7 @@ def validate_contract(
         raise PolicyDeliveryContractError("policy/delivery schema version is incompatible")
     if metadata["contract_id"] != "ai-collab-collaboration-policy-delivery-v1":
         raise PolicyDeliveryContractError("policy/delivery contract id is incompatible")
-    if metadata["product_contract_version"] != "3.2":
+    if metadata["product_contract_version"] != "1.0":
         raise PolicyDeliveryContractError("policy/delivery product version is incompatible")
     expected_dependencies = {
         "host_ipc_contract_id": "ai-collab-host-ipc-v1",

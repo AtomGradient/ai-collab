@@ -358,7 +358,7 @@
   "x-ai-collab": {
     "schema_version": 1,
     "contract_id": "ai-collab-collaboration-policy-delivery-v1",
-    "product_contract_version": "3.2",
+    "product_contract_version": "1.0",
     "dependencies": {
       "host_ipc_contract_id": "ai-collab-host-ipc-v1",
       "state_contract_id": "ai-collab-scenario-participant-state-v1",

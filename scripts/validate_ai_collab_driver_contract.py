@@ -475,7 +475,7 @@ def validate_contract(*, repo_root: Path) -> tuple[dict[str, Any], dict[str, Any
         raise DriverContractError("driver metadata schema version is incompatible")
     if metadata["contract_id"] != "ai-collab-participant-drivers-v2":
         raise DriverContractError("driver metadata contract id is incompatible")
-    if metadata["product_contract_version"] != "3.2":
+    if metadata["product_contract_version"] != "1.0":
         raise DriverContractError("driver product contract version is incompatible")
     if metadata["participant_driver_contract_version"] != 2:
         raise DriverContractError("participant driver version is incompatible")

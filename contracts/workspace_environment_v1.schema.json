@@ -534,7 +534,7 @@
   "x-ai-collab": {
     "schema_version": 1,
     "contract_id": "ai-collab-workspace-environment-v1",
-    "product_contract_version": "3.2",
+    "product_contract_version": "1.0",
     "dependencies": {
       "project_descriptor_schema_version": 1,
       "repo_manifest_schema_version": 1,

@@ -516,7 +516,7 @@ def validate_contract(*, repo_root: Path) -> tuple[dict[str, Any], dict[str, Any
         raise StateContractError("state metadata schema version is incompatible")
     if metadata["contract_id"] != "ai-collab-scenario-participant-state-v1":
         raise StateContractError("state metadata contract id is incompatible")
-    if metadata["product_contract_version"] != "3.2":
+    if metadata["product_contract_version"] != "1.0":
         raise StateContractError("state product contract version is incompatible")
     expected_driver = {
         "contract_id": "ai-collab-participant-drivers-v2",

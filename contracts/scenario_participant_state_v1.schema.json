@@ -373,7 +373,7 @@
   "x-ai-collab": {
     "schema_version": 1,
     "contract_id": "ai-collab-scenario-participant-state-v1",
-    "product_contract_version": "3.2",
+    "product_contract_version": "1.0",
     "driver_contract": {
       "contract_id": "ai-collab-participant-drivers-v2",
       "participant_driver_contract_version": 2,

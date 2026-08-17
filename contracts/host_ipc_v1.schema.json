@@ -466,7 +466,7 @@
   "x-ai-collab": {
     "schema_version": 1,
     "contract_id": "ai-collab-host-ipc-v1",
-    "product_contract_version": "3.2",
+    "product_contract_version": "1.0",
     "logical_transport": {
       "encoding": "typed-json-compatible-value-graph",
       "binding": "platform-plugin",

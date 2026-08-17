@@ -460,7 +460,7 @@
   "x-ai-collab": {
     "schema_version": 1,
     "contract_id": "ai-collab-permission-confirmation-v1",
-    "product_contract_version": "3.2",
+    "product_contract_version": "1.0",
     "root_artifacts": [
       "permission_confirmation_matrix",
       "permission_snapshot",
