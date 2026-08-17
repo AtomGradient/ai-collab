@@ -18,11 +18,11 @@ import validate_ai_collab_state_contract as state_validator
 
 VALIDATION_ID = "PHASE0-COLLABORATION-POLICY-DELIVERY-CONFORMANCE"
 CONTRACT_RELATIVE_PATH = (
-    "docs/ai-collab-harness/contracts/collaboration_policy_delivery_v1.schema.json"
+    "contracts/collaboration_policy_delivery_v1.schema.json"
 )
 STATE_CONTRACT_RELATIVE_PATH = state_validator.CONTRACT_RELATIVE_PATH
 IPC_CONTRACT_RELATIVE_PATH = (
-    "docs/ai-collab-harness/contracts/host_ipc_v1.schema.json"
+    "contracts/host_ipc_v1.schema.json"
 )
 MAX_CONTRACT_BYTES = 512 * 1024
 TOP_LEVEL_FIELDS = {"$schema", "$id", "title", "oneOf", "$defs", "x-ai-collab"}

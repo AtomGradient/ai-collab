@@ -17,7 +17,7 @@ from ai_collab_bootstrap_evidence import canonical_json_sha256, sha256_file
 
 VALIDATION_ID = "PHASE0-PARTICIPANT-DRIVER-CONTRACT-CONFORMANCE"
 CONTRACT_RELATIVE_PATH = (
-    "docs/ai-collab-harness/contracts/participant_drivers_v2.schema.json"
+    "contracts/participant_drivers_v2.schema.json"
 )
 MAX_CONTRACT_BYTES = 512 * 1024
 TOP_LEVEL_FIELDS = {"$schema", "$id", "title", "oneOf", "$defs", "x-ai-collab"}
