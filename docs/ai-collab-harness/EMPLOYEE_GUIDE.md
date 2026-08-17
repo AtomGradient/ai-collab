@@ -6,7 +6,7 @@
 >
 > 当前边界：内部签名 App、内嵌 Host、Codex/Claude 双 Agent 协作已经可用；Developer ID/notarized 广泛分发仍在 P2-A 发布工作中
 >
-> 来源：`user_decision`（2026-08-15，进入 P2-A 并编写员工使用文档/checklist）以及 `product_architecture.md`、`edgestudio_integration.md` 的 current contract
+> 来源：`user_decision`（2026-08-15，进入 P2-A 并编写员工使用文档/checklist）以及 `product_architecture.md` 与消费项目自己的集成文档的 current contract
 
 AI Collab 把一个长期任务管理成独立的 **Scenario**。每个 Scenario 有自己的 Workspace、Participant、协作策略、消息记录、进程和恢复状态。员工管理的是任务房间，不需要手工管理 Host、mailbox、generation、PID 或 vendor session ID。
 

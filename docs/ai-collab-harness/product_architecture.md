@@ -456,7 +456,7 @@ Gate registry 是集合、分类、producer、verifier params、依赖和 workfl
 - 每个 gate 必须恰好映射到一个 workflow phase；phase 和 reporting `group` 是不同 namespace；
 - registry 缺失、digest 不匹配、未知/重复 gate、悬空依赖、phase 未分配都 fail closed。
 
-Phase 0 machine-readable loader/projection contract 位于 [contracts/gate_registry_v2.schema.json](contracts/gate_registry_v2.schema.json)，共享实现只读加载 tracked [edgestudio_gates.yaml](edgestudio_gates.yaml)，输出 registry snapshot、status-free gate projection 与 workflow phase projection。fingerprint 的 `registry_digest` 仍是完整 YAML source bytes 的 SHA-256；canonical registry digest 只用于 semantic comparison，per-gate definition digest 只用于 projection identity，不能替代 receipt evidence identity。结构 projection 明确不观察 inventory、不读取 machine state，也不宣称 current pass/freshness；current-status/evidence engine 与一次性 fingerprint wiring 属于后续实施边界。
+Phase 0 machine-readable loader/projection contract 位于 [contracts/gate_registry_v2.schema.json](contracts/gate_registry_v2.schema.json)，共享实现只读加载消费项目自己 tracked 的 composed gate registry 文件，输出 registry snapshot、status-free gate projection 与 workflow phase projection。fingerprint 的 `registry_digest` 仍是完整 YAML source bytes 的 SHA-256；canonical registry digest 只用于 semantic comparison，per-gate definition digest 只用于 projection identity，不能替代 receipt evidence identity。结构 projection 明确不观察 inventory、不读取 machine state，也不宣称 current pass/freshness；current-status/evidence engine 与一次性 fingerprint wiring 属于后续实施边界。
 
 Evidence hygiene 来源于 `user_decision`（2026-08-10），是对 Phase -1 已采用的独立重算、source guard 与 mutation testing 实践的显式固化，不追溯否定此前已经闭环的 gate：
 
@@ -511,7 +511,7 @@ Phase 0 normalization debt 来源于 `evidence`（2026-08-10，fixed verifier、
 2. **P1 lifecycle/operations parity**：实现已批准但缺失的 replace/detach；补齐 App repair/force-stop/resource-break、preflight/permission/actionable error、generation/profile/model 可见性、focus/topology restore、progress/cancel 和额外 runtime profile；
 3. **P2 adoption/closeout**：在稳定产品流上更新 onboarding/员工文档与分发；修正受影响 gate，冻结最终 material，一次性重建 acceptance 与全部 required DoD current views；Developer ID/notarization、optional exact vendor resume 和 cross-machine 仍按各自授权边界处理。
 
-持续状态、代码域、surface parity、acceptance 和 invalidation trigger 由 [CAPABILITY_ALIGNMENT.md](CAPABILITY_ALIGNMENT.md) 跟踪；它是 current-state routing 表，不替代本文件的 normative contract 或 gate registry。
+持续状态、代码域、surface parity、acceptance 和 invalidation trigger 由消费项目自己的能力对齐文档跟踪；它是 current-state routing 表，不替代本文件的 normative contract 或 gate registry。
 
 P0-B fixed implementation（2026-08-14）已把 project-provided team/policy template discovery、current-generation plan/effect preview、digest-fenced explicit apply 与 policy generation drift 接入通用 Host/CLI，固定锚点为 edge-studio-dev `fdbb94cf8bfde07278c60531dae051e8fade563d`、EdgeStudio root code anchor `7edeb7970083b13565e7591997b2212d9ff84aea` 与 reviewed target `3148198054ce0af4a9d13405259ad42b92ab378b`。旧 policy/delivery 保持不可变，drift 只阻止新 send 并要求重做 plan；产品 core 不出现供应商名或固定双人/三人拓扑。Claude fixed-SHA review `20260814-134145-ni8mxf` 为 P0=0/P1=0/`can_commit_push`，P0-B 已终止式闭合；App collaboration control plane随后按 P0-D完成，template tamper测试 follow-up进入 P0-E candidate。
 
@@ -557,7 +557,7 @@ Phase 4 按已经批准的架构顺序拆为四个工作切片：P4-A safe close
 
 同一裁决还要求把 Harness 运行能力与参与者产出的工作结论分层：limited dogfood 的运行成功由 exact-owned 窗口启动、模型正常回应、typed delivery/consumption、隔离产物写入、WIP/Git 不变量和精确关闭共同证明；参与者 review 的 P0/P1/verdict 是该轮工作的结构化结果，必须原样保留，但不能反向把已经成功的运行机制改写成失败。若 review 不建议继续，其影响是后续工作决策或产物准入，不是窗口、投递或生命周期失败。对已经完成 owner marker/session/process-chain 校验的同一 exact iTerm binding，单次 RPC 瞬态失败允许一次 bounded close retry；动态 `jobPid` 仍须按 §6 证明为绑定 root 的同 PGID live descendant，不得改用窗口差集、标题、位置或供应商文本猜目标。
 
-Phase 5 首个 fixed-vector candidate（2026-08-12）已按上述运行标准通过：两个真实 TUI participant 均完成启动、正常回应、双向 typed consumption、隔离产物写入与 exact requested close；两条 descendant process chain 均消失，hard invariants 为 0，未使用 auto force-stop/repair。该 machine-local 结果明确不是 formal gate receipt，也不承载效率、迁移或产品完成声明。它当时提出的 Gate 0 配对人工基线续接点，已被下述同日用户裁决 supersede；除非暴露真实产品/集成缺陷，不再以增加 candidate runner 约束代替 Phase 5 进展。fixed SHA、result digest 与 reviews 见 [IMPLEMENTATION_PROGRESS.md](IMPLEMENTATION_PROGRESS.md)。
+Phase 5 首个 fixed-vector candidate（2026-08-12）已按上述运行标准通过：两个真实 TUI participant 均完成启动、正常回应、双向 typed consumption、隔离产物写入与 exact requested close；两条 descendant process chain 均消失，hard invariants 为 0，未使用 auto force-stop/repair。该 machine-local 结果明确不是 formal gate receipt，也不承载效率、迁移或产品完成声明。它当时提出的 Gate 0 配对人工基线续接点，已被下述同日用户裁决 supersede；除非暴露真实产品/集成缺陷，不再以增加 candidate runner 约束代替 Phase 5 进展。fixed SHA、result digest 与 reviews 见消费项目自己的实施账本。
 
 Phase 5 第二个同项目 fixed-vector candidate（2026-08-12）进一步验证了既有通用 contract，而没有新增 gate 语义：Scenario 先以两名 participant 进入 `running`，再动态加入并启动第三名 participant；三段真实 typed delivery/consumption 与 hash-linked 隔离产物均完成。为兑现 exact ownership 的关闭证据，integration driver 在关闭前保存已验证的 foreground descendant PID，并在 close 后分别确认 launch-root 与该 foreground PID 消失；这不把动态 `jobPid`、供应商 session 或产品名升级为 Participant identity。三名 participant 均 clean stopped，hard invariants 为 0，未使用 force-stop/repair。该结果仍为 machine-local、non-formal candidate，工作内容语义由参与者 review 而非 runner 自行裁决。
 

@@ -39,8 +39,7 @@
 ## Install
 
 ```bash
-git clone git@github.com:AtomGradient/PingAgent.git
-cd PingAgent
+cd pingagent          # this directory, inside the ai-collab repo
 ./install.sh                  # symlink into ~/.local/bin/ (default)
 # or ./install.sh --copy      # copy instead (independent of repo path)
 ```
