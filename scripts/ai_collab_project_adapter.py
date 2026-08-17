@@ -1,0 +1,1528 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 AtomGradient
+# 版权所有 (c) 2026 质子梯度（北京）科技有限公司
+
+"""Generic Workspace/Environment adapter for the Harness Host.
+
+This adapter serves any project that provides three files at its canonical
+root: ``project_descriptor.yaml``, ``repo_manifest.yaml``, and
+``ai_collab_team_policies.json``. Project identity, repository topology,
+provisioning order, and Scenario environment bindings all come from those
+files; nothing project-specific lives in this code.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import secrets
+import shutil
+import stat
+import subprocess
+import sys
+import venv
+from pathlib import Path, PurePosixPath
+from typing import Any, Mapping, Sequence
+
+from ai_collab_project_support import canonical_json_sha256, sha256_file
+import ai_collab_project_descriptor as descriptor_validator
+import ai_collab_repo_manifest as manifest_validator
+
+
+ROOT = Path(
+    os.environ.get("AI_COLLAB_PROJECT_ROOT", Path(__file__).resolve().parents[1])
+).resolve()
+COLLABORATION_TEMPLATE_PATH = ROOT / "ai_collab_team_policies.json"
+ADAPTER_ID = "ai-collab-project-adapter-v1"
+WORKSPACE_ADAPTER_ID = "ai-collab-workspace-v1"
+ENVIRONMENT_ADAPTER_ID = "ai-collab-environment-v1"
+IMPORT_NAME_RE = manifest_validator.IMPORT_NAME_RE
+PLAN_PAYLOAD_SCHEMA = {
+    "type": "object",
+    "properties": {"environment_mode": {"const": "minimal-editable"}},
+    "additionalProperties": False,
+}
+PRIVATE_WORKSPACE_FORMAT = {
+    "version": 1,
+    "layout": "bundle/<canonical project directory> plus bundle siblings",
+    "publish": "owned staging rename",
+}
+PRIVATE_ENVIRONMENT_FORMAT = {
+    "version": 1,
+    "kind": "python venv with scenario-local source path bindings",
+}
+ZERO_SHA1 = "0" * 40
+SAFE_REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$")
+SAFE_OPERATION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+class AdapterError(ValueError):
+    pass
+
+
+def _canonical_bytes(value: Any) -> bytes:
+    return json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+
+
+def _run_git(repo: Path, *arguments: str, input_bytes: bytes | None = None) -> bytes:
+    completed = subprocess.run(
+        ["git", "-C", str(repo), *arguments],
+        input=input_bytes,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise AdapterError("Git operation failed")
+    return completed.stdout
+
+
+def _probe_git(repo: Path, *arguments: str) -> tuple[int, bytes]:
+    completed = subprocess.run(
+        ["git", "-C", str(repo), *arguments],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    return completed.returncode, completed.stdout
+
+
+def _descriptor(kind: str, adapter_id: str) -> dict[str, Any]:
+    return {
+        "adapter_contract_version": 1,
+        "adapter": {
+            "adapter_kind": kind,
+            "adapter_id": adapter_id,
+            "contract_version": 1,
+        },
+        "operations": ["plan", "provision", "status", "repair", "destroy"],
+        "project_payload_schema_digest": canonical_json_sha256(PLAN_PAYLOAD_SCHEMA),
+        "private_binding_format_digest": canonical_json_sha256(
+            PRIVATE_WORKSPACE_FORMAT if kind == "workspace" else PRIVATE_ENVIRONMENT_FORMAT
+        ),
+        "supports_resume": True,
+        "supports_repair": True,
+        "supports_destroy": True,
+    }
+
+
+def _descriptors() -> list[dict[str, Any]]:
+    return [
+        _descriptor("workspace", WORKSPACE_ADAPTER_ID),
+        _descriptor("environment", ENVIRONMENT_ADAPTER_ID),
+    ]
+
+
+def _project_inputs() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+    descriptor_result = descriptor_validator.validate_descriptor(repo_root=ROOT)
+    manifest_result = manifest_validator.validate_manifest(repo_root=ROOT)
+    descriptor = descriptor_validator.parse_descriptor(
+        (ROOT / descriptor_validator.DESCRIPTOR_RELATIVE_PATH).read_text(encoding="utf-8")
+    )
+    manifest = manifest_validator._parse_manifest(  # noqa: SLF001
+        (ROOT / manifest_validator.MANIFEST_RELATIVE_PATH).read_text(encoding="utf-8")
+    )
+    # The two hard project pins of the historical validators are gone, so the
+    # only thing tying descriptor and manifest to the same project is this
+    # explicit cross-check.
+    if descriptor["project_key"] != manifest["project_key"]:
+        raise AdapterError("descriptor and manifest project keys differ")
+    return descriptor, descriptor_result, manifest, manifest_result
+
+
+def _register(payload: Mapping[str, Any]) -> dict[str, Any]:
+    if set(payload) != {"canonical_project_path"}:
+        raise AdapterError("register payload fields differ")
+    supplied = payload["canonical_project_path"]
+    if not isinstance(supplied, str) or not supplied:
+        raise AdapterError("canonical project path is invalid")
+    try:
+        project_root = Path(supplied).resolve(strict=True)
+    except OSError as exc:
+        raise AdapterError("canonical project path is unavailable") from exc
+    if project_root != ROOT or not project_root.is_dir():
+        raise AdapterError("canonical project root differs")
+    descriptor, descriptor_result, _, manifest_result = _project_inputs()
+    if (
+        descriptor["workspace_adapter"] != WORKSPACE_ADAPTER_ID
+        or descriptor["environment_adapter"] != ENVIRONMENT_ADAPTER_ID
+    ):
+        raise AdapterError("descriptor names a different adapter implementation")
+    descriptors = _descriptors()
+    return {
+        "project": {
+            "project_key": descriptor["project_key"],
+            "project_binding_digest": descriptor_result["descriptor_digest"],
+            "product_contract_version": descriptor["product_contract_version"],
+            "workspace_adapter_id": descriptor["workspace_adapter"],
+            "environment_adapter_id": descriptor["environment_adapter"],
+            "participant_driver_contract": descriptor[
+                "participant_driver_contract"
+            ],
+            "collaboration_policy_schema": descriptor[
+                "collaboration_policy_schema"
+            ],
+            "repo_manifest_digest": manifest_result["manifest_digest"],
+            "adapter_capability_digest": canonical_json_sha256(descriptors),
+        }
+    }
+
+
+def _collaboration_templates(payload: Mapping[str, Any]) -> dict[str, Any]:
+    if payload:
+        raise AdapterError("collaboration template payload fields differ")
+    path = COLLABORATION_TEMPLATE_PATH
+    if path.is_symlink() or not path.is_file() or path.stat().st_uid != os.getuid():
+        raise AdapterError("collaboration template registry is unavailable")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise AdapterError("collaboration template registry is invalid") from exc
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"schema_version", "templates"}
+        or value["schema_version"] != 1
+        or not isinstance(value["templates"], list)
+        or not value["templates"]
+        or any(not isinstance(item, dict) for item in value["templates"])
+    ):
+        raise AdapterError("collaboration template registry differs")
+    return {"templates": value["templates"]}
+
+
+def _source_path(row: Mapping[str, Any]) -> Path:
+    placement = row["placement"]
+    logical_path = Path(row["path"])
+    if logical_path.is_absolute():
+        raise AdapterError("declared source path is not relative")
+    if placement == "project_root":
+        path = ROOT
+        expected_base = ROOT
+    elif placement == "project_child":
+        path = ROOT / logical_path
+        expected_base = ROOT
+    elif placement == "bundle_sibling":
+        path = ROOT.parent / logical_path
+        expected_base = ROOT.parent
+    else:
+        raise AdapterError("declared source placement is unavailable")
+    current = expected_base
+    if placement != "project_root":
+        for part in logical_path.parts:
+            current /= part
+            if current.is_symlink():
+                raise AdapterError("declared source path traverses a symlink")
+    resolved = path.resolve(strict=True)
+    if not resolved.is_dir():
+        raise AdapterError("declared source repository is unavailable")
+    if placement == "project_root" and resolved != ROOT:
+        raise AdapterError("declared project root differs")
+    if placement == "project_child" and not resolved.is_relative_to(ROOT):
+        raise AdapterError("declared project child escapes project root")
+    if placement == "bundle_sibling" and (
+        not resolved.is_relative_to(ROOT.parent) or resolved.is_relative_to(ROOT)
+    ):
+        raise AdapterError("declared bundle sibling is misplaced")
+    _run_git(resolved, "rev-parse", "--git-dir")
+    return resolved
+
+
+def _selected_rows(
+    manifest: Mapping[str, Any], requested: Sequence[str]
+) -> list[dict[str, Any]]:
+    """Resolve the component rows a workspace plan provisions.
+
+    An empty ``requested`` selects the full managed workspace: every manifest
+    row whose classification is not ``unmanaged``. A non-empty ``requested``
+    keeps the narrower historical semantics, where the required rows form a
+    floor and the request is additive. Both forms are then closed transitively
+    over ``provision_after`` so a plan never omits a declared prerequisite.
+    """
+    rows = {row["repo_key"]: row for row in manifest["repos"]}
+    if requested:
+        selected = {
+            row["repo_key"]
+            for row in manifest["repos"]
+            if row["classification"] == "required"
+        }
+        selected.update(requested)
+    else:
+        selected = {
+            row["repo_key"]
+            for row in manifest["repos"]
+            if row["classification"] != "unmanaged"
+        }
+    while True:
+        before = set(selected)
+        for repo_key in tuple(selected):
+            row = rows.get(repo_key)
+            if row is None or row["classification"] == "unmanaged":
+                raise AdapterError("requested component is unmanaged or undeclared")
+            selected.update(row["provision_after"])
+        if selected == before:
+            break
+    result = [row for row in manifest["repos"] if row["repo_key"] in selected]
+    if not result:
+        raise AdapterError("workspace plan has no managed components")
+    return result
+
+
+def _git_identity(path: Path, row: Mapping[str, Any]) -> dict[str, Any]:
+    head = _run_git(path, "rev-parse", "HEAD").decode().strip()
+    object_format = _run_git(path, "rev-parse", "--show-object-format").decode().strip()
+    if object_format not in {"sha1", "sha256"}:
+        raise AdapterError("canonical source object format is unsupported")
+    _run_git(path, "cat-file", "-e", f"{head}^{{commit}}")
+    status_bytes = _run_git(path, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+    # The raw configured value, not `remote get-url`: get-url applies the
+    # machine's url.<base>.insteadOf rewrites, so on a machine with such a
+    # rule the manifest's declared remote would never match even though the
+    # repository is configured exactly as declared.
+    origin = _run_git(path, "config", "--get", "remote.origin.url").decode().strip()
+    if origin != row["remote"]:
+        raise AdapterError("canonical source origin differs from manifest")
+    if _run_git(path, "rev-parse", "--is-shallow-repository").decode().strip() != "false":
+        raise AdapterError("canonical source is shallow")
+    config_status, promisor_config = _probe_git(
+        path,
+        "config",
+        "--get-regexp",
+        r"^(extensions\.partialClone|remote\..*\.promisor)$",
+    )
+    if config_status not in {0, 1}:
+        raise AdapterError("canonical source promisor configuration is unreadable")
+    if config_status == 0 or promisor_config.strip():
+        raise AdapterError("canonical source uses partial-clone or promisor storage")
+    common_dir_raw = _run_git(path, "rev-parse", "--git-common-dir").decode().strip()
+    common_dir = Path(common_dir_raw)
+    if not common_dir.is_absolute():
+        common_dir = path / common_dir
+    common_dir = common_dir.resolve(strict=True)
+    alternates = common_dir / "objects" / "info" / "alternates"
+    if alternates.exists() or alternates.is_symlink():
+        raise AdapterError("canonical source uses alternate object storage")
+    return {
+        "head": head,
+        "object_format": object_format,
+        "status_digest": hashlib.sha256(status_bytes).hexdigest(),
+        "origin_digest": hashlib.sha256(origin.encode("utf-8")).hexdigest(),
+    }
+
+
+def _source_wip_digest(rows: Sequence[Mapping[str, Any]]) -> str:
+    return canonical_json_sha256(
+        [
+            {"component_id": row["repo_key"], **_git_identity(_source_path(row), row)}
+            for row in rows
+        ]
+    )
+
+
+def _estimated_git_bytes(path: Path) -> int:
+    values: dict[str, int] = {}
+    for line in _run_git(path, "count-objects", "-v").decode().splitlines():
+        if ": " not in line:
+            continue
+        key, raw = line.split(": ", 1)
+        if raw.isdigit():
+            values[key] = int(raw)
+    return 1024 * (values.get("size", 0) + values.get("size-pack", 0))
+
+
+def _safe_target_ref(scenario_id: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", scenario_id).strip("-.") or "scenario"
+    digest = hashlib.sha256(scenario_id.encode("utf-8")).hexdigest()[:10]
+    value = f"ai-collab/{slug[:80]}-{digest}"
+    if SAFE_REF_RE.fullmatch(value) is None:
+        raise AdapterError("scenario ref cannot be represented safely")
+    return value
+
+
+def _environment_spec(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    lock_rows = [row for row in rows if "dependency_lock" in row]
+    if len(lock_rows) > 1:
+        raise AdapterError("multiple dependency lock declarations are unsupported")
+    lock_digest = None
+    if lock_rows:
+        row = lock_rows[0]
+        relative = PurePosixPath(row["dependency_lock"])
+        lock_path = _source_path(row).joinpath(*relative.parts)
+        if lock_path.is_file():
+            lock_digest = sha256_file(lock_path)
+    source_bindings = [
+        {
+            "component_id": row["repo_key"],
+            "revision": _git_identity(_source_path(row), row)["head"],
+        }
+        for row in rows
+    ]
+    spec = {
+        "environment_kind": "environment.python-venv",
+        "python_implementation": sys.implementation.name,
+        "python_version": list(sys.version_info[:3]),
+        "install_mode": "scenario-source-paths-no-shared-site-packages",
+    }
+    return {
+        "spec": spec,
+        "dependency_lock_digest": lock_digest,
+        "source_bindings_digest": canonical_json_sha256(source_bindings),
+    }
+
+
+def _plan(payload: Mapping[str, Any]) -> dict[str, Any]:
+    expected = {
+        "operation_id",
+        "scenario",
+        "scenario_state_revision",
+        "workspace_id",
+        "requested_component_ids",
+        "project_payload",
+    }
+    if set(payload) != expected:
+        raise AdapterError("plan payload fields differ")
+    project_payload = payload["project_payload"]
+    if not isinstance(project_payload, dict) or set(project_payload) - {"environment_mode"}:
+        raise AdapterError("project payload fields differ")
+    if project_payload.get("environment_mode", "minimal-editable") != "minimal-editable":
+        raise AdapterError("environment mode is unsupported")
+    descriptor, descriptor_result, manifest, manifest_result = _project_inputs()
+    requested = payload["requested_component_ids"]
+    if not isinstance(requested, list) or any(not isinstance(item, str) for item in requested):
+        raise AdapterError("requested component list is invalid")
+    rows = _selected_rows(manifest, requested)
+    scenario = payload["scenario"]
+    target_ref = _safe_target_ref(scenario["scenario_id"])
+    components: list[dict[str, Any]] = []
+    for row in rows:
+        source = _source_path(row)
+        identity = _git_identity(source, row)
+        revision_kind = f"scm.git-{identity['object_format']}"
+        component = {
+            "component_id": row["repo_key"],
+            "component_kind": "scm.git-repository",
+            "classification": row["classification"],
+            "placement": row["placement"],
+            "logical_path": row["path"],
+            "provision_order": row["provision_order"],
+            "dependency_component_ids": list(row["provision_after"]),
+            "source_identity_digest": canonical_json_sha256(
+                {"remote": row["remote"], "base_branch": row["base_branch"]}
+            ),
+            "revision_kind": revision_kind,
+            "planned_revision": identity["head"],
+            "target_ref": target_ref,
+            "materialization_mode": "workspace.no-local-clone",
+            "source_mutation_allowed": False,
+            "isolated_writable": True,
+            "shared_mutable_storage": False,
+            "adapter_plan_digest": "",
+            "estimated_bytes": _estimated_git_bytes(source),
+        }
+        component["adapter_plan_digest"] = canonical_json_sha256(
+            {
+                "adapter": WORKSPACE_ADAPTER_ID,
+                "component_id": component["component_id"],
+                "planned_revision": component["planned_revision"],
+                "target_ref": component["target_ref"],
+            }
+        )
+        components.append(component)
+    environment_details = _environment_spec(rows)
+    environment_id = f"environment:{str(payload['operation_id']).removeprefix('wsop-')}"
+    environment = {
+        "environment_id": environment_id,
+        "environment_kind": environment_details["spec"]["environment_kind"],
+        "environment_spec_digest": canonical_json_sha256(environment_details["spec"]),
+        "dependency_lock_digest": environment_details["dependency_lock_digest"],
+        "source_bindings_digest": environment_details["source_bindings_digest"],
+        "writable_scope": "scenario",
+        "shared_mutable_dependencies": False,
+        "immutable_cache_reuse": True,
+        "adapter_plan_digest": canonical_json_sha256(
+            {"adapter": ENVIRONMENT_ADAPTER_ID, **environment_details["spec"]}
+        ),
+        "estimated_bytes": 8 * 1024 * 1024,
+    }
+    plan = {
+        "plan_contract_version": 1,
+        "plan_id": f"plan:{str(payload['operation_id']).removeprefix('wsop-')}",
+        "plan_generation": 1,
+        "operation_id": payload["operation_id"],
+        "scenario": scenario,
+        "project_key": descriptor["project_key"],
+        "project_descriptor_digest": descriptor_result["descriptor_digest"],
+        "repo_manifest_digest": manifest_result["manifest_digest"],
+        "workspace_adapter": _descriptors()[0]["adapter"],
+        "environment_adapter": _descriptors()[1]["adapter"],
+        "requested_component_ids": [item["component_id"] for item in components],
+        "components": components,
+        "environment": environment,
+        "source_wip_snapshot_digest": _source_wip_digest(rows),
+        "total_estimated_bytes": sum(item["estimated_bytes"] for item in components)
+        + environment["estimated_bytes"],
+        "project_payload_digest": canonical_json_sha256(project_payload),
+    }
+    return {"descriptors": _descriptors(), "plan": plan}
+
+
+def _target_path(staging: Path, component: Mapping[str, Any]) -> Path:
+    placement = component["placement"]
+    logical = component["logical_path"]
+    if placement == "project_root":
+        return staging / ROOT.name
+    if placement == "project_child":
+        return staging / ROOT.name / logical
+    return staging / logical
+
+
+def _guard_sources(remote: str, target_ref: str) -> tuple[str, str]:
+    provider = f'''#!/usr/bin/env python3
+import sys
+
+payload = sys.stdin.buffer.read()
+for raw in payload.splitlines():
+    fields = raw.decode("utf-8").split()
+    if len(fields) != 4:
+        raise SystemExit(1)
+    local_ref, local_sha, remote_ref, _remote_sha = fields
+    if local_ref != "refs/heads/{target_ref}" or remote_ref != "refs/heads/{target_ref}":
+        raise SystemExit(1)
+    if set(local_sha) == {{"0"}} or remote_ref in {{"refs/heads/main", "refs/heads/master"}}:
+        raise SystemExit(1)
+'''
+    dispatcher = f'''#!/usr/bin/env python3
+import subprocess
+import sys
+from pathlib import Path
+
+payload = sys.stdin.buffer.read()
+if len(sys.argv) != 3 or sys.argv[1] != "origin" or sys.argv[2] != {remote!r}:
+    raise SystemExit(1)
+for raw in payload.splitlines():
+    fields = raw.decode("utf-8").split()
+    if len(fields) != 4:
+        raise SystemExit(1)
+    local_ref, local_sha, remote_ref, remote_sha = fields
+    if local_ref != "refs/heads/{target_ref}" or remote_ref != "refs/heads/{target_ref}":
+        raise SystemExit(1)
+    if set(local_sha) == {{"0"}} or remote_ref.startswith("refs/tags/"):
+        raise SystemExit(1)
+    if set(remote_sha) != {{"0"}}:
+        check = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", remote_sha, local_sha],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        if check.returncode != 0:
+            raise SystemExit(1)
+provider = Path(__file__).with_name("ai-collab-provider-pre-push")
+result = subprocess.run([str(provider)], input=payload, check=False)
+raise SystemExit(result.returncode)
+'''
+    return dispatcher, provider
+
+
+def _install_guard(repo: Path, remote: str, target_ref: str) -> str:
+    git_dir_raw = _run_git(repo, "rev-parse", "--git-dir").decode().strip()
+    git_dir = (repo / git_dir_raw).resolve(strict=True)
+    if not git_dir.is_relative_to(repo.resolve()):
+        raise AdapterError("scenario Git directory escapes its repository")
+    hooks = git_dir / "hooks"
+    hooks.mkdir(mode=0o700, exist_ok=True)
+    dispatcher, provider = _guard_sources(remote, target_ref)
+    values = {
+        hooks / "pre-push": dispatcher,
+        hooks / "ai-collab-provider-pre-push": provider,
+    }
+    for path, text in values.items():
+        path.write_text(text, encoding="utf-8")
+        os.chmod(path, 0o700)
+    hooks_path = subprocess.run(
+        ["git", "-C", str(repo), "config", "--get", "core.hooksPath"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if hooks_path.returncode not in {0, 1} or hooks_path.stdout.strip():
+        raise AdapterError("scenario clone unexpectedly configures core.hooksPath")
+    return canonical_json_sha256(
+        {"dispatcher": dispatcher, "provider": provider, "remote": remote, "target_ref": target_ref}
+    )
+
+
+def _component_content(repo: Path) -> str:
+    head = _run_git(repo, "rev-parse", "HEAD").decode().strip()
+    tree = _run_git(repo, "rev-parse", "HEAD^{tree}").decode().strip()
+    status = _run_git(repo, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+    return canonical_json_sha256(
+        {"head": head, "tree": tree, "status_digest": hashlib.sha256(status).hexdigest()}
+    )
+
+
+def _materialize_components(
+    staging: Path,
+    plan: Mapping[str, Any],
+    rows: Mapping[str, Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    receipts: list[dict[str, Any]] = []
+    for component in plan["components"]:
+        row = rows[component["component_id"]]
+        source = _source_path(row)
+        target = _target_path(staging, component)
+        target.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        completed = subprocess.run(
+            [
+                "git",
+                "clone",
+                "--no-local",
+                "--no-checkout",
+                "--origin",
+                "canonical-source",
+                str(source),
+                str(target),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise AdapterError("no-local clone failed")
+        revision = component["planned_revision"]
+        _run_git(target, "cat-file", "-e", f"{revision}^{{commit}}")
+        _run_git(target, "switch", "--create", component["target_ref"], revision)
+        _run_git(target, "remote", "remove", "canonical-source")
+        _run_git(target, "remote", "add", "origin", row["remote"])
+        if _run_git(target, "remote").decode().splitlines() != ["origin"]:
+            raise AdapterError("scenario remote set differs")
+        configured = _run_git(
+            target, "config", "--get", "remote.origin.url"
+        ).decode().strip()
+        if configured != row["remote"]:
+            raise AdapterError("scenario origin differs")
+        if _run_git(target, "rev-parse", "HEAD").decode().strip() != revision:
+            raise AdapterError("scenario exact revision differs")
+        guard_digest = _install_guard(target, row["remote"], component["target_ref"])
+        if _run_git(target, "status", "--porcelain=v1", "-z"):
+            raise AdapterError("scenario clone is not clean")
+        content_digest = _component_content(target)
+        binding_digest = canonical_json_sha256(
+            {
+                "component_id": component["component_id"],
+                "revision": revision,
+                "target_ref": component["target_ref"],
+                "guard_digest": guard_digest,
+            }
+        )
+        receipts.append(
+            {
+                "component_id": component["component_id"],
+                "component_kind": component["component_kind"],
+                "placement": component["placement"],
+                "logical_path": component["logical_path"],
+                "source_identity_digest": component["source_identity_digest"],
+                "revision_kind": component["revision_kind"],
+                "planned_revision": revision,
+                "realized_revision": revision,
+                "target_ref": component["target_ref"],
+                "component_binding_digest": binding_digest,
+                "content_digest": content_digest,
+                "guard_digest": guard_digest,
+                "isolated_writable": True,
+                "shared_mutable_storage": False,
+                "clean_at_provision": True,
+            }
+        )
+    return receipts
+
+
+def _directory_bytes(path: Path) -> int:
+    total = 0
+    for root, directories, files in os.walk(path, followlinks=False):
+        for name in directories + files:
+            candidate = Path(root) / name
+            try:
+                if not candidate.is_symlink():
+                    total += candidate.stat().st_size
+            except OSError:
+                continue
+    return total
+
+
+def _environment_content(environment: Path) -> str:
+    marker = environment / ".ai-collab-environment.json"
+    if not marker.is_file():
+        raise AdapterError("environment marker is unavailable")
+    python = environment / "bin" / "python"
+    if not python.exists():
+        raise AdapterError("environment interpreter is unavailable")
+    try:
+        marker_value = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise AdapterError("environment marker is invalid") from exc
+    if (
+        not isinstance(marker_value, dict)
+        or set(marker_value)
+        != {
+            "schema_version",
+            "environment_id",
+            "source_bindings",
+            "source_bindings_digest",
+        }
+        or marker_value["schema_version"] != 1
+        or not isinstance(marker_value["source_bindings"], list)
+    ):
+        raise AdapterError("environment marker fields differ")
+    import_names: list[str] = []
+    for binding in marker_value["source_bindings"]:
+        if (
+            not isinstance(binding, dict)
+            or set(binding) != {"component_id", "python_import_name"}
+            or not isinstance(binding["component_id"], str)
+            or not isinstance(binding["python_import_name"], str)
+            or IMPORT_NAME_RE.fullmatch(binding["python_import_name"]) is None
+        ):
+            raise AdapterError("environment source bindings differ")
+        import_names.append(binding["python_import_name"])
+    import_probe = (
+        "import importlib\n"
+        + "".join(f"importlib.import_module({name!r})\n" for name in import_names)
+        + "print('ok')"
+    )
+    # -B keeps the probe observational: without it the imports write
+    # __pycache__ bytecode into the just-provisioned workspace sources, which
+    # immediately shows up as scenario WIP that nobody created.
+    completed = subprocess.run(
+        [str(python), "-B", "-c", import_probe],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if completed.returncode != 0 or completed.stdout.strip() != b"ok":
+        raise AdapterError("scenario source import verification failed")
+    return canonical_json_sha256(
+        {
+            "marker_digest": sha256_file(marker),
+            "python_version": subprocess.check_output(
+                [str(python), "-B", "-c", "import platform; print(platform.python_version())"]
+            ).decode().strip(),
+        }
+    )
+
+
+def _materialize_environment(
+    staging: Path,
+    plan: Mapping[str, Any],
+    component_receipts: Sequence[Mapping[str, Any]],
+    rows: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    environment = staging / ".venv"
+    venv.EnvBuilder(with_pip=False, clear=False, symlinks=True).create(environment)
+    python = environment / "bin" / "python"
+    purelib = subprocess.check_output(
+        [str(python), "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"]
+    ).decode().strip()
+    purelib_path = Path(purelib).resolve(strict=True)
+    if not purelib_path.is_relative_to(environment.resolve()):
+        raise AdapterError("environment site-packages escapes Scenario")
+    bindings: list[dict[str, str]] = []
+    source_paths: list[Path] = []
+    for component in plan["components"]:
+        row = rows.get(component["component_id"])
+        if row is None or "python_import_name" not in row:
+            continue
+        declared = row["python_source_path"]
+        try:
+            target = _target_path(staging, component).resolve(strict=True)
+            if declared == ".":
+                source = target
+            else:
+                source = target.joinpath(*PurePosixPath(declared).parts).resolve(
+                    strict=True
+                )
+        except OSError as exc:
+            raise AdapterError("environment source binding is unavailable") from exc
+        if not source.is_dir() or not source.is_relative_to(staging.resolve()):
+            raise AdapterError("environment source binding escapes Scenario")
+        bindings.append(
+            {
+                "component_id": component["component_id"],
+                "python_import_name": row["python_import_name"],
+            }
+        )
+        source_paths.append(source)
+    if source_paths:
+        binding_file = purelib_path / "ai_collab_scenario_sources.pth"
+        # The complete staging tree is atomically renamed by the Host.  A relative
+        # .pth entry preserves the binding across that rename; an absolute staging
+        # path would become stale immediately after successful publication.
+        binding_file.write_text(
+            "".join(
+                os.path.relpath(source, start=purelib_path) + "\n"
+                for source in source_paths
+            ),
+            encoding="utf-8",
+        )
+    marker_value = {
+        "schema_version": 1,
+        "environment_id": plan["environment"]["environment_id"],
+        "source_bindings": bindings,
+        "source_bindings_digest": plan["environment"]["source_bindings_digest"],
+    }
+    marker = environment / ".ai-collab-environment.json"
+    marker.write_bytes(_canonical_bytes(marker_value) + b"\n")
+    os.chmod(marker, 0o600)
+    content_digest = _environment_content(environment)
+    binding_digest = canonical_json_sha256(
+        {
+            "environment_id": plan["environment"]["environment_id"],
+            "component_bindings": [
+                item["component_binding_digest"] for item in component_receipts
+            ],
+            "content_digest": content_digest,
+        }
+    )
+    environment_plan = plan["environment"]
+    return {
+        "environment_id": environment_plan["environment_id"],
+        "environment_kind": environment_plan["environment_kind"],
+        "environment_binding_digest": binding_digest,
+        "environment_spec_digest": environment_plan["environment_spec_digest"],
+        "dependency_lock_digest": environment_plan["dependency_lock_digest"],
+        "source_bindings_digest": environment_plan["source_bindings_digest"],
+        "content_digest": content_digest,
+        "isolated_writable": True,
+        "shared_mutable_dependencies": False,
+        "immutable_cache_only": True,
+        "realized_bytes": _directory_bytes(environment),
+    }
+
+
+def _event(
+    sequence: int,
+    phase: str,
+    adapter_kind: str,
+    step_id: str,
+    target_id: str,
+    state: str,
+    evidence_digest: str | None = None,
+    error_code: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "sequence": sequence,
+        "phase": phase,
+        "adapter_kind": adapter_kind,
+        "step_id": step_id,
+        "target_id": target_id,
+        "state": state,
+        "evidence_digest": evidence_digest,
+        "error_code": error_code,
+    }
+
+
+def _operation_intent(journal: Mapping[str, Any]) -> str:
+    return canonical_json_sha256(
+        {
+            "operation_id": journal["operation_id"],
+            "operation_kind": journal["operation_kind"],
+            "plan_digest": journal["plan_digest"],
+            "scenario": journal["scenario"],
+            "operation_fence": journal["operation_fence"],
+        }
+    )
+
+
+def _provision(payload: Mapping[str, Any]) -> dict[str, Any]:
+    if set(payload) != {"workspace_id", "staging_path", "plan", "descriptors"}:
+        raise AdapterError("provision payload fields differ")
+    staging = Path(payload["staging_path"])
+    if not staging.is_absolute() or staging.exists() or staging.is_symlink():
+        raise AdapterError("staging path is invalid")
+    staging.mkdir(mode=0o700)
+    plan = payload["plan"]
+    descriptor, _, manifest, _ = _project_inputs()
+    del descriptor
+    rows = {row["repo_key"]: row for row in manifest["repos"]}
+    planned_rows = [rows[item["component_id"]] for item in plan["components"]]
+    if _source_wip_digest(planned_rows) != plan["source_wip_snapshot_digest"]:
+        raise AdapterError("canonical source changed after planning")
+    components = _materialize_components(staging, plan, rows)
+    environment = _materialize_environment(staging, plan, components, rows)
+    if _source_wip_digest(planned_rows) != plan["source_wip_snapshot_digest"]:
+        raise AdapterError("canonical source WIP changed during provisioning")
+    workspace_binding_digest = canonical_json_sha256(
+        {
+            "workspace_id": payload["workspace_id"],
+            "component_bindings": [item["component_binding_digest"] for item in components],
+            "environment_binding": environment["environment_binding_digest"],
+        }
+    )
+    staging_binding_digest = canonical_json_sha256(
+        {
+            "workspace_binding_digest": workspace_binding_digest,
+            "source_wip_digest": plan["source_wip_snapshot_digest"],
+            "atomic_publish_target": "bundle",
+        }
+    )
+    journal = {
+        "journal_contract_version": 1,
+        "operation_id": plan["operation_id"],
+        "operation_kind": "provision",
+        "plan_digest": canonical_json_sha256(plan),
+        "scenario": plan["scenario"],
+        "operation_fence": None,
+        "events": [],
+    }
+    journal["events"] = [
+        _event(1, "planned", "coordinator", "workspace.plan-frozen", plan["plan_id"], "committed", _operation_intent(journal)),
+        _event(2, "workspace", "workspace", "workspace.materialize", payload["workspace_id"], "started"),
+        _event(3, "workspace", "workspace", "workspace.materialize", payload["workspace_id"], "committed", canonical_json_sha256(components)),
+        _event(4, "environment", "environment", "environment.materialize", environment["environment_id"], "started"),
+        _event(5, "environment", "environment", "environment.materialize", environment["environment_id"], "committed", canonical_json_sha256(environment)),
+        _event(6, "verify", "workspace", "workspace.components-verified", plan["plan_id"], "committed", canonical_json_sha256(plan["components"])),
+        _event(7, "verify", "environment", "environment.binding-verified", environment["environment_id"], "committed", canonical_json_sha256(plan["environment"])),
+        _event(8, "finalize", "coordinator", "workspace.atomic-publish", payload["workspace_id"], "committed", staging_binding_digest),
+    ]
+    receipt = {
+        "receipt_contract_version": 1,
+        "receipt_id": f"receipt:{str(plan['operation_id']).removeprefix('wsop-')}",
+        "plan_digest": canonical_json_sha256(plan),
+        "operation_id": plan["operation_id"],
+        "base_receipt_digest": None,
+        "scenario": plan["scenario"],
+        "project_key": plan["project_key"],
+        "workspace_adapter": plan["workspace_adapter"],
+        "environment_adapter": plan["environment_adapter"],
+        "workspace_id": payload["workspace_id"],
+        "workspace_binding_digest": workspace_binding_digest,
+        "components": components,
+        "environment": environment,
+        "journal_digest": canonical_json_sha256(journal),
+        "source_wip_before_digest": plan["source_wip_snapshot_digest"],
+        "source_wip_after_digest": plan["source_wip_snapshot_digest"],
+        "finalization": {
+            "staging_binding_digest": staging_binding_digest,
+            "atomic_publish": True,
+            "expected_registry_revision": 0,
+            "committed_ready_revision": 1,
+        },
+        "state": "ready",
+        "residual_owned_resources": 0,
+        "project_payload_digest": plan["project_payload_digest"],
+    }
+    review_snapshot = {
+        "snapshot_contract_version": 1,
+        "scenario": plan["scenario"],
+        "plan_digest": canonical_json_sha256(plan),
+        "receipt_digest": canonical_json_sha256(receipt),
+        "components": [
+            {
+                "component_id": item["component_id"],
+                "revision_kind": item["revision_kind"],
+                "exact_revision": item["realized_revision"],
+                "target_ref": item["target_ref"],
+                "content_digest": item["content_digest"],
+            }
+            for item in components
+        ],
+    }
+    review_snapshot["snapshot_digest"] = canonical_json_sha256(review_snapshot)
+    return {
+        "journal": journal,
+        "receipt": receipt,
+        "review_snapshot": review_snapshot,
+    }
+
+
+def _status_component(bundle: Path, receipt: Mapping[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
+    target = _target_path(bundle, receipt)
+    if not target.is_dir():
+        return None, ["workspace.component-missing"]
+    try:
+        head = _run_git(target, "rev-parse", "HEAD").decode().strip()
+        status = _run_git(target, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+        content = _component_content(target)
+    except AdapterError:
+        return None, ["workspace.component-invalid"]
+    drift: list[str] = []
+    if head != receipt["realized_revision"]:
+        drift.append("workspace.revision-drift")
+    observation = {
+        "component_id": receipt["component_id"],
+        "component_binding_digest": receipt["component_binding_digest"],
+        "realized_revision": head,
+        "content_digest": content,
+        "dirty": bool(status),
+        "ownership_digest": canonical_json_sha256(
+            {
+                "component_binding_digest": receipt["component_binding_digest"],
+                "logical_path": receipt["logical_path"],
+            }
+        ),
+    }
+    return observation, drift
+
+
+def _load_binding_marker(bundle: Path) -> tuple[Path, dict[str, Any]]:
+    marker = bundle / ".ai-collab-harness-binding.json"
+    details = marker.lstat()
+    if (
+        marker.is_symlink()
+        or not stat.S_ISREG(details.st_mode)
+        or stat.S_IMODE(details.st_mode) != 0o600
+        or details.st_uid != os.getuid()
+    ):
+        raise AdapterError("workspace binding marker ownership differs")
+    value = json.loads(marker.read_bytes())
+    if not isinstance(value, dict) or set(value) != {
+        "journal",
+        "receipt",
+        "review_snapshot",
+    }:
+        raise AdapterError("workspace binding marker fields differ")
+    if not all(
+        isinstance(value[field], dict)
+        for field in ("journal", "receipt", "review_snapshot")
+    ):
+        raise AdapterError("workspace binding marker artifacts are invalid")
+    return marker, value
+
+
+def _status_binding_marker(
+    bundle: Path,
+    plan: Mapping[str, Any],
+    receipt: Mapping[str, Any],
+) -> tuple[str | None, list[str]]:
+    try:
+        marker, value = _load_binding_marker(bundle)
+        journal = value["journal"]
+        marker_receipt = value["receipt"]
+        snapshot = value["review_snapshot"]
+        snapshot_without_digest = dict(snapshot)
+        snapshot_digest = snapshot_without_digest.pop("snapshot_digest", None)
+        receipt_digest = canonical_json_sha256(receipt)
+        if (
+            canonical_json_sha256(marker_receipt) != receipt_digest
+            or canonical_json_sha256(journal) != receipt["journal_digest"]
+            or marker_receipt.get("journal_digest") != receipt["journal_digest"]
+            or marker_receipt.get("workspace_binding_digest")
+            != receipt["workspace_binding_digest"]
+            or marker_receipt.get("plan_digest") != canonical_json_sha256(plan)
+            or snapshot.get("receipt_digest") != receipt_digest
+            or snapshot.get("plan_digest") != canonical_json_sha256(plan)
+            or snapshot_digest != canonical_json_sha256(snapshot_without_digest)
+        ):
+            raise AdapterError("workspace binding marker provenance differs")
+    except (AdapterError, OSError, TypeError, ValueError, KeyError):
+        return None, ["workspace.binding-evidence-drift"]
+    return sha256_file(marker), []
+
+
+def _status(payload: Mapping[str, Any]) -> dict[str, Any]:
+    if set(payload) != {"operation_id", "bundle_path", "plan", "receipt"}:
+        raise AdapterError("status payload fields differ")
+    bundle = Path(payload["bundle_path"])
+    plan = payload["plan"]
+    receipt = payload["receipt"]
+    components: list[dict[str, Any]] = []
+    drift: list[str] = []
+    binding_marker_digest = None
+    if not bundle.is_absolute() or not bundle.is_dir() or bundle.is_symlink():
+        drift.append("workspace.binding-missing")
+    else:
+        binding_marker_digest, marker_drift = _status_binding_marker(bundle, plan, receipt)
+        drift.extend(marker_drift)
+        for component_receipt in receipt["components"]:
+            observation, component_drift = _status_component(bundle, component_receipt)
+            drift.extend(component_drift)
+            if observation is not None:
+                components.append(observation)
+    environment_observation = None
+    environment_path = bundle / ".venv"
+    if environment_path.is_dir() and not environment_path.is_symlink():
+        try:
+            environment_content = _environment_content(environment_path)
+            environment_receipt = receipt["environment"]
+            environment_observation = {
+                "environment_id": environment_receipt["environment_id"],
+                "environment_binding_digest": environment_receipt["environment_binding_digest"],
+                "environment_spec_digest": environment_receipt["environment_spec_digest"],
+                "source_bindings_digest": environment_receipt["source_bindings_digest"],
+                "content_digest": environment_content,
+            }
+            if environment_content != environment_receipt["content_digest"]:
+                drift.append("environment.content-drift")
+        except AdapterError:
+            drift.append("environment.binding-invalid")
+    else:
+        drift.append("environment.binding-missing")
+    state = "aligned" if not drift else "degraded"
+    operation_id = payload["operation_id"]
+    fence = {
+        "base_receipt_digest": canonical_json_sha256(receipt),
+        "expected_ready_revision": receipt["finalization"]["committed_ready_revision"],
+        "workspace_id": receipt["workspace_id"],
+        "workspace_binding_digest": receipt["workspace_binding_digest"],
+        "environment_id": receipt["environment"]["environment_id"],
+        "environment_binding_digest": receipt["environment"]["environment_binding_digest"],
+    }
+    journal = {
+        "journal_contract_version": 1,
+        "operation_id": operation_id,
+        "operation_kind": "status",
+        "plan_digest": canonical_json_sha256(plan),
+        "scenario": receipt["scenario"],
+        "operation_fence": fence,
+        "events": [],
+    }
+    current_evidence = canonical_json_sha256(
+        {
+            "binding_marker_digest": binding_marker_digest,
+            "components": components,
+            "environment": environment_observation,
+            "drift_codes": sorted(set(drift)),
+        }
+    )
+    journal["events"] = [
+        _event(1, "planned", "coordinator", "workspace.status-planned", receipt["workspace_id"], "committed", _operation_intent(journal)),
+        _event(2, "verify", "coordinator", "workspace.status-observed", receipt["workspace_id"], "committed", current_evidence),
+    ]
+    observation = {
+        "observation_contract_version": 1,
+        "operation_id": operation_id,
+        "operation_kind": "status",
+        "journal_digest": canonical_json_sha256(journal),
+        "plan_digest": canonical_json_sha256(plan),
+        "receipt_digest": canonical_json_sha256(receipt),
+        "scenario": receipt["scenario"],
+        "workspace_id": receipt["workspace_id"],
+        "workspace_binding_digest": receipt["workspace_binding_digest"],
+        "components": components,
+        "environment": environment_observation,
+        "state": state,
+        "drift_codes": sorted(set(drift)),
+        "wip_summary_digest": canonical_json_sha256(
+            [
+                {"component_id": item["component_id"], "dirty": item["dirty"], "content_digest": item["content_digest"]}
+                for item in components
+            ]
+        ),
+        "ownership_summary_digest": canonical_json_sha256(
+            {
+                "binding_marker_digest": binding_marker_digest,
+                "component_ownership_digests": [
+                    item["ownership_digest"] for item in components
+                ],
+                "environment_binding_digest": (
+                    environment_observation["environment_binding_digest"]
+                    if environment_observation is not None
+                    else None
+                ),
+            }
+        ),
+    }
+    return {"journal": journal, "observation": observation}
+
+
+def _write_binding_marker(path: Path, value: Mapping[str, Any]) -> None:
+    temporary = path.parent / f".{path.name}.{os.getpid()}.{secrets.token_hex(6)}.tmp"
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(_canonical_bytes(value) + b"\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def _repair(payload: Mapping[str, Any]) -> dict[str, Any]:
+    required = {
+        "operation_id",
+        "bundle_path",
+        "plan",
+        "receipt",
+        "expected_wip_summary_digest",
+    }
+    if set(payload) != required:
+        raise AdapterError("repair payload fields differ")
+    operation_id = payload["operation_id"]
+    bundle = Path(payload["bundle_path"])
+    plan = payload["plan"]
+    base_receipt = payload["receipt"]
+    expected_wip = payload["expected_wip_summary_digest"]
+    if (
+        not isinstance(operation_id, str)
+        or SAFE_OPERATION_ID_RE.fullmatch(operation_id) is None
+        or not isinstance(expected_wip, str)
+        or SHA256_RE.fullmatch(expected_wip) is None
+        or not bundle.is_absolute()
+        or bundle.is_symlink()
+        or not bundle.is_dir()
+    ):
+        raise AdapterError("repair operation identity is invalid")
+    _, marker_value = _load_binding_marker(bundle)
+    marker_journal = marker_value["journal"]
+    marker_receipt = marker_value["receipt"]
+    marker_snapshot = marker_value["review_snapshot"]
+    if (
+        marker_journal.get("operation_id") == operation_id
+        or marker_receipt.get("operation_id") == operation_id
+    ):
+        snapshot_without_digest = dict(marker_snapshot)
+        snapshot_digest = snapshot_without_digest.pop("snapshot_digest", None)
+        marker_receipt_digest = canonical_json_sha256(marker_receipt)
+        if (
+            marker_journal.get("operation_id") != operation_id
+            or marker_journal.get("operation_kind") != "repair"
+            or marker_journal.get("plan_digest") != canonical_json_sha256(plan)
+            or marker_receipt.get("operation_id") != operation_id
+            or marker_receipt.get("base_receipt_digest")
+            != canonical_json_sha256(base_receipt)
+            or marker_receipt.get("journal_digest")
+            != canonical_json_sha256(marker_journal)
+            or marker_receipt.get("workspace_id") != base_receipt.get("workspace_id")
+            or marker_receipt.get("workspace_binding_digest")
+            != base_receipt.get("workspace_binding_digest")
+            or marker_snapshot.get("plan_digest") != canonical_json_sha256(plan)
+            or marker_snapshot.get("receipt_digest") != marker_receipt_digest
+            or snapshot_digest != canonical_json_sha256(snapshot_without_digest)
+        ):
+            raise AdapterError("repair replay provenance differs")
+        replay_observation = _status(
+            {
+                "operation_id": f"{operation_id}-replay-status",
+                "bundle_path": str(bundle),
+                "plan": plan,
+                "receipt": marker_receipt,
+            }
+        )["observation"]
+        if (
+            replay_observation["state"] != "aligned"
+            or replay_observation["wip_summary_digest"] != expected_wip
+        ):
+            raise AdapterError("repair replay workspace differs")
+        replay_observation.update(
+            {
+                "operation_id": operation_id,
+                "operation_kind": "repair",
+                "journal_digest": canonical_json_sha256(marker_journal),
+                "receipt_digest": marker_receipt_digest,
+            }
+        )
+        return {
+            "journal": marker_journal,
+            "receipt": marker_receipt,
+            "observation": replay_observation,
+            "review_snapshot": marker_snapshot,
+        }
+    preflight = _status(
+        {
+            "operation_id": f"{operation_id}-preflight",
+            "bundle_path": str(bundle),
+            "plan": plan,
+            "receipt": base_receipt,
+        }
+    )["observation"]
+    if preflight["state"] != "aligned":
+        # Repair never overwrites or cleans Scenario-local WIP.  Drift that
+        # cannot be proved harmless remains explicit and requires a narrower
+        # project-specific repair implementation.
+        raise AdapterError("workspace repair would overwrite or mask drift")
+    if preflight["wip_summary_digest"] != expected_wip:
+        raise AdapterError("workspace repair WIP fence differs")
+    if base_receipt["source_wip_before_digest"] != base_receipt["source_wip_after_digest"]:
+        raise AdapterError("canonical source WIP fence differs")
+    fence = {
+        "base_receipt_digest": canonical_json_sha256(base_receipt),
+        "expected_ready_revision": base_receipt["finalization"][
+            "committed_ready_revision"
+        ],
+        "workspace_id": base_receipt["workspace_id"],
+        "workspace_binding_digest": base_receipt["workspace_binding_digest"],
+        "environment_id": base_receipt["environment"]["environment_id"],
+        "environment_binding_digest": base_receipt["environment"][
+            "environment_binding_digest"
+        ],
+    }
+    journal = {
+        "journal_contract_version": 1,
+        "operation_id": operation_id,
+        "operation_kind": "repair",
+        "plan_digest": canonical_json_sha256(plan),
+        "scenario": base_receipt["scenario"],
+        "operation_fence": fence,
+        "events": [],
+    }
+    journal["events"] = [
+        _event(1, "planned", "coordinator", "workspace.plan-frozen", plan["plan_id"], "committed", _operation_intent(journal)),
+        _event(2, "repair", "workspace", "workspace.repair", base_receipt["workspace_id"], "committed", preflight["ownership_summary_digest"]),
+        _event(3, "verify", "workspace", "workspace.components-verified", plan["plan_id"], "committed", canonical_json_sha256(plan["components"])),
+        _event(4, "verify", "environment", "environment.binding-verified", plan["environment"]["environment_id"], "committed", canonical_json_sha256(plan["environment"])),
+        _event(5, "finalize", "coordinator", "workspace.atomic-publish", base_receipt["workspace_id"], "committed", preflight["ownership_summary_digest"]),
+    ]
+    receipt = dict(base_receipt)
+    receipt.update(
+        {
+            "receipt_id": f"receipt:{operation_id}",
+            "operation_id": operation_id,
+            "base_receipt_digest": canonical_json_sha256(base_receipt),
+            "journal_digest": canonical_json_sha256(journal),
+            "source_wip_before_digest": base_receipt["source_wip_before_digest"],
+            "source_wip_after_digest": base_receipt["source_wip_before_digest"],
+        }
+    )
+    receipt["finalization"] = {
+        **base_receipt["finalization"],
+        "staging_binding_digest": preflight["ownership_summary_digest"],
+        "expected_registry_revision": base_receipt["finalization"][
+            "committed_ready_revision"
+        ],
+        "committed_ready_revision": base_receipt["finalization"][
+            "committed_ready_revision"
+        ]
+        + 1,
+    }
+    review_snapshot = {
+        "snapshot_contract_version": 1,
+        "scenario": plan["scenario"],
+        "plan_digest": canonical_json_sha256(plan),
+        "receipt_digest": canonical_json_sha256(receipt),
+        "components": [
+            {
+                "component_id": item["component_id"],
+                "revision_kind": item["revision_kind"],
+                "exact_revision": item["realized_revision"],
+                "target_ref": item["target_ref"],
+                "content_digest": item["content_digest"],
+            }
+            for item in receipt["components"]
+        ],
+    }
+    review_snapshot["snapshot_digest"] = canonical_json_sha256(review_snapshot)
+    _write_binding_marker(
+        bundle / ".ai-collab-harness-binding.json",
+        {
+            "journal": journal,
+            "receipt": receipt,
+            "review_snapshot": review_snapshot,
+        },
+    )
+    observation = {
+        **preflight,
+        "operation_id": operation_id,
+        "operation_kind": "repair",
+        "journal_digest": canonical_json_sha256(journal),
+        "receipt_digest": canonical_json_sha256(receipt),
+    }
+    return {
+        "journal": journal,
+        "receipt": receipt,
+        "observation": observation,
+        "review_snapshot": review_snapshot,
+    }
+
+
+def _destroy(payload: Mapping[str, Any]) -> dict[str, Any]:
+    required = {
+        "operation_id",
+        "bundle_path",
+        "plan",
+        "receipt",
+        "expected_wip_summary_digest",
+        "force",
+    }
+    if set(payload) != required:
+        raise AdapterError("destroy payload fields differ")
+    force = payload["force"]
+    if not isinstance(force, bool):
+        raise AdapterError("destroy force flag is invalid")
+    operation_id = payload["operation_id"]
+    bundle = Path(payload["bundle_path"])
+    plan = payload["plan"]
+    receipt = payload["receipt"]
+    expected_wip = payload["expected_wip_summary_digest"]
+    if (
+        not isinstance(operation_id, str)
+        or SAFE_OPERATION_ID_RE.fullmatch(operation_id) is None
+        or not isinstance(expected_wip, str)
+        or SHA256_RE.fullmatch(expected_wip) is None
+        or not bundle.is_absolute()
+        or bundle.name != "bundle"
+    ):
+        raise AdapterError("destroy target is invalid")
+    parent = bundle.parent
+    details = parent.lstat()
+    if (
+        parent.is_symlink()
+        or not stat.S_ISDIR(details.st_mode)
+        or details.st_uid != os.getuid()
+        or stat.S_IMODE(details.st_mode) != 0o700
+    ):
+        raise AdapterError("destroy target owner differs")
+    fence = {
+        "base_receipt_digest": canonical_json_sha256(receipt),
+        "expected_ready_revision": receipt["finalization"][
+            "committed_ready_revision"
+        ],
+        "workspace_id": receipt["workspace_id"],
+        "workspace_binding_digest": receipt["workspace_binding_digest"],
+        "environment_id": receipt["environment"]["environment_id"],
+        "environment_binding_digest": receipt["environment"][
+            "environment_binding_digest"
+        ],
+    }
+    destroying = parent / f".destroying-{operation_id}"
+    bundle_exists = bundle.exists() or bundle.is_symlink()
+    destroying_exists = destroying.exists() or destroying.is_symlink()
+    if bundle_exists and destroying_exists:
+        raise AdapterError("destroy targets conflict")
+    if bundle_exists:
+        bundle_details = bundle.lstat()
+        if (
+            bundle.is_symlink()
+            or not stat.S_ISDIR(bundle_details.st_mode)
+            or bundle_details.st_uid != os.getuid()
+        ):
+            raise AdapterError("destroy target is invalid")
+        preflight = _status(
+            {
+                "operation_id": f"{operation_id}-preflight",
+                "bundle_path": str(bundle),
+                "plan": plan,
+                "receipt": receipt,
+            }
+        )["observation"]
+        # A forced destroy is the owner-confirmed teardown of a workspace that
+        # is already known to have drifted, so alignment cannot be a
+        # prerequisite for it. The WIP fence below is a separate check and is
+        # enforced either way, so uncommitted work still stops the destroy.
+        if not force and preflight["state"] != "aligned":
+            raise AdapterError("workspace destroy binding is not aligned")
+        if preflight["wip_summary_digest"] != expected_wip:
+            raise AdapterError("workspace destroy WIP fence differs")
+        os.replace(bundle, destroying)
+        directory = os.open(parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+        destroying_exists = True
+    if destroying_exists:
+        staging_details = destroying.lstat()
+        if (
+            destroying.is_symlink()
+            or not stat.S_ISDIR(staging_details.st_mode)
+            or staging_details.st_uid != os.getuid()
+        ):
+            raise AdapterError("destroy staging target is invalid")
+        shutil.rmtree(destroying)
+    if bundle.exists() or bundle.is_symlink() or destroying.exists():
+        raise AdapterError("workspace absence could not be proved")
+    destroy_evidence_digest = canonical_json_sha256(
+        {
+            "receipt_digest": canonical_json_sha256(receipt),
+            "expected_wip_summary_digest": expected_wip,
+        }
+    )
+    journal = {
+        "journal_contract_version": 1,
+        "operation_id": operation_id,
+        "operation_kind": "destroy",
+        "plan_digest": canonical_json_sha256(plan),
+        "scenario": receipt["scenario"],
+        "operation_fence": fence,
+        "events": [],
+    }
+    journal["events"] = [
+        _event(1, "planned", "coordinator", "workspace.plan-frozen", plan["plan_id"], "committed", _operation_intent(journal)),
+        _event(2, "destroy", "workspace", "workspace.destroy", receipt["workspace_id"], "committed", destroy_evidence_digest),
+        _event(3, "verify", "coordinator", "workspace.absence-verified", receipt["workspace_id"], "committed", canonical_json_sha256({"bundle_missing": True})),
+        _event(4, "finalize", "coordinator", "workspace.destroy-finalized", receipt["workspace_id"], "committed", canonical_json_sha256({"workspace_unregistered": True})),
+    ]
+    observation = {
+        "observation_contract_version": 1,
+        "operation_id": operation_id,
+        "operation_kind": "destroy",
+        "journal_digest": canonical_json_sha256(journal),
+        "plan_digest": canonical_json_sha256(plan),
+        "receipt_digest": canonical_json_sha256(receipt),
+        "scenario": receipt["scenario"],
+        "workspace_id": None,
+        "workspace_binding_digest": None,
+        "components": [],
+        "environment": None,
+        "state": "missing",
+        "drift_codes": ["workspace.destroyed"],
+        "wip_summary_digest": expected_wip,
+        "ownership_summary_digest": canonical_json_sha256(
+            {"bundle_missing": True, "workspace_id": receipt["workspace_id"]}
+        ),
+    }
+    return {"journal": journal, "observation": observation}
+
+
+def _handle(request: Any) -> dict[str, Any]:
+    if not isinstance(request, dict) or set(request) != {
+        "adapter_protocol_version",
+        "adapter_id",
+        "operation",
+        "payload",
+    }:
+        raise AdapterError("adapter request fields differ")
+    if request["adapter_protocol_version"] != 1 or request["adapter_id"] != ADAPTER_ID:
+        raise AdapterError("adapter request identity differs")
+    operation = request["operation"]
+    payload = request["payload"]
+    if not isinstance(payload, dict):
+        raise AdapterError("adapter payload is invalid")
+    if operation == "register":
+        result = _register(payload)
+    elif operation == "collaboration_templates":
+        result = _collaboration_templates(payload)
+    elif operation == "plan":
+        result = _plan(payload)
+    elif operation == "provision":
+        result = _provision(payload)
+    elif operation == "status":
+        result = _status(payload)
+    elif operation == "repair":
+        result = _repair(payload)
+    elif operation == "destroy":
+        result = _destroy(payload)
+    else:
+        raise AdapterError("adapter operation is unavailable")
+    return {
+        "adapter_protocol_version": 1,
+        "adapter_id": ADAPTER_ID,
+        "outcome": "completed",
+        "result": result,
+    }
+
+
+def main() -> int:
+    try:
+        request = json.loads(sys.stdin.buffer.read())
+        response = _handle(request)
+    except (AdapterError, OSError, subprocess.SubprocessError, ValueError):
+        return 1
+    sys.stdout.buffer.write(_canonical_bytes(response) + b"\n")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
