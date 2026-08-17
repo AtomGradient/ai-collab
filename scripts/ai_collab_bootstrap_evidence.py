@@ -44,7 +44,7 @@ PROJECT_DESCRIPTOR_FIELDS = (
 PROJECT_DESCRIPTOR_SCALARS = {
     "schema_version": 1,
     "project_key": "edgestudio",
-    "product_contract_version": "3.2",
+    "product_contract_version": "1.0",
     "participant_driver_contract": 2,
     "collaboration_policy_schema": 1,
 }

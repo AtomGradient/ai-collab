@@ -167,7 +167,7 @@
         "snapshot_contract_version": {"const": 1},
         "registry_id": {"$ref": "#/$defs/registry_id"},
         "source_schema_version": {"const": 2},
-        "product_contract_version": {"const": "3.2"},
+        "product_contract_version": {"const": "1.0"},
         "registry_digest_policy": {"const": "whole-source-sha256"},
         "source_sha256": {"$ref": "#/$defs/sha256"},
         "canonical_registry_digest": {"$ref": "#/$defs/sha256"},
@@ -196,7 +196,7 @@
   "x-ai-collab": {
     "schema_version": 2,
     "contract_id": "ai-collab-gate-registry-v2",
-    "product_contract_version": "3.2",
+    "product_contract_version": "1.0",
     "source_format": "constrained-yaml",
     "root_artifacts": ["registry_snapshot", "gate_projection", "phase_projection"],
     "digest_contract": {
