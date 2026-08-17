@@ -1,3 +1,5 @@
+English | [简体中文](README.zh-CN.md)
+
 # AI Collab
 
 Local multi-agent Scenario harness for macOS. Turn any Git project into
