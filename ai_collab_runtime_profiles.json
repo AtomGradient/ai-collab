@@ -17,11 +17,11 @@
       "startup_gate": null
     },
     {
-      "profile_id": "runtime-profile.codex-dogfood",
+      "profile_id": "runtime-profile.codex",
       "display_name": "Codex",
       "executable": "codex",
       "arguments": ["--dangerously-bypass-approvals-and-sandbox", "--no-alt-screen"],
-      "working_directory": "bundle/EdgeStudio",
+      "working_directory": "bundle",
       "process_match": "codex",
       "accepts_typed_delivery": true,
       "vendor_lifecycle": {
@@ -42,11 +42,11 @@
       }
     },
     {
-      "profile_id": "runtime-profile.claude-dogfood",
+      "profile_id": "runtime-profile.claude",
       "display_name": "Claude",
       "executable": "claude",
       "arguments": ["--dangerously-skip-permissions", "--system-prompt", "."],
-      "working_directory": "bundle/EdgeStudio",
+      "working_directory": "bundle",
       "process_match": "claude",
       "accepts_typed_delivery": true,
       "vendor_lifecycle": {

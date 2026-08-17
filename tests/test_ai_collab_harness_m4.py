@@ -196,14 +196,14 @@ def test_runtime_profiles_keep_generic_baseline_and_enable_vendor_identity_adapt
     profiles = participant_driver._runtime_profiles()  # noqa: SLF001
     assert set(profiles) == {
         "runtime-profile.inert",
-        "runtime-profile.codex-dogfood",
-        "runtime-profile.claude-dogfood",
+        "runtime-profile.codex",
+        "runtime-profile.claude",
     }
     assert profiles["runtime-profile.inert"]["accepts_typed_delivery"] is False
     assert profiles["runtime-profile.inert"]["vendor_lifecycle"] is None
     for profile_id in (
-        "runtime-profile.codex-dogfood",
-        "runtime-profile.claude-dogfood",
+        "runtime-profile.codex",
+        "runtime-profile.claude",
     ):
         resolved = participant_driver.resolve(
             {
@@ -236,8 +236,8 @@ def test_participant_templates_are_driver_data_not_host_vendor_logic() -> None:
     result = participant_driver.list_templates({})
     assert {item["template_id"] for item in result["templates"]} == {
         "runtime-profile.inert",
-        "runtime-profile.codex-dogfood",
-        "runtime-profile.claude-dogfood",
+        "runtime-profile.codex",
+        "runtime-profile.claude",
     }
     for item in result["templates"]:
         launch_spec = item["launch_spec"]
@@ -265,8 +265,8 @@ def test_template_display_names_are_registry_data_not_transformed_ids() -> None:
     # The fixture must announce itself wherever it is shown, because it accepts
     # no delivery, opens no window and can never resume a conversation.
     assert "fixture" in names["runtime-profile.inert"].lower()
-    assert names["runtime-profile.claude-dogfood"] == "Claude"
-    assert names["runtime-profile.codex-dogfood"] == "Codex"
+    assert names["runtime-profile.claude"] == "Claude"
+    assert names["runtime-profile.codex"] == "Codex"
 
 
 def test_only_the_inert_fixture_is_headless() -> None:
@@ -331,9 +331,9 @@ def test_an_overlay_replaces_the_vendor_arguments_the_bundle_ships(
     shipped = participant_driver._runtime_profiles()  # noqa: SLF001
     assert any(
         argument.startswith("--dangerously")
-        for argument in shipped["runtime-profile.codex-dogfood"]["arguments"]
+        for argument in shipped["runtime-profile.codex"]["arguments"]
     )
-    replacement = copy.deepcopy(shipped["runtime-profile.codex-dogfood"])
+    replacement = copy.deepcopy(shipped["runtime-profile.codex"])
     replacement["arguments"] = [
         argument
         for argument in replacement["arguments"]
@@ -345,12 +345,12 @@ def test_an_overlay_replaces_the_vendor_arguments_the_bundle_ships(
 
     assert not any(
         argument.startswith("--dangerously")
-        for argument in profiles["runtime-profile.codex-dogfood"]["arguments"]
+        for argument in profiles["runtime-profile.codex"]["arguments"]
     )
     # Replacing one profile leaves the rest of the registry alone.
     assert set(profiles) == set(shipped)
-    assert profiles["runtime-profile.claude-dogfood"] == (
-        shipped["runtime-profile.claude-dogfood"]
+    assert profiles["runtime-profile.claude"] == (
+        shipped["runtime-profile.claude"]
     )
 
 
@@ -393,13 +393,13 @@ def test_an_overlay_is_held_to_the_registry_rules(
     than a shipped one, so a typo cannot quietly produce a half-configured
     participant."""
     shipped = participant_driver._runtime_profiles()  # noqa: SLF001
-    loose = copy.deepcopy(shipped["runtime-profile.codex-dogfood"])
+    loose = copy.deepcopy(shipped["runtime-profile.codex"])
     loose["display_name"] = "   "
     _overlay(tmp_path, monkeypatch, {"schema_version": 1, "profiles": [loose]})
     with pytest.raises(participant_driver.DriverError):
         participant_driver._runtime_profiles()  # noqa: SLF001
 
-    missing_key = copy.deepcopy(shipped["runtime-profile.codex-dogfood"])
+    missing_key = copy.deepcopy(shipped["runtime-profile.codex"])
     del missing_key["process_match"]
     _overlay(tmp_path, monkeypatch, {"schema_version": 1, "profiles": [missing_key]})
     with pytest.raises(participant_driver.DriverError):
@@ -651,14 +651,14 @@ async def _async_value(value: Any) -> Any:
     return value
 
 
-def test_dogfood_profiles_match_normal_local_permission_modes() -> None:
+def test_shipped_profiles_match_normal_local_permission_modes() -> None:
     profiles = participant_driver._runtime_profiles()  # noqa: SLF001
-    assert profiles["runtime-profile.claude-dogfood"]["arguments"] == [
+    assert profiles["runtime-profile.claude"]["arguments"] == [
         "--dangerously-skip-permissions",
         "--system-prompt",
         ".",
     ]
-    assert profiles["runtime-profile.codex-dogfood"]["arguments"] == [
+    assert profiles["runtime-profile.codex"]["arguments"] == [
         "--dangerously-bypass-approvals-and-sandbox",
         "--no-alt-screen",
     ]
@@ -1612,7 +1612,7 @@ def test_startup_trust_gate_accepts_only_exact_workspace_and_waits_for_ready(
     workspace = tmp_path / "Harness Workspace"
     workspace.mkdir()
     profile = participant_driver._runtime_profiles()[  # noqa: SLF001
-        "runtime-profile.claude-dogfood"
+        "runtime-profile.claude"
     ]
     prompt = (
         f"Accessing workspace:\n{workspace}\nQuick safety check: Is this trusted?\n"
@@ -1643,7 +1643,7 @@ def test_startup_trust_gate_fails_closed_on_workspace_mismatch(
     workspace = tmp_path / "expected"
     workspace.mkdir()
     profile = participant_driver._runtime_profiles()[  # noqa: SLF001
-        "runtime-profile.codex-dogfood"
+        "runtime-profile.codex"
     ]
     prompt = (
         "You are in /private/tmp/not-the-workspace\n"
@@ -1673,7 +1673,7 @@ def test_startup_gate_does_not_type_when_workspace_is_already_trusted(
     workspace = tmp_path / "trusted"
     workspace.mkdir()
     profile = participant_driver._runtime_profiles()[  # noqa: SLF001
-        "runtime-profile.codex-dogfood"
+        "runtime-profile.codex"
     ]
     ready = ">_ OpenAI Codex (v0.147.0)\n›"
     session = _StartupSession([ready, ready, ready, ready])
@@ -1691,14 +1691,14 @@ def test_startup_gate_does_not_type_when_workspace_is_already_trusted(
     ("profile_id", "restored_screen"),
     [
         (
-            "runtime-profile.codex-dogfood",
+            "runtime-profile.codex",
             "› Earlier employee prompt\n"
             "• Earlier response restored from the exact conversation.\n"
             "› Improve documentation in @filename\n"
-            "gpt-5.6-luna medium · ~/workspace/bundle/EdgeStudio",
+            "gpt-5.6-luna medium · ~/workspace/bundle",
         ),
         (
-            "runtime-profile.claude-dogfood",
+            "runtime-profile.claude",
             "⏺ Earlier response restored from the exact conversation.\n"
             "────────────────────────────────────────────────\n"
             "❯ \n"
@@ -1733,13 +1733,13 @@ def test_startup_gate_accepts_stable_restored_input_without_transient_banner(
     ("profile_id", "menu_screen"),
     [
         (
-            "runtime-profile.codex-dogfood",
+            "runtime-profile.codex",
             "Choose working directory to resume this session\n"
             "› 1. Use session directory (/workspace/old)\n"
             "  2. Use current directory (/workspace/new)",
         ),
         (
-            "runtime-profile.claude-dogfood",
+            "runtime-profile.claude",
             "Select an option\n❯ 1. Continue\n  2. Exit",
         ),
     ],
@@ -2114,8 +2114,8 @@ def test_generation_scoped_ping_survives_fresh_login_shell_environment(
 @pytest.mark.parametrize(
     ("profile_id", "provider"),
     [
-        ("runtime-profile.codex-dogfood", "codex"),
-        ("runtime-profile.claude-dogfood", "claude"),
+        ("runtime-profile.codex", "codex"),
+        ("runtime-profile.claude", "claude"),
     ],
 )
 def test_vendor_session_hook_captures_and_reuses_exact_identity(

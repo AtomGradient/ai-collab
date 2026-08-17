@@ -208,7 +208,7 @@ final class HarnessContractTests: XCTestCase {
             configuration: [
                 "participant_id": "analyst",
                 "participant_generation": 4,
-                "runtime_profile_ref": "runtime-profile.codex-dogfood",
+                "runtime_profile_ref": "runtime-profile.codex",
                 "continuity_mode": "exact_resume",
                 "model_binding": [
                     "provider_profile_ref": "provider.openai-local",
@@ -218,7 +218,7 @@ final class HarnessContractTests: XCTestCase {
             ]
         ))
         XCTAssertEqual(participant.generation, 4)
-        XCTAssertEqual(participant.runtimeProfileRef, "runtime-profile.codex-dogfood")
+        XCTAssertEqual(participant.runtimeProfileRef, "runtime-profile.codex")
         XCTAssertEqual(participant.continuityMode, "exact_resume")
         XCTAssertEqual(participant.modelBinding?.modelRef, "model.codex-current")
         XCTAssertEqual(
@@ -240,7 +240,7 @@ final class HarnessContractTests: XCTestCase {
             configuration: [
                 "participant_id": "analyst",
                 "participant_generation": 4,
-                "runtime_profile_ref": "runtime-profile.codex-dogfood",
+                "runtime_profile_ref": "runtime-profile.codex",
                 "continuity_mode": "exact_resume",
                 "model_binding": NSNull(),
             ]
