@@ -7,6 +7,14 @@ Each Scenario owns its workspace, participants, collaboration routes, lifecycle
 state, delivery journal, and recovery evidence. The same Host semantics serve the
 macOS control plane, the automation-oriented CLI, and participant transport.
 
+![The AI Collab App: a running Scenario with two participants, its collaboration policy, and the delivery journal](ai-collab.png)
+
+Two agents in the same Scenario messaging each other through the Host — the
+analyst sends with its Host-issued `ai-ping`, the reviewer receives a typed,
+tracked delivery, and the App shows every thread with its delivery state:
+
+![Two participant TUIs exchanging typed deliveries next to the App](ai-collab-with-tuis.png)
+
 The product is designed around five constraints:
 
 - long-lived task rooms instead of terminal management;
