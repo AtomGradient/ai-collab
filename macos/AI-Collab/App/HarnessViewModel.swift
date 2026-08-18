@@ -361,7 +361,9 @@ final class HarnessViewModel: ObservableObject {
                 withBundleIdentifier: "com.googlecode.iterm2"
             ) {
                 NSWorkspace.shared.openApplication(
-                    at: url, configuration: NSWorkspace.OpenConfiguration()
+                    at: url,
+                    configuration: NSWorkspace.OpenConfiguration(),
+                    completionHandler: nil
                 )
             }
         default:
