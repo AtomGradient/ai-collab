@@ -171,6 +171,16 @@ struct ContentView: View {
                 if model.hostStatus != "ready" {
                     Button("Retry") { Task { await model.retryHostService() } }
                         .controlSize(.small)
+                } else if let permission = model.presentationPermissionStatus,
+                          permission != "granted" {
+                    Button("Grant iTerm2 Access") {
+                        Task { await model.requestPresentationPermission() }
+                    }
+                    .controlSize(.small)
+                    .help(
+                        "Let macOS ask for the Automation permission AI Collab "
+                            + "needs to present agents in iTerm2 windows."
+                    )
                 }
             }
             .padding(10)

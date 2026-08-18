@@ -142,6 +142,7 @@ def presentation_descriptor() -> dict[str, Any]:
         "interaction_modes": ["tui"],
         "lifecycle_operations": [
             "permission_probe",
+            "permission_request",
             "create_top_level",
             "focus",
             "close_exact",
@@ -261,13 +262,13 @@ def list_templates(payload: Mapping[str, Any]) -> dict[str, Any]:
     return {"templates": templates}
 
 
-def permission_probe(payload: Mapping[str, Any]) -> dict[str, Any]:
-    """Observe the current presentation permission without prompting or launching."""
+def _presentation_observation(*, prompt_requested: bool) -> dict[str, Any]:
+    """Build one provider-neutral presentation observation from live platform state."""
 
-    if payload:
-        raise DriverError("permission probe payload differs")
     try:
-        automation = automation_permission_status(EXPECTED_ITERM_BUNDLE_ID)
+        automation = automation_permission_status(
+            EXPECTED_ITERM_BUNDLE_ID, ask_user_if_needed=prompt_requested
+        )
         authentication = authentication_bypass_status()
         private_socket = private_unix_socket_status()
     except AutomationPreflightError as exc:
@@ -287,7 +288,7 @@ def permission_probe(payload: Mapping[str, Any]) -> dict[str, Any]:
     elif automation_status == "not_determined_no_prompt":
         status = "not_determined"
         provider_error_code = "iterm-presentation.automation-not-determined"
-        remediation_ref = "system-settings.automation"
+        remediation_ref = "presentation.permission-request"
     elif automation.get("authorized") is not True:
         status = "unknown"
         provider_error_code = "iterm-presentation.automation-unknown"
@@ -311,18 +312,69 @@ def permission_probe(payload: Mapping[str, Any]) -> dict[str, Any]:
         "private_socket_owned": private_socket.get("owned_by_current_user") is True,
     }
     return {
-        "permission_observations": [
-            {
-                "permission_id": "permission.presentation-control",
-                "provider_ref": "platform.macos-automation",
-                "subject_ref": "presentation.iterm2",
-                "status": status,
-                "evidence_digest": digest(evidence),
-                "provider_error_code": provider_error_code,
-                "remediation_ref": remediation_ref,
-                "prompt_requested": False,
-            }
-        ]
+        "permission_id": "permission.presentation-control",
+        "provider_ref": "platform.macos-automation",
+        "subject_ref": "presentation.iterm2",
+        "status": status,
+        "evidence_digest": digest(evidence),
+        "provider_error_code": provider_error_code,
+        "remediation_ref": remediation_ref,
+        "prompt_requested": prompt_requested,
+    }
+
+
+def _target_application_running(bundle_identifier: str) -> bool:
+    """Observe whether the automation target is running, without TCC side effects."""
+
+    completed = subprocess.run(
+        ["/usr/bin/lsappinfo", "info", "-only", "pid", bundle_identifier],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return completed.returncode == 0 and "pid" in completed.stdout.lower()
+
+
+def permission_probe(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Observe the current presentation permission without prompting or launching."""
+
+    if payload:
+        raise DriverError("permission probe payload differs")
+    return {
+        "permission_observations": [_presentation_observation(prompt_requested=False)]
+    }
+
+
+def permission_request(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Let macOS show its consent prompt for presentation control.
+
+    Reserved for an explicit user gesture. The target application must already
+    be running: the driver never launches it on the user's behalf, and the
+    system consent dialog lacks context when the target is absent.
+    """
+
+    if payload:
+        raise DriverError("permission request payload differs")
+    if not _target_application_running(EXPECTED_ITERM_BUNDLE_ID):
+        return {
+            "permission_observations": [
+                {
+                    "permission_id": "permission.presentation-control",
+                    "provider_ref": "platform.macos-automation",
+                    "subject_ref": "presentation.iterm2",
+                    "status": "unavailable",
+                    "evidence_digest": digest(
+                        {"target_running": False, "prompt_requested": False}
+                    ),
+                    "provider_error_code": "iterm-presentation.target-not-running",
+                    "remediation_ref": "iterm-presentation.launch-target",
+                    "prompt_requested": False,
+                }
+            ]
+        }
+    return {
+        "permission_observations": [_presentation_observation(prompt_requested=True)]
     }
 
 
@@ -3476,6 +3528,7 @@ def repair(payload: Mapping[str, Any]) -> dict[str, Any]:
 OPERATIONS = {
     "list_templates": list_templates,
     "permission_probe": permission_probe,
+    "permission_request": permission_request,
     "resolve": resolve,
     "start": start,
     "status": status,

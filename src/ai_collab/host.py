@@ -1029,6 +1029,34 @@ class HarnessHost:
         elif operation == "host.status":
             result = self.store.host_status()
             operation_id = f"read-{request['request_id']}"
+        elif operation in (
+            "presentation.permission-probe",
+            "presentation.permission-request",
+        ):
+            # permission-probe is a pure observation; permission-request is an
+            # explicit user gesture that lets the platform show its consent
+            # prompt. Neither mutates durable Harness state.
+            if self.participants is None:
+                raise ProtocolError(
+                    "presentation.driver-unavailable",
+                    "availability",
+                    "presentation permission driver is not configured",
+                    False,
+                    "participant.driver-configure",
+                )
+            try:
+                if operation == "presentation.permission-request":
+                    result = self.participants.permission_request()
+                else:
+                    result = self.participants.permission_probe()
+            except ParticipantError as exc:
+                raise ProtocolError(
+                    "presentation.observation-failed",
+                    "operation",
+                    "presentation permission observation failed",
+                    True,
+                ) from exc
+            operation_id = f"read-{request['request_id']}"
         elif operation == "project.register":
             if request["fence"]["operation_generation"] != 0:
                 raise ProtocolError(

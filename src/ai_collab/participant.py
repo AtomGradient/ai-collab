@@ -216,7 +216,21 @@ class ParticipantCoordinator:
     def permission_probe(self) -> dict[str, Any]:
         """Return fresh provider-neutral presentation permission observations."""
 
-        result = self.driver.call("permission_probe", {})
+        return self._permission_observations("permission_probe", allow_prompt=False)
+
+    def permission_request(self) -> dict[str, Any]:
+        """Let the platform request presentation permission (explicit user gesture).
+
+        The driver may trigger the operating system's consent prompt; the
+        returned observation reflects the user's live decision.
+        """
+
+        return self._permission_observations("permission_request", allow_prompt=True)
+
+    def _permission_observations(
+        self, operation: str, *, allow_prompt: bool
+    ) -> dict[str, Any]:
+        result = self.driver.call(operation, {})
         observations = (
             result.get("permission_observations")
             if isinstance(result, dict)
@@ -273,7 +287,11 @@ class ParticipantCoordinator:
                         value["remediation_ref"],
                     )
                 )
-                or value["prompt_requested"] is not False
+                or (
+                    not isinstance(value["prompt_requested"], bool)
+                    if allow_prompt
+                    else value["prompt_requested"] is not False
+                )
             ):
                 raise ParticipantError(
                     "driver.invalid-reply", "participant permission values differ"

@@ -38,8 +38,17 @@ def _fourcc(value: str) -> int:
     return int.from_bytes(value.encode("ascii"), "big")
 
 
-def automation_permission_status(bundle_identifier: str) -> dict[str, Any]:
-    """Read Automation/TCC state without asking macOS to show a prompt."""
+def automation_permission_status(
+    bundle_identifier: str,
+    *,
+    ask_user_if_needed: bool = False,
+) -> dict[str, Any]:
+    """Read Automation/TCC state; optionally let macOS show its consent prompt.
+
+    The default never prompts (fail-closed observation). Passing
+    ``ask_user_if_needed=True`` is reserved for an explicit user gesture —
+    the system consent dialog may appear and block until answered.
+    """
 
     if platform.system() != "Darwin":
         raise AutomationPreflightError("Automation preflight requires macOS")
@@ -81,7 +90,7 @@ def automation_permission_status(bundle_identifier: str) -> dict[str, Any]:
             ctypes.byref(target),
             _fourcc("****"),
             _fourcc("****"),
-            False,
+            bool(ask_user_if_needed),
         )
     finally:
         disposed = framework.AEDisposeDesc(ctypes.byref(target))
@@ -95,8 +104,8 @@ def automation_permission_status(bundle_identifier: str) -> dict[str, Any]:
     return {
         "status": labels.get(status, "other_error"),
         "authorized": status == 0,
-        "ask_user_if_needed": False,
-        "prompt_requested": False,
+        "ask_user_if_needed": bool(ask_user_if_needed),
+        "prompt_requested": bool(ask_user_if_needed),
     }
 
 

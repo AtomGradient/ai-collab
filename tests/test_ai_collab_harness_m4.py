@@ -430,7 +430,7 @@ def test_no_overlay_means_the_shipped_registry_is_what_runs(
             False,
             True,
             "not_determined",
-            "system-settings.automation",
+            "presentation.permission-request",
         ),
         (
             "authorized",
@@ -452,10 +452,10 @@ def test_presentation_permission_probe_is_no_prompt_and_actionable(
     monkeypatch.setattr(
         participant_driver,
         "automation_permission_status",
-        lambda _bundle: {
+        lambda _bundle, **kwargs: {
             "status": automation_status,
             "authorized": authorized,
-            "prompt_requested": False,
+            "prompt_requested": kwargs.get("ask_user_if_needed", False),
         },
     )
     monkeypatch.setattr(
@@ -488,10 +488,10 @@ def test_presentation_permission_probe_rejects_authentication_bypass(
     monkeypatch.setattr(
         participant_driver,
         "automation_permission_status",
-        lambda _bundle: {
+        lambda _bundle, **kwargs: {
             "status": "authorized",
             "authorized": True,
-            "prompt_requested": False,
+            "prompt_requested": kwargs.get("ask_user_if_needed", False),
         },
     )
     monkeypatch.setattr(
@@ -2335,3 +2335,65 @@ def test_workspace_path_rejects_invalid_declared_directories(
     for declared in ("", "../outside", "/absolute", 7, "bundle/missing-dir"):
         with pytest.raises(participant_driver.DriverError):
             participant_driver._workspace_path(str(tmp_path), profile, declared)
+
+
+def test_presentation_permission_request_guards_absent_target(
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(
+        participant_driver, "_target_application_running", lambda _bundle: False
+    )
+    called: list[bool] = []
+    monkeypatch.setattr(
+        participant_driver,
+        "automation_permission_status",
+        lambda _bundle, **kwargs: called.append(True),
+    )
+    observation = participant_driver.permission_request({})[
+        "permission_observations"
+    ][0]
+    assert observation["status"] == "unavailable"
+    assert observation["provider_error_code"] == (
+        "iterm-presentation.target-not-running"
+    )
+    assert observation["remediation_ref"] == "iterm-presentation.launch-target"
+    assert observation["prompt_requested"] is False
+    assert called == []
+
+
+def test_presentation_permission_request_prompts_when_target_running(
+    monkeypatch: Any,
+) -> None:
+    asked: list[bool] = []
+
+    def fake_status(_bundle: str, **kwargs: Any) -> dict[str, Any]:
+        asked.append(kwargs.get("ask_user_if_needed") is True)
+        return {"status": "authorized", "authorized": True, "prompt_requested": True}
+
+    monkeypatch.setattr(
+        participant_driver, "_target_application_running", lambda _bundle: True
+    )
+    monkeypatch.setattr(
+        participant_driver, "automation_permission_status", fake_status
+    )
+    monkeypatch.setattr(
+        participant_driver,
+        "authentication_bypass_status",
+        lambda: {"cookie_authentication_required": True},
+    )
+    monkeypatch.setattr(
+        participant_driver,
+        "private_unix_socket_status",
+        lambda: {
+            "present": True,
+            "is_unix_socket": True,
+            "owned_by_current_user": True,
+            "local_only_ready": True,
+        },
+    )
+    observation = participant_driver.permission_request({})[
+        "permission_observations"
+    ][0]
+    assert asked == [True]
+    assert observation["status"] == "granted"
+    assert observation["prompt_requested"] is True

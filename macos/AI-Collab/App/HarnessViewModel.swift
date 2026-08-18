@@ -38,6 +38,7 @@ final class HarnessViewModel: ObservableObject {
     @Published var participants: [ParticipantRecord] = []
     @Published var resources: [ResourceLeaseRecord] = []
     @Published var preflight: ScenarioPreflightRecord?
+    @Published var presentationPermissionStatus: String?
     @Published var topology: ScenarioTopologyRecord?
     @Published var templates: [ParticipantTemplate] = []
     @Published var selectedTemplateID: String?
@@ -180,6 +181,7 @@ final class HarnessViewModel: ObservableObject {
             try await self.reloadProjects()
             try await self.reloadTemplates()
             try await self.reloadPolicyTemplates()
+            await self.refreshPresentationPermission()
         }
     }
 
@@ -352,9 +354,51 @@ final class HarnessViewModel: ObservableObject {
             ) {
                 NSWorkspace.shared.open(url)
             }
+        case "presentation.permission-request":
+            await requestPresentationPermission()
+        case "iterm-presentation.launch-target":
+            if let url = NSWorkspace.shared.urlForApplication(
+                withBundleIdentifier: "com.googlecode.iterm2"
+            ) {
+                NSWorkspace.shared.openApplication(
+                    at: url, configuration: NSWorkspace.OpenConfiguration()
+                )
+            }
         default:
             break
         }
+    }
+
+    /// Explicit user gesture: let macOS show its Automation consent prompt
+    /// through the Host service, then refresh the observed permission state.
+    func requestPresentationPermission() async {
+        await performRead {
+            let result = try await self.client.call(
+                HarnessCall(
+                    operation: "presentation.permission-request",
+                    target: ["scope": "host"]
+                )
+            )
+            self.presentationPermissionStatus = Self.permissionStatus(result)
+        }
+        if selectedScenario != nil {
+            await runPreflight()
+        }
+    }
+
+    func refreshPresentationPermission() async {
+        let result = try? await client.call(
+            HarnessCall(
+                operation: "presentation.permission-probe",
+                target: ["scope": "host"]
+            )
+        )
+        presentationPermissionStatus = result.flatMap(Self.permissionStatus)
+    }
+
+    private static func permissionStatus(_ result: [String: Any]) -> String? {
+        let observations = result["permission_observations"] as? [[String: Any]]
+        return observations?.first?["status"] as? String
     }
 
     func repairActionLabel(_ action: String) -> String {
@@ -367,6 +411,8 @@ final class HarnessViewModel: ObservableObject {
         case "participant.recover": "Recover Participant"
         case "scenario.repair": "Use Repair Scenario Below"
         case "system-settings.automation": "Open Automation Settings"
+        case "presentation.permission-request": "Request Permission"
+        case "iterm-presentation.launch-target": "Open iTerm2"
         case "participant.driver-configure": "Configure Presentation Driver"
         case "host.update": "Update or Reinstall AI Collab"
         case "iterm-presentation.enable-python-api": "Enable Presentation Automation"
@@ -379,7 +425,8 @@ final class HarnessViewModel: ObservableObject {
     func canPerformRepairAction(_ action: String) -> Bool {
         switch action {
         case "host.retry", "project.register", "scenario.refresh", "scenario.preflight",
-             "workspace.prepare", "system-settings.automation":
+             "workspace.prepare", "system-settings.automation",
+             "presentation.permission-request", "iterm-presentation.launch-target":
             true
         case "participant.recover":
             participants.filter(\.canRecover).count == 1
