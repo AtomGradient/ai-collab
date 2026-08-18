@@ -74,6 +74,14 @@ struct ContentView: View {
         } detail: {
             scenarioDetail
         }
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button("Register Project", systemImage: "plus") {
+                    Task { await model.chooseAndRegisterProject() }
+                }
+                .help("Register Project")
+            }
+        }
         .disabled(model.isBusy)
         .confirmationDialog(
             highRiskIntent?.title ?? "",
@@ -126,11 +134,6 @@ struct ContentView: View {
             }
         }
         .navigationTitle("AI Collab")
-        .toolbar {
-            Button("Register Project", systemImage: "plus") {
-                Task { await model.chooseAndRegisterProject() }
-            }
-        }
         .confirmationDialog(
             "Prepare this project?",
             isPresented: Binding(
