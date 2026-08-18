@@ -186,6 +186,11 @@ SCENARIO_PREFLIGHT_RESULT_SCHEMA = {
     "required": ["preflight"],
     "properties": {"preflight": {"type": "object"}},
 }
+PRESENTATION_PERMISSION_RESULT_SCHEMA = {
+    "type": "object",
+    "required": ["permission_observations"],
+    "properties": {"permission_observations": {"type": "array"}},
+}
 SCENARIO_TOPOLOGY_RESULT_SCHEMA = {
     "type": "object",
     "required": ["topology"],
@@ -531,6 +536,24 @@ OPERATION_DESCRIPTORS = (
         mutation_class="read_only",
         request_schema=EMPTY_OBJECT_SCHEMA,
         result_schema=HOST_STATUS_RESULT_SCHEMA,
+    ),
+    _descriptor(
+        "presentation.permission-probe",
+        capability="participant.read",
+        target_scope="host",
+        required_fences=["host_generation"],
+        mutation_class="read_only",
+        request_schema=EMPTY_OBJECT_SCHEMA,
+        result_schema=PRESENTATION_PERMISSION_RESULT_SCHEMA,
+    ),
+    _descriptor(
+        "presentation.permission-request",
+        capability="participant.manage",
+        target_scope="host",
+        required_fences=["host_generation"],
+        mutation_class="external_effect",
+        request_schema=EMPTY_OBJECT_SCHEMA,
+        result_schema=PRESENTATION_PERMISSION_RESULT_SCHEMA,
     ),
     _descriptor(
         "project.register",
@@ -1231,6 +1254,8 @@ def _validate_fence(value: Any, required: list[str]) -> None:
 def _validate_payload(operation: str, value: Any) -> None:
     if operation in {
         "host.status",
+        "presentation.permission-probe",
+        "presentation.permission-request",
         "project.list",
         "scenario.list",
         "scenario.status",
