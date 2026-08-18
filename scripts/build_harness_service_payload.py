@@ -12,6 +12,7 @@ import json
 import os
 import shutil
 import stat
+import subprocess
 import sys
 import sysconfig
 from pathlib import Path
@@ -45,6 +46,162 @@ VENDORED_SITE_PACKAGES = (
     "yaml",
     "platformdirs",
 )
+
+
+# Install prefixes that must never be referenced by the shipped runtime; a
+# reference would make the payload depend on the build machine's package
+# manager and fail hardened-runtime library validation on end-user machines.
+_FOREIGN_PREFIXES = ("/opt/homebrew/", "/usr/local/")
+_MACHO_MAGICS = (
+    b"\xcf\xfa\xed\xfe",
+    b"\xce\xfa\xed\xfe",
+    b"\xca\xfe\xba\xbe",
+    b"\xbe\xba\xfe\xca",
+)
+
+
+def _is_macho(path: Path) -> bool:
+    try:
+        with path.open("rb") as stream:
+            return stream.read(4) in _MACHO_MAGICS
+    except OSError:
+        return False
+
+
+def _macho_files(runtime: Path) -> list[Path]:
+    return [
+        path
+        for path in sorted(runtime.rglob("*"))
+        if path.is_file() and not path.is_symlink() and _is_macho(path)
+    ]
+
+
+def _install_id(path: Path) -> str | None:
+    """LC_ID_DYLIB install name, or None for executables and bundles."""
+
+    output = subprocess.run(
+        ["/usr/bin/otool", "-D", str(path)],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        check=True,
+    ).stdout
+    lines = [line.strip() for line in output.splitlines()[1:] if line.strip()]
+    return lines[0] if lines else None
+
+
+def _load_commands(path: Path) -> list[str]:
+    """Dependency install names of one Mach-O (LC_LOAD_DYLIB, not its own id)."""
+
+    output = subprocess.run(
+        ["/usr/bin/otool", "-L", str(path)],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        check=True,
+    ).stdout
+    names = []
+    for line in output.splitlines()[1:]:
+        line = line.strip()
+        if line.endswith(")") and " (compatibility" in line:
+            names.append(line.split(" (compatibility", 1)[0])
+    identity = _install_id(path)
+    if identity is not None and identity in names:
+        names.remove(identity)
+    return names
+
+
+def _set_install_name(path: Path, old: str, new: str) -> None:
+    mode = path.stat().st_mode
+    path.chmod(mode | stat.S_IWUSR)
+    subprocess.run(
+        ["/usr/bin/install_name_tool", "-change", old, new, str(path)],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    path.chmod(mode)
+
+
+def _relocate_runtime(runtime: Path) -> None:
+    """Make the copied interpreter tree self-contained.
+
+    The runtime is copied verbatim from the build interpreter, so its Mach-O
+    files still reference absolute install paths (Homebrew and friends). Every
+    foreign dylib is bundled into runtime/lib and every reference is rewritten
+    to an @loader_path-relative one; the pass fails closed if any foreign
+    reference survives.
+    """
+
+    lib_dir = runtime / "lib"
+    framework_binary = runtime / "Python"
+    bundled: dict[str, Path] = {}
+    modified: set[Path] = set()
+    queue = _macho_files(runtime)
+    seen = {path for path in queue}
+    while queue:
+        macho = queue.pop()
+        identity = _install_id(macho)
+        if identity is not None and identity.startswith(_FOREIGN_PREFIXES):
+            mode = macho.stat().st_mode
+            macho.chmod(mode | stat.S_IWUSR)
+            subprocess.run(
+                [
+                    "/usr/bin/install_name_tool",
+                    "-id",
+                    f"@rpath/{macho.name}",
+                    str(macho),
+                ],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            macho.chmod(mode)
+            modified.add(macho)
+        for dependency in _load_commands(macho):
+            if not dependency.startswith(_FOREIGN_PREFIXES):
+                continue
+            if dependency.endswith("/Python.framework/Versions/3.11/Python") and (
+                framework_binary.is_file()
+            ):
+                target = framework_binary
+            else:
+                if dependency not in bundled:
+                    source = Path(dependency).resolve(strict=True)
+                    local = lib_dir / source.name
+                    if not local.exists():
+                        shutil.copy2(source, local, follow_symlinks=True)
+                        local.chmod(0o755)
+                    bundled[dependency] = local
+                    if local not in seen:
+                        seen.add(local)
+                        queue.append(local)
+                target = bundled[dependency]
+            relative = os.path.relpath(target, macho.parent)
+            _set_install_name(macho, dependency, f"@loader_path/{relative}")
+            modified.add(macho)
+    for macho in sorted(modified):
+        # install_name_tool invalidates the existing code signature and the
+        # kernel refuses to execute unsigned arm64 code; restore an ad-hoc
+        # signature (the App build re-signs with its real identity later).
+        mode = macho.stat().st_mode
+        macho.chmod(mode | stat.S_IWUSR)
+        subprocess.run(
+            ["/usr/bin/codesign", "--force", "--sign", "-", str(macho)],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        macho.chmod(mode)
+    remaining = [
+        (path, name)
+        for path in _macho_files(runtime)
+        for name in (*_load_commands(path), _install_id(path) or "")
+        if name.startswith(_FOREIGN_PREFIXES)
+    ]
+    if remaining:
+        listing = "; ".join(f"{p.name} -> {d}" for p, d in remaining[:5])
+        raise SystemExit(f"embedded runtime still references foreign libraries: {listing}")
 
 
 def _copy(source: Path, destination: Path) -> None:
@@ -176,6 +333,7 @@ def build(destination: Path, integration_root: Path | None) -> None:
             encoding="utf-8",
         )
 
+    _relocate_runtime(destination / "runtime")
     executable = destination / "runtime/bin/python3"
     versioned_executable = destination / (
         f"runtime/bin/python{sys.version_info.major}.{sys.version_info.minor}"
