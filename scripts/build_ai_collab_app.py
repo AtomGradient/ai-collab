@@ -167,7 +167,6 @@ def _sign_nested(app: Path, identity: str, *, hardened: bool = False) -> None:
         [
             "/usr/bin/codesign",
             "--force",
-            "--deep",
             "--sign",
             identity,
             *flags,
@@ -213,6 +212,8 @@ def _notarize(target: Path, keychain_profile: str) -> None:
                 "--keychain-profile",
                 keychain_profile,
                 "--wait",
+                "--timeout",
+                "30m",
             ],
             cwd=ROOT,
         )
@@ -243,6 +244,8 @@ def build(
     *,
     notarize: bool = False,
     keychain_profile: str = "AICollab",
+    app_version: str = "0.1",
+    build_number: str = "1",
 ) -> None:
     output = output.expanduser().resolve()
     if integration_root is not None:
@@ -294,8 +297,8 @@ def build(
         info = app / "Contents/Info.plist"
         with info.open("rb") as stream:
             metadata = plistlib.load(stream)
-        metadata["CFBundleShortVersionString"] = "0.1"
-        metadata["CFBundleVersion"] = "1"
+        metadata["CFBundleShortVersionString"] = app_version
+        metadata["CFBundleVersion"] = build_number
         metadata[SERVICE_BUILD_DIGEST_KEY] = _unsigned_bundle_digest(app)
         with info.open("wb") as stream:
             plistlib.dump(metadata, stream, fmt=plistlib.FMT_XML, sort_keys=True)
@@ -356,6 +359,16 @@ def main() -> int:
         default="AICollab",
         help="notarytool keychain profile created via store-credentials",
     )
+    parser.add_argument(
+        "--app-version",
+        default="0.1",
+        help="CFBundleShortVersionString; keep in sync with the release tag",
+    )
+    parser.add_argument(
+        "--build-number",
+        default="1",
+        help="CFBundleVersion; increment for every shipped build",
+    )
     arguments = parser.parse_args()
     build(
         arguments.output,
@@ -364,6 +377,8 @@ def main() -> int:
         arguments.dmg,
         notarize=arguments.notarize,
         keychain_profile=arguments.keychain_profile,
+        app_version=arguments.app_version,
+        build_number=arguments.build_number,
     )
     return 0
 
