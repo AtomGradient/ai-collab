@@ -127,7 +127,7 @@ struct ContentView: View {
         }
         .navigationTitle("AI Collab")
         .toolbar {
-            Button("Register Project", systemImage: "folder.badge.plus") {
+            Button("Register Project", systemImage: "plus") {
                 Task { await model.chooseAndRegisterProject() }
             }
         }
