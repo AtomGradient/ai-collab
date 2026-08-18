@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 
@@ -39,14 +40,19 @@ def _run(argv: list[str], *, cwd: Path) -> str:
     return completed.stdout
 
 
-def _signing_identity() -> str:
+def _signing_identity(*, notarize: bool = False) -> str:
     output = _run(
         ["/usr/bin/security", "find-identity", "-v", "-p", "codesigning"],
         cwd=ROOT,
     )
     matches = re.findall(r'^\s*\d+\)\s+([0-9A-Fa-f]{40})\s+"([^"]+)"', output, re.M)
-    preferred = [value for value, name in matches if name.startswith("Apple Development:")]
+    prefix = "Developer ID Application:" if notarize else "Apple Development:"
+    preferred = [value for value, name in matches if name.startswith(prefix)]
     if not preferred:
+        if notarize:
+            raise SystemExit(
+                "notarized distribution requires a Developer ID Application identity"
+            )
         raise SystemExit("a stable Apple Development signing identity is required")
     return preferred[0]
 
@@ -86,7 +92,52 @@ def _unsigned_bundle_digest(app: Path) -> str:
     return digest.hexdigest()
 
 
-def _sign_nested(app: Path, identity: str) -> None:
+def _codesign(argv: list[str]) -> None:
+    """Run codesign, retrying only transient timestamp-service outages.
+
+    Hardened-runtime signing sends one request per Mach-O to Apple's
+    timestamp service; a brief network or proxy hiccup must not fail the
+    whole build. Any other codesign failure still fails closed immediately.
+    """
+
+    attempts = 3
+    for attempt in range(1, attempts + 1):
+        completed = subprocess.run(
+            argv,
+            cwd=ROOT,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+        if completed.returncode == 0:
+            return
+        transient = "timestamp service is not available" in completed.stdout
+        if not transient or attempt == attempts:
+            raise SystemExit(completed.stdout)
+        time.sleep(2 * attempt)
+
+
+def _hardened_flags(entitlements: Path) -> list[str]:
+    """codesign flags required by Apple notarization (hardened runtime)."""
+
+    if not entitlements.is_file():
+        raise SystemExit(f"entitlements file is missing: {entitlements}")
+    return [
+        "--timestamp",
+        "--options",
+        "runtime",
+        "--entitlements",
+        str(entitlements),
+    ]
+
+
+def _sign_nested(app: Path, identity: str, *, hardened: bool = False) -> None:
+    flags = (
+        _hardened_flags(APP_SOURCE / "AICollab.entitlements")
+        if hardened
+        else ["--timestamp=none"]
+    )
     candidates: list[Path] = []
     for path in app.rglob("*"):
         if not path.is_file() or path.is_symlink():
@@ -102,33 +153,71 @@ def _sign_nested(app: Path, identity: str) -> None:
             candidates.append(path)
     candidates.sort(key=lambda value: len(value.parts), reverse=True)
     for path in candidates:
-        _run(
+        _codesign(
             [
                 "/usr/bin/codesign",
                 "--force",
                 "--sign",
                 identity,
-                "--timestamp=none",
+                *flags,
                 str(path),
-            ],
-            cwd=ROOT,
+            ]
         )
-    _run(
+    _codesign(
         [
             "/usr/bin/codesign",
             "--force",
             "--deep",
             "--sign",
             identity,
-            "--timestamp=none",
+            *flags,
             str(app),
-        ],
-        cwd=ROOT,
+        ]
     )
     _run(
         ["/usr/bin/codesign", "--verify", "--deep", "--strict", str(app)],
         cwd=ROOT,
     )
+
+
+def _notarize(target: Path, keychain_profile: str) -> None:
+    """Submit signed code to the Apple notary service and staple the ticket.
+
+    A .app bundle is zipped for upload; a .dmg is submitted as-is. Gatekeeper
+    assesses the disk image itself on download, so the image needs its own
+    notarization on top of the bundle inside it.
+    """
+
+    with tempfile.TemporaryDirectory(prefix="ai-collab-notarize.") as temporary:
+        if target.suffix == ".dmg":
+            upload = target
+        else:
+            upload = Path(temporary) / f"{target.stem}-notarize.zip"
+            _run(
+                [
+                    "/usr/bin/ditto",
+                    "-c",
+                    "-k",
+                    "--keepParent",
+                    str(target),
+                    str(upload),
+                ],
+                cwd=ROOT,
+            )
+        _run(
+            [
+                "/usr/bin/xcrun",
+                "notarytool",
+                "submit",
+                str(upload),
+                "--keychain-profile",
+                keychain_profile,
+                "--wait",
+            ],
+            cwd=ROOT,
+        )
+    _run(["/usr/bin/xcrun", "stapler", "staple", str(target)], cwd=ROOT)
+    _run(["/usr/bin/xcrun", "stapler", "validate", str(target)], cwd=ROOT)
 
 
 def _selected_interpreter(python_executable: Path) -> Path:
@@ -151,6 +240,9 @@ def build(
     integration_root: Path | None,
     python_executable: Path,
     disk_image: Path | None,
+    *,
+    notarize: bool = False,
+    keychain_profile: str = "AICollab",
 ) -> None:
     output = output.expanduser().resolve()
     if integration_root is not None:
@@ -166,7 +258,7 @@ def build(
             raise SystemExit("disk image already exists; choose a fresh path")
         if disk_image.suffix != ".dmg":
             raise SystemExit("disk image must end in .dmg")
-    identity = _signing_identity()
+    identity = _signing_identity(notarize=notarize)
     with tempfile.TemporaryDirectory(prefix="ai-collab-app-build.") as temporary:
         derived_data = Path(temporary) / "DerivedData"
         _run(["xcodegen", "generate"], cwd=APP_SOURCE)
@@ -207,13 +299,15 @@ def build(
         metadata[SERVICE_BUILD_DIGEST_KEY] = _unsigned_bundle_digest(app)
         with info.open("wb") as stream:
             plistlib.dump(metadata, stream, fmt=plistlib.FMT_XML, sort_keys=True)
-        _sign_nested(app, identity)
+        _sign_nested(app, identity, hardened=notarize)
         output.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(app, output, symlinks=True)
         _run(
             ["/usr/bin/codesign", "--verify", "--deep", "--strict", str(output)],
             cwd=ROOT,
         )
+    if notarize:
+        _notarize(output, keychain_profile)
     print(output)
     if disk_image is not None:
         disk_image.parent.mkdir(parents=True, exist_ok=True)
@@ -231,6 +325,18 @@ def build(
             ],
             cwd=ROOT,
         )
+        if notarize:
+            _codesign(
+                [
+                    "/usr/bin/codesign",
+                    "--force",
+                    "--sign",
+                    identity,
+                    "--timestamp",
+                    str(disk_image),
+                ]
+            )
+            _notarize(disk_image, keychain_profile)
         print(disk_image)
 
 
@@ -240,12 +346,24 @@ def main() -> int:
     parser.add_argument("--integration-root", type=Path, default=None)
     parser.add_argument("--python-executable", type=Path, default=Path(sys.executable))
     parser.add_argument("--dmg", type=Path, default=None)
+    parser.add_argument(
+        "--notarize",
+        action="store_true",
+        help="sign with Developer ID + hardened runtime, then notarize and staple",
+    )
+    parser.add_argument(
+        "--keychain-profile",
+        default="AICollab",
+        help="notarytool keychain profile created via store-credentials",
+    )
     arguments = parser.parse_args()
     build(
         arguments.output,
         arguments.integration_root,
         arguments.python_executable,
         arguments.dmg,
+        notarize=arguments.notarize,
+        keychain_profile=arguments.keychain_profile,
     )
     return 0
 
