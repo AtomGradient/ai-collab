@@ -6,6 +6,10 @@ Local multi-agent Scenario harness for macOS. Turn any Git project into
 durable task rooms where multiple AI agents work in isolated workspaces and
 talk to each other through a typed, audited Host.
 
+Read the story behind it on our blog:
+[AI Collab — open-source multi-AI collaboration](https://www.atomgradient.com/en/blog/ai-collab-open-source-multi-ai-collaboration)
+([中文](https://www.atomgradient.com/zh/blog/ai-collab-open-source-multi-ai-collaboration))
+
 ![The AI Collab App: a running Scenario with two participants, its collaboration policy, and the delivery journal](ai-collab.png)
 
 Four agents across two Scenarios messaging each other through the Host,

@@ -6,6 +6,9 @@ macOS 上的本地多 Agent Scenario 协作套件。把任何 Git 项目变成�
 任务房间：多个 AI Agent 在各自隔离的工作区里干活，并通过一个类型化、可审计
 的 Host 相互通信。
 
+博客文章：[AI Collab — 开源多 AI 协作](https://www.atomgradient.com/zh/blog/ai-collab-open-source-multi-ai-collaboration)
+（[English](https://www.atomgradient.com/en/blog/ai-collab-open-source-multi-ai-collaboration)）
+
 ![AI Collab App：一个运行中的 Scenario、两个参与者、协作策略与投递日志](ai-collab.png)
 
 四个 Agent 分属两个 Scenario，通过 Host 互发消息、互不干扰：
