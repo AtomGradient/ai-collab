@@ -762,14 +762,43 @@ class HarnessHost:
                 "observed_state": current["observed_state"],
             }
             if current["observed_state"] == "ready":
-                reports.append(
-                    {
-                        **base_report,
-                        "outcome": "already_running",
-                        "reason_code": None,
-                        "resulting_state_revision": None,
-                    }
-                )
+                # A durable "ready" is a claim, not evidence. Mirror the
+                # resume loop: prove liveness or report the unit as failed.
+                try:
+                    self.participants.status(
+                        project_instance_id=project_instance_id,
+                        scenario_id=scenario_id,
+                        participant_id=participant_id,
+                        scenario_generation=current_scenario[
+                            "scenario_generation"
+                        ],
+                        scenario_state_revision=current_scenario[
+                            "state_revision"
+                        ],
+                        participant_generation=current[
+                            "participant_generation"
+                        ],
+                        participant_state_revision=current["state_revision"],
+                    )
+                    reports.append(
+                        {
+                            **base_report,
+                            "outcome": "already_running",
+                            "reason_code": None,
+                            "resulting_state_revision": None,
+                        }
+                    )
+                except (ParticipantError, StoreError, OperationFailed) as exc:
+                    reports.append(
+                        {
+                            **base_report,
+                            "outcome": "failed",
+                            "reason_code": getattr(
+                                exc, "code", "participant.health-unverified"
+                            ),
+                            "resulting_state_revision": None,
+                        }
+                    )
                 emit_progress(
                     "running",
                     completed_units=index + 1,
@@ -795,6 +824,11 @@ class HarnessHost:
                     participant_id=participant_id,
                 )
                 continue
+            # The exact state revision is part of the child identity: a
+            # transport-level retry of the same parent request after the
+            # participant moved (started then stopped again) must run a
+            # fresh child start, never replay the stale journal entry as a
+            # false "started".
             child_request_id = "start-all-" + hashlib.sha256(
                 (
                     request_id
@@ -802,6 +836,8 @@ class HarnessHost:
                     + participant_id
                     + "\0"
                     + str(current["participant_generation"])
+                    + "\0"
+                    + str(current["state_revision"])
                 ).encode("utf-8")
             ).hexdigest()[:32]
             child_request_digest = canonical_json_sha256(
@@ -814,6 +850,7 @@ class HarnessHost:
                     "participant_generation": current[
                         "participant_generation"
                     ],
+                    "participant_state_revision": current["state_revision"],
                 }
             )
             participant_client: dict[str, str] | None = None
@@ -867,7 +904,21 @@ class HarnessHost:
                 StoreError,
                 OperationFailed,
             ) as exc:
-                if participant_client is not None:
+                failure_code = getattr(exc, "code", "participant.start-failed")
+                # A pure precondition loss means this unit's external start
+                # never began — a concurrent starter may have won the fence
+                # and its in-flight launch owns the material files, so
+                # revoking here would delete the winner's identity mid-launch.
+                lost_before_external = isinstance(exc, StoreError) and (
+                    failure_code
+                    in {
+                        "scenario.stale-fence",
+                        "participant.stale-fence",
+                        "participant.invalid-transition",
+                        "participant.not-found",
+                    }
+                )
+                if participant_client is not None and not lost_before_external:
                     self.participant_auth.revoke(
                         project_instance_id=project_instance_id,
                         scenario_id=scenario_id,
@@ -880,9 +931,7 @@ class HarnessHost:
                     {
                         **base_report,
                         "outcome": "failed",
-                        "reason_code": getattr(
-                            exc, "code", "participant.start-failed"
-                        ),
+                        "reason_code": failure_code,
                         "resulting_state_revision": None,
                     }
                 )
@@ -1893,6 +1942,17 @@ class HarnessHost:
             operation_id = f"op-{request['request_id']}"
             active = _ActiveOperation(threading.Event(), "committed")
             with self._active_operation_lock:
+                if operation_id in self._active_operations:
+                    # The same request is still executing (a timeout retry
+                    # landing mid-flight). Running it twice would race the
+                    # per-unit fences and leave cancel pointing at only one
+                    # of the two loops.
+                    raise ProtocolError(
+                        "scenario.operation-in-progress",
+                        "operation",
+                        "this batch start request is still executing",
+                        retryable=True,
+                    )
                 self._active_operations[operation_id] = active
             try:
                 result = self._start_scenario_participants(

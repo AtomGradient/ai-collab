@@ -401,8 +401,10 @@ final class HarnessViewModel: ObservableObject {
     }
 
     /// Machine-readiness report for the Diagnostics page. Read-only and
-    /// best-effort: a Host that predates the operation simply leaves the
-    /// report empty instead of surfacing an error.
+    /// best-effort: any failure — connection, operation, or a reply that does
+    /// not decode cleanly — renders as an empty report, fail closed, without
+    /// breaking bootstrap. (A Host that predates the operation never gets
+    /// here: the handshake's registry-digest pin fails every call first.)
     func refreshEnvironmentReport() async {
         let result = try? await client.call(
             HarnessCall(operation: "environment.probe", target: ["scope": "host"])
@@ -685,19 +687,29 @@ final class HarnessViewModel: ObservableObject {
                 as? [String: Any] ?? [:]
             func count(_ key: String) -> Int { counts[key] as? Int ?? 0 }
             let started = count("started")
+            let alreadyRunning = count("already_running")
             let failed = count("failed")
             let skipped = count("skipped")
-            if failed > 0 || skipped > 0 {
+            if failed > 0 {
                 self.refuse(
                     .participantAction,
-                    "Started \(started) of \(count("total")) — "
-                        + "\(failed) failed, \(skipped) skipped. "
-                        + "Use the participant rows to repair the rest."
+                    "Started \(started), \(failed) failed"
+                        + (skipped > 0 ? ", \(skipped) skipped" : "")
+                        + ". Use the participant rows to repair — or, if the "
+                        + "Scenario itself is degraded, Resume or Repair it first."
                 )
-            } else if started == 0 {
-                self.noteSuccess("Every participant was already running.")
+            } else if started == 0 && skipped == 0 {
+                self.noteSuccess("Every participant is already running.")
             } else {
-                self.noteSuccess("Started \(started) participant(s).")
+                var parts: [String] = []
+                if started > 0 { parts.append("started \(started)") }
+                if alreadyRunning > 0 {
+                    parts.append("\(alreadyRunning) already running")
+                }
+                if skipped > 0 { parts.append("\(skipped) skipped") }
+                self.noteSuccess(
+                    "Start All: " + parts.joined(separator: ", ") + "."
+                )
             }
         }
     }

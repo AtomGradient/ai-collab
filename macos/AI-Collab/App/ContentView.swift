@@ -297,6 +297,7 @@ struct ContentView: View {
                     .disabled(
                         model.isBusy
                             || !model.participants.contains(where: \.canStart)
+                            || scenario.desiredState != "running"
                             || !["running", "opening", "degraded"].contains(
                                 scenario.observedState
                             )

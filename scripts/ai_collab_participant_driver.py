@@ -408,6 +408,20 @@ def _observed_tool_version(executable_path: str) -> str | None:
 def _installed_application_path(bundle_identifier: str) -> Path | None:
     """Locate an installed app bundle by identifier without launching it."""
 
+    # Standard install locations first: deterministic, and never outvoted by
+    # a stale Spotlight-indexed copy (Downloads, backup volumes).
+    for root in (Path("/Applications"), Path.home() / "Applications"):
+        if not root.is_dir():
+            continue
+        for candidate in sorted(root.glob("*.app")):
+            info_path = candidate / "Contents" / "Info.plist"
+            try:
+                with open(info_path, "rb") as handle:
+                    info = plistlib.load(handle)
+            except (OSError, plistlib.InvalidFileException, ValueError):
+                continue
+            if info.get("CFBundleIdentifier") == bundle_identifier:
+                return candidate
     try:
         completed = subprocess.run(
             (
@@ -421,24 +435,11 @@ def _installed_application_path(bundle_identifier: str) -> Path | None:
             check=False,
         )
     except (subprocess.TimeoutExpired, OSError):
-        completed = None
-    if completed is not None and completed.returncode == 0:
+        return None
+    if completed.returncode == 0:
         for line in completed.stdout.splitlines():
             candidate = Path(line.strip())
             if candidate.suffix == ".app" and candidate.is_dir():
-                return candidate
-    # Spotlight can be disabled; fall back to the standard install locations.
-    for root in (Path("/Applications"), Path.home() / "Applications"):
-        if not root.is_dir():
-            continue
-        for candidate in sorted(root.glob("*.app")):
-            info_path = candidate / "Contents" / "Info.plist"
-            try:
-                with open(info_path, "rb") as handle:
-                    info = plistlib.load(handle)
-            except (OSError, plistlib.InvalidFileException, ValueError):
-                continue
-            if info.get("CFBundleIdentifier") == bundle_identifier:
                 return candidate
     return None
 
@@ -549,6 +550,8 @@ def environment_probe(payload: Mapping[str, Any]) -> dict[str, Any]:
     ]
     observations.append(_presentation_environment_observation())
     observations.append(_shell_environment_observation())
+    if len(observations) > 64:
+        raise DriverError("environment probe observation count differs")
     return {
         "environment_observations": sorted(
             observations, key=lambda value: value["subject_ref"]
@@ -714,6 +717,14 @@ def _runtime_profiles() -> dict[str, dict[str, Any]]:
     return result
 
 
+# Profile ids double as environment.probe subject_refs, so they must live in
+# the supervisor's namespaced-id domain, and the fixed observation subjects
+# stay reserved. Enforced at registry load so an operator learns immediately,
+# not by losing the entire diagnostics surface later.
+_PROFILE_ID_RE = re.compile(r"^[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*)+$")
+_RESERVED_PROFILE_PREFIXES = ("shell.", "presentation.")
+
+
 def _validated_runtime_profiles(
     path: Path, source: str
 ) -> dict[str, dict[str, Any]]:
@@ -751,8 +762,11 @@ def _validated_runtime_profiles(
                 "startup_gate",
             }
             or not isinstance(row["profile_id"], str)
+            or _PROFILE_ID_RE.fullmatch(row["profile_id"]) is None
+            or row["profile_id"].startswith(_RESERVED_PROFILE_PREFIXES)
             or not isinstance(row["display_name"], str)
             or not row["display_name"].strip()
+            or len(row["display_name"]) > 120
             or not isinstance(row["executable"], str)
             or not row["executable"]
             or not isinstance(row["arguments"], list)

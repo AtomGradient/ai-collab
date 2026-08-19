@@ -386,6 +386,44 @@ def test_a_broken_overlay_fails_instead_of_being_ignored(
     assert "overlay" in str(failure.value)
 
 
+@pytest.mark.parametrize(
+    "profile_id",
+    [
+        "MyTool",  # uppercase
+        "codex",  # no namespace dot
+        "my_tool",  # underscore
+        "",  # empty
+        "shell.zsh",  # reserved: collides with the fixed probe subject
+        "presentation.iterm2",  # reserved: collides with the fixed probe subject
+    ],
+)
+def test_profile_ids_must_live_in_the_namespaced_subject_domain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, profile_id: str
+) -> None:
+    """Profile ids double as environment.probe subject_refs. An id the
+    supervisor's namespaced-id rule rejects — or one that collides with the
+    fixed shell/presentation subjects — must fail at overlay load, not by
+    erroring the entire diagnostics report later."""
+    shipped = participant_driver._runtime_profiles()  # noqa: SLF001
+    added = copy.deepcopy(shipped["runtime-profile.inert"])
+    added["profile_id"] = profile_id
+    _overlay(tmp_path, monkeypatch, {"schema_version": 1, "profiles": [added]})
+    with pytest.raises(participant_driver.DriverError):
+        participant_driver._runtime_profiles()  # noqa: SLF001
+
+
+def test_profile_display_names_stay_inside_the_supervisor_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shipped = participant_driver._runtime_profiles()  # noqa: SLF001
+    added = copy.deepcopy(shipped["runtime-profile.inert"])
+    added["profile_id"] = "runtime-profile.long-name"
+    added["display_name"] = "x" * 121
+    _overlay(tmp_path, monkeypatch, {"schema_version": 1, "profiles": [added]})
+    with pytest.raises(participant_driver.DriverError):
+        participant_driver._runtime_profiles()  # noqa: SLF001
+
+
 def test_an_overlay_is_held_to_the_registry_rules(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

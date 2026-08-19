@@ -2706,6 +2706,202 @@ def test_scenario_start_participants_reports_ready_units_without_restarting(
         assert driver.start_calls == 2
 
 
+def test_scenario_start_participants_retry_after_stop_starts_for_real(
+    tmp_path: Path,
+) -> None:
+    """A transport retry of the same request id must never replay a stale
+    child journal entry as a false "started" after the unit was stopped."""
+
+    state_root = tmp_path / "state"
+    with running_host(state_root) as (_, client, driver):
+        driver.per_participant_resource_digests = True
+        created = client.create_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            project_binding_digest=PROJECT_DIGEST,
+            request_id="start-all-retry-create",
+        )["scenario"]
+        _add_test_participant(
+            client,
+            scenario=created,
+            participant_id=PARTICIPANT_ID,
+            request_prefix="start-all-retry",
+        )
+        opened = client.open_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=created["scenario_generation"],
+            scenario_state_revision=created["state_revision"],
+            request_id="start-all-retry-open",
+        )["scenario"]
+        first = client.start_scenario_participants(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=opened["scenario_generation"],
+            scenario_state_revision=opened["state_revision"],
+            request_id="start-all-retry",
+        )
+        assert first["start_summary"]["counts"]["started"] == 1
+        assert driver.start_calls == 1
+        running = {
+            value["participant_id"]: value
+            for value in client.list_participants(
+                project_instance_id=PROJECT_ID, scenario_id=SCENARIO_ID
+            )["participants"]
+        }[PARTICIPANT_ID]
+        client.stop_participant(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            participant_id=PARTICIPANT_ID,
+            scenario_generation=opened["scenario_generation"],
+            scenario_state_revision=opened["state_revision"],
+            participant_generation=running["participant_generation"],
+            participant_state_revision=running["state_revision"],
+            request_id="start-all-retry-stop",
+        )
+
+        retried = client.start_scenario_participants(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=opened["scenario_generation"],
+            scenario_state_revision=opened["state_revision"],
+            request_id="start-all-retry",
+        )
+        assert retried["start_summary"]["counts"]["started"] == 1
+        assert driver.start_calls == 2
+        after = {
+            value["participant_id"]: value
+            for value in client.list_participants(
+                project_instance_id=PROJECT_ID, scenario_id=SCENARIO_ID
+            )["participants"]
+        }[PARTICIPANT_ID]
+        assert after["observed_state"] == "ready"
+
+
+def test_scenario_start_participants_refuses_concurrent_identical_request(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    with running_host(state_root) as (_, client, driver):
+        created = client.create_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            project_binding_digest=PROJECT_DIGEST,
+            request_id="start-all-dup-create",
+        )["scenario"]
+        _add_test_participant(
+            client,
+            scenario=created,
+            participant_id=PARTICIPANT_ID,
+            request_prefix="start-all-dup",
+        )
+        opened = client.open_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=created["scenario_generation"],
+            scenario_state_revision=created["state_revision"],
+            request_id="start-all-dup-open",
+        )["scenario"]
+        driver.start_release = threading.Event()
+        outcomes: list[object] = []
+
+        def start_all() -> None:
+            try:
+                outcomes.append(
+                    client.start_scenario_participants(
+                        project_instance_id=PROJECT_ID,
+                        scenario_id=SCENARIO_ID,
+                        scenario_generation=opened["scenario_generation"],
+                        scenario_state_revision=opened["state_revision"],
+                        request_id="start-all-dup",
+                    )
+                )
+            except HarnessClientError as exc:
+                outcomes.append(exc)
+
+        thread = threading.Thread(target=start_all)
+        thread.start()
+        assert driver.start_started.wait(timeout=3)
+        with pytest.raises(HarnessClientError) as duplicate:
+            client.start_scenario_participants(
+                project_instance_id=PROJECT_ID,
+                scenario_id=SCENARIO_ID,
+                scenario_generation=opened["scenario_generation"],
+                scenario_state_revision=opened["state_revision"],
+                request_id="start-all-dup",
+            )
+        assert duplicate.value.code == "scenario.operation-in-progress"
+        driver.start_release.set()
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+        assert len(outcomes) == 1
+        assert isinstance(outcomes[0], dict)
+        assert outcomes[0]["start_summary"]["counts"]["started"] == 1
+        assert driver.start_calls == 1
+
+
+def test_scenario_start_participants_probes_ready_units_instead_of_trusting_state(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    second_id = "participant-two"
+    with running_host(state_root) as (_, client, driver):
+        driver.per_participant_resource_digests = True
+        created = client.create_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            project_binding_digest=PROJECT_DIGEST,
+            request_id="start-all-dead-create",
+        )["scenario"]
+        first = _add_test_participant(
+            client,
+            scenario=created,
+            participant_id=PARTICIPANT_ID,
+            request_prefix="start-all-dead-first",
+        )
+        _add_test_participant(
+            client,
+            scenario=created,
+            participant_id=second_id,
+            request_prefix="start-all-dead-second",
+        )
+        opened = client.open_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=created["scenario_generation"],
+            scenario_state_revision=created["state_revision"],
+            request_id="start-all-dead-open",
+        )["scenario"]
+        started = _start_test_participant(
+            client,
+            scenario=opened,
+            participant=first,
+            participant_id=PARTICIPANT_ID,
+            request_prefix="start-all-dead-first",
+        )
+        # The process dies externally: the durable record still says ready,
+        # but the driver can no longer prove the binding.
+        driver.running_bindings.discard(started["runtime_binding_id"])
+
+        result = client.start_scenario_participants(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=opened["scenario_generation"],
+            scenario_state_revision=opened["state_revision"],
+            request_id="start-all-dead",
+        )
+        outcomes = {
+            report["participant_id"]: report
+            for report in result["start_summary"]["reports"]
+        }
+        assert outcomes[PARTICIPANT_ID]["outcome"] == "failed"
+        assert outcomes[PARTICIPANT_ID]["reason_code"] == (
+            "participant.binding-drift"
+        )
+        assert outcomes[second_id]["outcome"] == "started"
+        assert result["start_summary"]["counts"]["already_running"] == 0
+
+
 def test_scenario_start_participants_rejects_stale_scenario_fence(
     tmp_path: Path,
 ) -> None:
