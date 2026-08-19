@@ -1346,6 +1346,28 @@ class HarnessHost:
                     True,
                 ) from exc
             operation_id = f"read-{request['request_id']}"
+        elif operation == "environment.probe":
+            # A pure machine-environment observation: which registry-declared
+            # runtime executables, presentation target, and shell exist right
+            # now. Nothing durable moves and no vendor name reaches this file.
+            if self.participants is None:
+                raise ProtocolError(
+                    "availability.driver-unavailable",
+                    "availability",
+                    "participant driver is not configured",
+                    False,
+                    "participant.driver-configure",
+                )
+            try:
+                result = self.participants.environment_probe()
+            except ParticipantError as exc:
+                raise ProtocolError(
+                    "environment.observation-failed",
+                    "operation",
+                    "machine environment observation failed",
+                    True,
+                ) from exc
+            operation_id = f"read-{request['request_id']}"
         elif operation == "project.register":
             if request["fence"]["operation_generation"] != 0:
                 raise ProtocolError(

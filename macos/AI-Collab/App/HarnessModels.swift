@@ -265,6 +265,33 @@ struct PermissionObservationRecord: Identifiable, Equatable {
     }
 }
 
+struct EnvironmentObservationRecord: Identifiable, Equatable {
+    let subjectRef: String
+    let displayName: String
+    let status: String
+    let observedVersion: String?
+    let providerErrorCode: String?
+    let remediationRef: String?
+
+    var id: String { subjectRef }
+
+    init?(_ value: [String: Any]) {
+        guard
+            let subjectRef = value["subject_ref"] as? String,
+            let displayName = value["display_name"] as? String,
+            let status = value["status"] as? String,
+            ["available", "missing", "unknown"].contains(status),
+            value["evidence_digest"] as? String != nil
+        else { return nil }
+        self.subjectRef = subjectRef
+        self.displayName = displayName
+        self.status = status
+        self.observedVersion = value["observed_version"] as? String
+        self.providerErrorCode = value["provider_error_code"] as? String
+        self.remediationRef = value["remediation_ref"] as? String
+    }
+}
+
 struct ScenarioPreflightRecord: Equatable {
     let status: String
     let capturedAtEpochMS: Int

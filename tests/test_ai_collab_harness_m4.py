@@ -2337,6 +2337,85 @@ def test_workspace_path_rejects_invalid_declared_directories(
             participant_driver._workspace_path(str(tmp_path), profile, declared)
 
 
+def test_environment_probe_is_registry_driven_and_reports_missing_tools(
+    monkeypatch: Any,
+) -> None:
+    profiles = {
+        "runtime-profile.codex": {
+            "display_name": "Codex",
+            "executable": "codex",
+        },
+        "runtime-profile.claude": {
+            "display_name": "Claude",
+            "executable": "claude",
+        },
+    }
+    monkeypatch.setattr(
+        participant_driver, "_runtime_profiles", lambda: profiles
+    )
+    monkeypatch.setattr(
+        participant_driver,
+        "_resolve_executable",
+        lambda executable: (
+            "/opt/tools/codex" if executable == "codex" else None
+        ),
+    )
+    monkeypatch.setattr(
+        participant_driver,
+        "_observed_tool_version",
+        lambda path: {
+            "/opt/tools/codex": "codex-cli 9.9.9",
+            "/bin/zsh": "zsh 5.9",
+        }.get(path),
+    )
+    monkeypatch.setattr(
+        participant_driver, "_target_application_running", lambda _bundle: False
+    )
+    monkeypatch.setattr(
+        participant_driver, "_installed_application_path", lambda _bundle: None
+    )
+
+    result = participant_driver.environment_probe({})
+    observations = {
+        value["subject_ref"]: value
+        for value in result["environment_observations"]
+    }
+    # Every runtime subject comes from the (patched) registry data alone: a
+    # new vendor profile is covered with zero code changes here.
+    assert set(observations) == {
+        "runtime-profile.codex",
+        "runtime-profile.claude",
+        "presentation.iterm2",
+        "shell.zsh",
+    }
+    codex = observations["runtime-profile.codex"]
+    assert codex["status"] == "available"
+    assert codex["observed_version"] == "codex-cli 9.9.9"
+    assert codex["provider_error_code"] is None
+    assert codex["remediation_ref"] is None
+    claude = observations["runtime-profile.claude"]
+    assert claude["status"] == "missing"
+    assert claude["observed_version"] is None
+    assert claude["provider_error_code"] == "environment.executable-not-found"
+    assert claude["remediation_ref"] == "environment.install-executable"
+    iterm = observations["presentation.iterm2"]
+    assert iterm["status"] == "missing"
+    assert iterm["remediation_ref"] == "environment.install-application"
+    zsh = observations["shell.zsh"]
+    assert zsh["status"] == "available"
+    assert zsh["observed_version"] == "zsh 5.9"
+    assert [
+        value["subject_ref"] for value in result["environment_observations"]
+    ] == sorted(observations)
+    for value in observations.values():
+        assert len(value["evidence_digest"]) == 64
+
+
+def test_environment_probe_rejects_payload_fields() -> None:
+    with pytest.raises(participant_driver.DriverError):
+        participant_driver.environment_probe({"unexpected": True})
+
+
 def test_presentation_permission_request_guards_absent_target(
     monkeypatch: Any,
 ) -> None:

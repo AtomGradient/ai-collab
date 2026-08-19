@@ -182,6 +182,12 @@ struct ContentView: View {
                             + "needs to present agents in iTerm2 windows."
                     )
                 }
+                SettingsLink {
+                    Label("Diagnostics", systemImage: "stethoscope")
+                        .labelStyle(.iconOnly)
+                }
+                .controlSize(.small)
+                .help("Open the Diagnostics report (also under Settings, ⌘,)")
             }
             .padding(10)
             .background(.bar)
@@ -1055,21 +1061,140 @@ struct ContentView: View {
 
 // MARK: - StateBadge (semantic color)
 
+struct DiagnosticsView: View {
+    @EnvironmentObject private var model: HarnessViewModel
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                GroupBox("About") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        aboutRow("App version", HarnessViewModel.appVersionText)
+                        aboutRow(
+                            "Harness contract",
+                            HarnessViewModel.contractVersionText
+                        )
+                        HStack {
+                            Text("Host")
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            StateBadge(state: model.hostStatus)
+                        }
+                    }
+                    .padding(6)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                GroupBox("Machine Readiness") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        if model.environmentObservations.isEmpty {
+                            Text(
+                                "No report yet. The Host may still be starting "
+                                    + "— use Refresh below."
+                            )
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                        }
+                        ForEach(model.environmentObservations) { observation in
+                            environmentRow(observation)
+                        }
+                    }
+                    .padding(6)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                GroupBox("Automation Permission") {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("iTerm2 control")
+                            Text("Required before agents can be presented")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        StateBadge(
+                            state: model.presentationPermissionStatus ?? "unknown"
+                        )
+                        if model.presentationPermissionStatus != "granted" {
+                            Button("Request Permission") {
+                                Task {
+                                    await model.requestPresentationPermission()
+                                }
+                            }
+                            .controlSize(.small)
+                        }
+                    }
+                    .padding(6)
+                }
+                HStack {
+                    Spacer()
+                    Button("Refresh", systemImage: "arrow.clockwise") {
+                        Task {
+                            await model.refreshEnvironmentReport()
+                            await model.refreshPresentationPermission()
+                        }
+                    }
+                }
+            }
+            .padding(20)
+        }
+        .frame(minWidth: 560, minHeight: 460)
+        .navigationTitle("Diagnostics")
+        .task {
+            await model.refreshEnvironmentReport()
+            await model.refreshPresentationPermission()
+        }
+    }
+
+    private func aboutRow(_ label: String, _ value: String) -> some View {
+        HStack {
+            Text(label).foregroundStyle(.secondary)
+            Spacer()
+            Text(value).font(.callout.monospaced())
+        }
+    }
+
+    private func environmentRow(
+        _ observation: EnvironmentObservationRecord
+    ) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            StateBadge(state: observation.status)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(observation.displayName)
+                Text(observation.subjectRef)
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                if observation.status != "available",
+                   let remediation = observation.remediationRef {
+                    Text("Install it on this Mac, then Refresh · \(remediation)")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+            }
+            Spacer()
+            if let version = observation.observedVersion {
+                Text(version)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
 private struct StateBadge: View {
     let state: String
 
     private var color: Color {
         switch state {
-        case "ready", "running", "delivered", "consumed", "current", "passed":
+        case "ready", "running", "delivered", "consumed", "current", "passed",
+             "available", "granted":
             .green
         case "stopped", "detached", "not_requested":
             .gray
         case "starting", "stopping", "recovering", "repairing", "replacing",
              "queued", "pending":
             .blue
-        case "degraded", "re-plan required", "blocked":
+        case "degraded", "re-plan required", "blocked", "not_determined":
             .orange
-        case "provision_failed", "failed", "rejected":
+        case "provision_failed", "failed", "rejected", "missing", "denied":
             .red
         default:
             .secondary

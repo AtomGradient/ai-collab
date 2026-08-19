@@ -569,6 +569,9 @@ class HarnessClient:
             "participant.template.list", {"scope": "host"}, {}, {}
         )
 
+    def environment_probe(self) -> dict[str, Any]:
+        return self._call("environment.probe", {"scope": "host"}, {}, {})
+
     def start_participant(
         self,
         *,

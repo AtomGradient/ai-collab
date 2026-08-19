@@ -199,6 +199,11 @@ PRESENTATION_PERMISSION_RESULT_SCHEMA = {
     "required": ["permission_observations"],
     "properties": {"permission_observations": {"type": "array"}},
 }
+ENVIRONMENT_PROBE_RESULT_SCHEMA = {
+    "type": "object",
+    "required": ["environment_observations"],
+    "properties": {"environment_observations": {"type": "array"}},
+}
 SCENARIO_TOPOLOGY_RESULT_SCHEMA = {
     "type": "object",
     "required": ["topology"],
@@ -562,6 +567,15 @@ OPERATION_DESCRIPTORS = (
         mutation_class="external_effect",
         request_schema=EMPTY_OBJECT_SCHEMA,
         result_schema=PRESENTATION_PERMISSION_RESULT_SCHEMA,
+    ),
+    _descriptor(
+        "environment.probe",
+        capability="participant.read",
+        target_scope="host",
+        required_fences=["host_generation"],
+        mutation_class="read_only",
+        request_schema=EMPTY_OBJECT_SCHEMA,
+        result_schema=ENVIRONMENT_PROBE_RESULT_SCHEMA,
     ),
     _descriptor(
         "project.register",
@@ -1273,6 +1287,7 @@ def _validate_payload(operation: str, value: Any) -> None:
         "host.status",
         "presentation.permission-probe",
         "presentation.permission-request",
+        "environment.probe",
         "project.list",
         "scenario.list",
         "scenario.status",

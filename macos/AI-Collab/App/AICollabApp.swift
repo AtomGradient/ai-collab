@@ -45,5 +45,10 @@ struct AICollabApp: App {
         .commands {
             CommandGroup(replacing: .newItem) {}
         }
+
+        Settings {
+            DiagnosticsView()
+                .environmentObject(model)
+        }
     }
 }

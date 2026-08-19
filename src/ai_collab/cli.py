@@ -57,7 +57,14 @@ def add_harness_parser(subparsers: Any) -> None:
     host.add_argument("--workspace-root", type=Path, default=None)
 
     health = commands.add_parser("status", help="Read Host health and durable Scenario count")
+
     _add_connection_options(health)
+
+    doctor = commands.add_parser(
+        "doctor",
+        help="Report machine readiness for every registry-declared dependency",
+    )
+    _add_connection_options(doctor)
 
     operation = commands.add_parser(
         "operation", help="Control a live cooperative Harness operation"
@@ -462,6 +469,8 @@ def run_harness_command(args: argparse.Namespace) -> int:
     try:
         if args.harness_command == "status":
             result = client.host_status()
+        elif args.harness_command == "doctor":
+            result = client.environment_probe()
         elif args.harness_command == "operation":
             result = client.cancel_operation(args.operation_id)
         elif args.harness_command == "project":

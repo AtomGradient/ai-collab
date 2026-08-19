@@ -328,6 +328,20 @@ class FakeDriver:
                     }
                 ]
             }
+        if operation == "environment_probe":
+            return {
+                "environment_observations": [
+                    {
+                        "subject_ref": "runtime-profile.inert",
+                        "display_name": "Inert (test fixture)",
+                        "status": "available",
+                        "observed_version": "1.0",
+                        "evidence_digest": "8" * 64,
+                        "provider_error_code": None,
+                        "remediation_ref": None,
+                    }
+                ]
+            }
         if operation == "permission_probe":
             return {
                 "permission_observations": [
@@ -2429,6 +2443,65 @@ def test_scenario_resume_reports_optional_exact_resume_capability(
         assert summary["reports"][0]["repair_required"] is (
             not resume_binding_present
         )
+
+
+def test_environment_probe_round_trips_validated_observations(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    with running_host(state_root) as (_, client, _driver):
+        result = client.environment_probe()
+        assert result == {
+            "environment_observations": [
+                {
+                    "subject_ref": "runtime-profile.inert",
+                    "display_name": "Inert (test fixture)",
+                    "status": "available",
+                    "observed_version": "1.0",
+                    "evidence_digest": "8" * 64,
+                    "provider_error_code": None,
+                    "remediation_ref": None,
+                }
+            ]
+        }
+
+
+def test_environment_probe_fails_closed_on_malformed_reply(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    with running_host(state_root) as (_, client, driver):
+        original_call = driver.call
+
+        def malformed(
+            operation: str,
+            payload: Mapping[str, Any],
+            *,
+            timeout_seconds: float = 300,
+        ) -> dict[str, Any]:
+            if operation == "environment_probe":
+                return {
+                    "environment_observations": [
+                        {
+                            "subject_ref": "runtime-profile.inert",
+                            "display_name": "Inert (test fixture)",
+                            "status": "available",
+                            # Wrong type must be rejected, not coerced.
+                            "observed_version": 1.0,
+                            "evidence_digest": "8" * 64,
+                            "provider_error_code": None,
+                            "remediation_ref": None,
+                        }
+                    ]
+                }
+            return original_call(
+                operation, payload, timeout_seconds=timeout_seconds
+            )
+
+        driver.call = malformed  # type: ignore[method-assign]
+        with pytest.raises(HarnessClientError) as failed:
+            client.environment_probe()
+        assert failed.value.code == "environment.observation-failed"
 
 
 def test_scenario_start_participants_starts_every_startable_unit(

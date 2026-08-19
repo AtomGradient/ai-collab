@@ -310,6 +310,88 @@ class ParticipantCoordinator:
             )
         }
 
+    def environment_probe(self) -> dict[str, Any]:
+        """Return fresh provider-neutral machine environment observations.
+
+        The driver decides what to observe from its own data (runtime-profile
+        registry, presentation target, shell); this supervisor only enforces
+        the provider-neutral record shape, fail closed.
+        """
+
+        result = self.driver.call("environment_probe", {})
+        observations = (
+            result.get("environment_observations")
+            if isinstance(result, dict)
+            else None
+        )
+        if (
+            not isinstance(observations, list)
+            or not observations
+            or len(observations) > 64
+        ):
+            raise ParticipantError(
+                "driver.invalid-reply", "participant environment observation differs"
+            )
+        validated: list[dict[str, Any]] = []
+        subjects: set[str] = set()
+        for value in observations:
+            if (
+                not isinstance(value, dict)
+                or set(value)
+                != {
+                    "subject_ref",
+                    "display_name",
+                    "status",
+                    "observed_version",
+                    "evidence_digest",
+                    "provider_error_code",
+                    "remediation_ref",
+                }
+                or not isinstance(value["subject_ref"], str)
+                or NAMESPACED_RE.fullmatch(value["subject_ref"]) is None
+                or not isinstance(value["display_name"], str)
+                or not 0 < len(value["display_name"]) <= 120
+                or not isinstance(value["status"], str)
+                or value["status"] not in {"available", "missing", "unknown"}
+                # observed_version is displayable text: type and bound only,
+                # never a format regex — vendors version however they like.
+                or not (
+                    value["observed_version"] is None
+                    or (
+                        isinstance(value["observed_version"], str)
+                        and 0 < len(value["observed_version"]) <= 256
+                    )
+                )
+                or not isinstance(value["evidence_digest"], str)
+                or SHA256_RE.fullmatch(value["evidence_digest"]) is None
+                or any(
+                    item is not None
+                    and (
+                        not isinstance(item, str)
+                        or NAMESPACED_RE.fullmatch(item) is None
+                    )
+                    for item in (
+                        value["provider_error_code"],
+                        value["remediation_ref"],
+                    )
+                )
+            ):
+                raise ParticipantError(
+                    "driver.invalid-reply", "participant environment values differ"
+                )
+            if value["subject_ref"] in subjects:
+                raise ParticipantError(
+                    "driver.invalid-reply",
+                    "participant environment identity differs",
+                )
+            subjects.add(value["subject_ref"])
+            validated.append(copy.deepcopy(value))
+        return {
+            "environment_observations": sorted(
+                validated, key=lambda value: value["subject_ref"]
+            )
+        }
+
     def start(
         self,
         *,

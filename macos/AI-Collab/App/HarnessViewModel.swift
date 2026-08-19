@@ -39,6 +39,7 @@ final class HarnessViewModel: ObservableObject {
     @Published var resources: [ResourceLeaseRecord] = []
     @Published var preflight: ScenarioPreflightRecord?
     @Published var presentationPermissionStatus: String?
+    @Published var environmentObservations: [EnvironmentObservationRecord] = []
     @Published var topology: ScenarioTopologyRecord?
     @Published var templates: [ParticipantTemplate] = []
     @Published var selectedTemplateID: String?
@@ -182,6 +183,7 @@ final class HarnessViewModel: ObservableObject {
             try await self.reloadTemplates()
             try await self.reloadPolicyTemplates()
             await self.refreshPresentationPermission()
+            await self.refreshEnvironmentReport()
         }
     }
 
@@ -396,6 +398,32 @@ final class HarnessViewModel: ObservableObject {
             )
         )
         presentationPermissionStatus = result.flatMap(Self.permissionStatus)
+    }
+
+    /// Machine-readiness report for the Diagnostics page. Read-only and
+    /// best-effort: a Host that predates the operation simply leaves the
+    /// report empty instead of surfacing an error.
+    func refreshEnvironmentReport() async {
+        let result = try? await client.call(
+            HarnessCall(operation: "environment.probe", target: ["scope": "host"])
+        )
+        let raw = dictionaries(result?["environment_observations"])
+        let parsed = raw.compactMap(EnvironmentObservationRecord.init)
+        environmentObservations = parsed.count == raw.count ? parsed : []
+    }
+
+    static var appVersionText: String {
+        let short =
+            Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString")
+            as? String ?? "—"
+        let build =
+            Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion")
+            as? String ?? "—"
+        return "\(short) (\(build))"
+    }
+
+    static var contractVersionText: String {
+        "v\(HarnessContract.version) · \(HarnessContract.operationRegistryDigest.prefix(12))"
     }
 
     private static func permissionStatus(_ result: [String: Any]) -> String? {

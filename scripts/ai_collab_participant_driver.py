@@ -11,6 +11,7 @@ import asyncio
 import hashlib
 import json
 import os
+import plistlib
 import re
 import secrets
 import shlex
@@ -143,6 +144,7 @@ def presentation_descriptor() -> dict[str, Any]:
         "lifecycle_operations": [
             "permission_probe",
             "permission_request",
+            "environment_probe",
             "create_top_level",
             "focus",
             "close_exact",
@@ -375,6 +377,182 @@ def permission_request(payload: Mapping[str, Any]) -> dict[str, Any]:
         }
     return {
         "permission_observations": [_presentation_observation(prompt_requested=True)]
+    }
+
+
+def _observed_tool_version(executable_path: str) -> str | None:
+    """Best-effort `<tool> --version` first line; None instead of guesses."""
+
+    try:
+        completed = subprocess.run(
+            (executable_path, "--version"),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            # Cold-starting Node/Deno vendor CLIs can exceed 5s on first run;
+            # stay bounded but generous, and fail to None rather than guess.
+            timeout=10,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if completed.returncode != 0:
+        return None
+    lines = completed.stdout.strip().splitlines()
+    if not lines:
+        return None
+    version = lines[0].strip()[:200]
+    return version or None
+
+
+def _installed_application_path(bundle_identifier: str) -> Path | None:
+    """Locate an installed app bundle by identifier without launching it."""
+
+    try:
+        completed = subprocess.run(
+            (
+                "/usr/bin/mdfind",
+                f"kMDItemCFBundleIdentifier == '{bundle_identifier}'",
+            ),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        completed = None
+    if completed is not None and completed.returncode == 0:
+        for line in completed.stdout.splitlines():
+            candidate = Path(line.strip())
+            if candidate.suffix == ".app" and candidate.is_dir():
+                return candidate
+    # Spotlight can be disabled; fall back to the standard install locations.
+    for root in (Path("/Applications"), Path.home() / "Applications"):
+        if not root.is_dir():
+            continue
+        for candidate in sorted(root.glob("*.app")):
+            info_path = candidate / "Contents" / "Info.plist"
+            try:
+                with open(info_path, "rb") as handle:
+                    info = plistlib.load(handle)
+            except (OSError, plistlib.InvalidFileException, ValueError):
+                continue
+            if info.get("CFBundleIdentifier") == bundle_identifier:
+                return candidate
+    return None
+
+
+def _application_bundle_version(app_path: Path) -> str | None:
+    try:
+        with open(app_path / "Contents" / "Info.plist", "rb") as handle:
+            info = plistlib.load(handle)
+    except (OSError, plistlib.InvalidFileException, ValueError):
+        return None
+    raw = info.get("CFBundleShortVersionString")
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()[:200]
+    return None
+
+
+def _runtime_environment_observation(
+    profile_id: str, profile: Mapping[str, Any]
+) -> dict[str, Any]:
+    executable = profile["executable"]
+    resolved = _resolve_executable(executable)
+    version = _observed_tool_version(resolved) if resolved is not None else None
+    evidence = {
+        "profile_id": profile_id,
+        "executable": executable,
+        "resolved_path": resolved,
+        "observed_version": version,
+    }
+    return {
+        "subject_ref": profile_id,
+        "display_name": profile["display_name"],
+        "status": "available" if resolved is not None else "missing",
+        "observed_version": version,
+        "evidence_digest": digest(evidence),
+        "provider_error_code": (
+            None if resolved is not None else "environment.executable-not-found"
+        ),
+        "remediation_ref": (
+            None if resolved is not None else "environment.install-executable"
+        ),
+    }
+
+
+def _presentation_environment_observation() -> dict[str, Any]:
+    running = _target_application_running(EXPECTED_ITERM_BUNDLE_ID)
+    app_path = _installed_application_path(EXPECTED_ITERM_BUNDLE_ID)
+    installed = running or app_path is not None
+    version = (
+        _application_bundle_version(app_path) if app_path is not None else None
+    )
+    evidence = {
+        "bundle_identifier": EXPECTED_ITERM_BUNDLE_ID,
+        "running": running,
+        "installed": installed,
+        "bundle_path": str(app_path) if app_path is not None else None,
+        "observed_version": version,
+    }
+    return {
+        "subject_ref": "presentation.iterm2",
+        "display_name": "iTerm2",
+        "status": "available" if installed else "missing",
+        "observed_version": version,
+        "evidence_digest": digest(evidence),
+        "provider_error_code": (
+            None if installed else "environment.application-not-found"
+        ),
+        "remediation_ref": (
+            None if installed else "environment.install-application"
+        ),
+    }
+
+
+def _shell_environment_observation() -> dict[str, Any]:
+    shell_path = "/bin/zsh"
+    available = Path(shell_path).is_file()
+    version = _observed_tool_version(shell_path) if available else None
+    evidence = {
+        "shell_path": shell_path,
+        "available": available,
+        "observed_version": version,
+    }
+    return {
+        "subject_ref": "shell.zsh",
+        "display_name": "zsh login shell",
+        "status": "available" if available else "missing",
+        "observed_version": version,
+        "evidence_digest": digest(evidence),
+        "provider_error_code": (
+            None if available else "environment.shell-not-found"
+        ),
+        "remediation_ref": None if available else "environment.install-shell",
+    }
+
+
+def environment_probe(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Observe machine readiness for every registry-declared dependency.
+
+    Data-driven: the runtime executables come from the runtime-profile
+    registry (bundle plus operator overlay), never from names in code, so a
+    new vendor profile is covered without touching this operation.
+    """
+
+    if payload:
+        raise DriverError("environment probe payload differs")
+    observations = [
+        _runtime_environment_observation(profile_id, profile)
+        for profile_id, profile in sorted(_runtime_profiles().items())
+    ]
+    observations.append(_presentation_environment_observation())
+    observations.append(_shell_environment_observation())
+    return {
+        "environment_observations": sorted(
+            observations, key=lambda value: value["subject_ref"]
+        )
     }
 
 
@@ -690,32 +868,41 @@ def _runtime_profile(launch_spec: Mapping[str, Any]) -> dict[str, Any]:
     return profile
 
 
+def _resolve_executable(executable: str) -> str | None:
+    """Resolve a runtime-profile executable exactly the way launch does.
+
+    PATH first, then the user's login zsh (`whence -p`) so App-launched Hosts
+    see the same tools an interactive shell would. Returns None when absent.
+    """
+
+    if "/" in executable:
+        return executable if Path(executable).is_file() else None
+    resolved = shutil.which(executable)
+    if resolved is not None:
+        return resolved
+    try:
+        discovered = subprocess.run(
+            ("/bin/zsh", "-lic", f"whence -p {shlex.quote(executable)}"),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    candidate = Path(discovered.stdout.strip())
+    if discovered.returncode == 0 and candidate.is_absolute() and candidate.is_file():
+        return str(candidate)
+    return None
+
+
 def _runtime_argv(launch_spec: Mapping[str, Any]) -> tuple[str, ...]:
     profile = _runtime_profile(launch_spec)
-    executable = profile["executable"]
-    if "/" not in executable:
-        resolved = shutil.which(executable)
-        if resolved is None:
-            try:
-                discovered = subprocess.run(
-                    ("/bin/zsh", "-lic", f"whence -p {shlex.quote(executable)}"),
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL,
-                    text=True,
-                    timeout=30,
-                    check=False,
-                )
-            except subprocess.TimeoutExpired as exc:
-                raise DriverError("runtime profile executable is unavailable") from exc
-            candidate = Path(discovered.stdout.strip())
-            if discovered.returncode == 0 and candidate.is_absolute() and candidate.is_file():
-                resolved = str(candidate)
-        if resolved is None:
-            raise DriverError("runtime profile executable is unavailable")
-        executable = resolved
-    elif not Path(executable).is_file():
+    resolved = _resolve_executable(profile["executable"])
+    if resolved is None:
         raise DriverError("runtime profile executable is unavailable")
-    return (executable, *profile["arguments"])
+    return (resolved, *profile["arguments"])
 
 
 def _vendor_adapter(launch_spec: Mapping[str, Any]) -> str | None:
@@ -3529,6 +3716,7 @@ OPERATIONS = {
     "list_templates": list_templates,
     "permission_probe": permission_probe,
     "permission_request": permission_request,
+    "environment_probe": environment_probe,
     "resolve": resolve,
     "start": start,
     "status": status,
