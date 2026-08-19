@@ -285,6 +285,19 @@ struct ContentView: View {
                             model.isBusy
                                 || !["closed", "degraded"].contains(scenario.observedState)
                         )
+                    Button("Start All") {
+                        Task { await model.startAllParticipants() }
+                    }
+                    .disabled(
+                        model.isBusy
+                            || !model.participants.contains(where: \.canStart)
+                            || !["running", "opening", "degraded"].contains(
+                                scenario.observedState
+                            )
+                    )
+                    .help(
+                        "Start every stopped or detached participant in this Scenario"
+                    )
                     Button("Close") { Task { await model.closeScenario() } }
                 }
             }

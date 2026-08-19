@@ -177,6 +177,28 @@ class HarnessClient:
             progress_callback=progress_callback,
         )
 
+    def start_scenario_participants(
+        self,
+        *,
+        project_instance_id: str,
+        scenario_id: str,
+        scenario_generation: int,
+        scenario_state_revision: int,
+        request_id: str | None = None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
+        return self._call(
+            "scenario.start-participants",
+            self._scenario_target(project_instance_id, scenario_id),
+            {"operation_generation": scenario_state_revision},
+            {
+                "scenario_generation": scenario_generation,
+                "scenario_state_revision": scenario_state_revision,
+            },
+            request_id=request_id,
+            progress_callback=progress_callback,
+        )
+
     def cancel_operation(self, operation_id: str) -> dict[str, Any]:
         connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         connection.settimeout(self.timeout_seconds)

@@ -128,6 +128,20 @@ def add_harness_parser(subparsers: Any) -> None:
     )
     _add_connection_options(close_command)
 
+    start_all = scenario_commands.add_parser(
+        "start-participants",
+        help="Start every startable participant in one running Scenario",
+    )
+    start_all.add_argument("scenario_id")
+    start_all.add_argument("--project-instance-id", required=True)
+    start_all.add_argument("--scenario-generation", required=True, type=int)
+    start_all.add_argument("--state-revision", required=True, type=int)
+    start_all.add_argument("--request-id")
+    start_all.add_argument(
+        "--progress", action="store_true", help="Emit progress events to stderr"
+    )
+    _add_connection_options(start_all)
+
     for command_name, help_text in (
         ("repair", "Confirm conservative repair from durable Scenario state"),
         ("destroy-preview", "Preview exact Scenario destroy effects and blockers"),
@@ -491,6 +505,23 @@ def run_harness_command(args: argparse.Namespace) -> int:
                     scenario_generation=args.scenario_generation,
                     scenario_state_revision=args.state_revision,
                     drain_timeout_ms=args.drain_timeout_ms,
+                    request_id=args.request_id,
+                    progress_callback=(
+                        lambda event: print(
+                            json.dumps(event, ensure_ascii=False, sort_keys=True),
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                        if args.progress
+                        else None
+                    ),
+                )
+            elif args.scenario_command == "start-participants":
+                result = client.start_scenario_participants(
+                    project_instance_id=args.project_instance_id,
+                    scenario_id=args.scenario_id,
+                    scenario_generation=args.scenario_generation,
+                    scenario_state_revision=args.state_revision,
                     request_id=args.request_id,
                     progress_callback=(
                         lambda event: print(

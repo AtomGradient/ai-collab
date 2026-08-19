@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import stat
@@ -275,6 +276,9 @@ class FakeDriver:
         self.close_calls = 0
         self.close_started = threading.Event()
         self.close_release: threading.Event | None = None
+        self.start_started = threading.Event()
+        self.start_release: threading.Event | None = None
+        self.per_participant_resource_digests = False
         self.supervision_sequence = 0
         self.fail_supervision = False
         self.boot_digest = BOOT_DIGEST
@@ -349,6 +353,9 @@ class FakeDriver:
             }
         if operation == "start":
             self.start_calls += 1
+            self.start_started.set()
+            if self.start_release is not None:
+                assert self.start_release.wait(timeout=10)
             self.start_generations.append(payload["context"]["participant_generation"])
             self.start_participant_clients.append(
                 dict(payload["participant_client"])
@@ -513,7 +520,15 @@ class FakeDriver:
                 "resources": [
                     {
                         "resource_class": "exclusive_runtime",
-                        "resource_identity_sha256": self.resource_digest,
+                        "resource_identity_sha256": (
+                            hashlib.sha256(
+                                runtime_ack["binding"]["participant_id"].encode(
+                                    "utf-8"
+                                )
+                            ).hexdigest()
+                            if self.per_participant_resource_digests
+                            else self.resource_digest
+                        ),
                         "state": "held",
                     }
                 ],
@@ -2414,6 +2429,330 @@ def test_scenario_resume_reports_optional_exact_resume_capability(
         assert summary["reports"][0]["repair_required"] is (
             not resume_binding_present
         )
+
+
+def test_scenario_start_participants_starts_every_startable_unit(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    second_id = "participant-two"
+    with running_host(state_root) as (_, client, driver):
+        driver.per_participant_resource_digests = True
+        created = client.create_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            project_binding_digest=PROJECT_DIGEST,
+            request_id="start-all-create",
+        )["scenario"]
+        for participant_id in (PARTICIPANT_ID, second_id):
+            _add_test_participant(
+                client,
+                scenario=created,
+                participant_id=participant_id,
+                request_prefix=f"start-all-{participant_id}",
+            )
+        opened = client.open_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=created["scenario_generation"],
+            scenario_state_revision=created["state_revision"],
+            request_id="start-all-open",
+        )["scenario"]
+
+        result = client.start_scenario_participants(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=opened["scenario_generation"],
+            scenario_state_revision=opened["state_revision"],
+            request_id="start-all-first",
+        )
+        summary = result["start_summary"]
+        assert summary["schema_version"] == 1
+        assert summary["cancelled"] is False
+        assert summary["counts"] == {
+            "total": 2,
+            "started": 2,
+            "already_running": 0,
+            "skipped": 0,
+            "failed": 0,
+            "cancelled": 0,
+        }
+        outcomes = {
+            report["participant_id"]: report for report in summary["reports"]
+        }
+        assert outcomes[PARTICIPANT_ID]["outcome"] == "started"
+        assert outcomes[second_id]["outcome"] == "started"
+        assert outcomes[PARTICIPANT_ID]["resulting_state_revision"] is not None
+        assert result["scenario"]["observed_state"] == "running"
+        assert driver.start_calls == 2
+        participants = {
+            value["participant_id"]: value
+            for value in client.list_participants(
+                project_instance_id=PROJECT_ID, scenario_id=SCENARIO_ID
+            )["participants"]
+        }
+        assert participants[PARTICIPANT_ID]["observed_state"] == "ready"
+        assert participants[second_id]["observed_state"] == "ready"
+
+        # Pressing the batch again is safe: every unit is already running
+        # and no new driver start is issued.
+        repeat = client.start_scenario_participants(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=result["scenario"]["scenario_generation"],
+            scenario_state_revision=result["scenario"]["state_revision"],
+            request_id="start-all-second",
+        )
+        assert repeat["start_summary"]["counts"] == {
+            "total": 2,
+            "started": 0,
+            "already_running": 2,
+            "skipped": 0,
+            "failed": 0,
+            "cancelled": 0,
+        }
+        assert driver.start_calls == 2
+
+
+def test_scenario_start_participants_isolates_failure_and_continues(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    second_id = "participant-two"
+    with running_host(state_root) as (_, client, driver):
+        driver.per_participant_resource_digests = True
+        created = client.create_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            project_binding_digest=PROJECT_DIGEST,
+            request_id="start-all-fail-create",
+        )["scenario"]
+        for participant_id in (PARTICIPANT_ID, second_id):
+            _add_test_participant(
+                client,
+                scenario=created,
+                participant_id=participant_id,
+                request_prefix=f"start-all-fail-{participant_id}",
+            )
+        opened = client.open_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=created["scenario_generation"],
+            scenario_state_revision=created["state_revision"],
+            request_id="start-all-fail-open",
+        )["scenario"]
+        driver.fail_start_participant_ids = {PARTICIPANT_ID}
+
+        # The first unit fails and degrades the Scenario, which bumps the
+        # scenario state revision mid-batch; the sibling must still start
+        # because every unit re-reads fresh fences.
+        result = client.start_scenario_participants(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=opened["scenario_generation"],
+            scenario_state_revision=opened["state_revision"],
+            request_id="start-all-fail",
+        )
+        summary = result["start_summary"]
+        assert summary["counts"]["failed"] == 1
+        assert summary["counts"]["started"] == 1
+        outcomes = {
+            report["participant_id"]: report for report in summary["reports"]
+        }
+        assert outcomes[PARTICIPANT_ID]["outcome"] == "failed"
+        assert isinstance(outcomes[PARTICIPANT_ID]["reason_code"], str)
+        assert outcomes[PARTICIPANT_ID]["reason_code"]
+        assert outcomes[second_id]["outcome"] == "started"
+        participants = {
+            value["participant_id"]: value
+            for value in client.list_participants(
+                project_instance_id=PROJECT_ID, scenario_id=SCENARIO_ID
+            )["participants"]
+        }
+        assert participants[PARTICIPANT_ID]["observed_state"] == "degraded"
+        assert participants[second_id]["observed_state"] == "ready"
+        assert result["scenario"]["observed_state"] == "degraded"
+
+
+def test_scenario_start_participants_reports_ready_units_without_restarting(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    second_id = "participant-two"
+    with running_host(state_root) as (_, client, driver):
+        driver.per_participant_resource_digests = True
+        created = client.create_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            project_binding_digest=PROJECT_DIGEST,
+            request_id="start-all-mixed-create",
+        )["scenario"]
+        first = _add_test_participant(
+            client,
+            scenario=created,
+            participant_id=PARTICIPANT_ID,
+            request_prefix="start-all-mixed-first",
+        )
+        _add_test_participant(
+            client,
+            scenario=created,
+            participant_id=second_id,
+            request_prefix="start-all-mixed-second",
+        )
+        opened = client.open_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=created["scenario_generation"],
+            scenario_state_revision=created["state_revision"],
+            request_id="start-all-mixed-open",
+        )["scenario"]
+        _start_test_participant(
+            client,
+            scenario=opened,
+            participant=first,
+            participant_id=PARTICIPANT_ID,
+            request_prefix="start-all-mixed-first",
+        )
+        assert driver.start_calls == 1
+
+        result = client.start_scenario_participants(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=opened["scenario_generation"],
+            scenario_state_revision=opened["state_revision"],
+            request_id="start-all-mixed",
+        )
+        summary = result["start_summary"]
+        outcomes = {
+            report["participant_id"]: report for report in summary["reports"]
+        }
+        assert outcomes[PARTICIPANT_ID]["outcome"] == "already_running"
+        assert outcomes[second_id]["outcome"] == "started"
+        assert summary["counts"]["already_running"] == 1
+        assert summary["counts"]["started"] == 1
+        assert driver.start_calls == 2
+
+
+def test_scenario_start_participants_rejects_stale_scenario_fence(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    with running_host(state_root) as (_, client, driver):
+        created = client.create_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            project_binding_digest=PROJECT_DIGEST,
+            request_id="start-all-stale-create",
+        )["scenario"]
+        _add_test_participant(
+            client,
+            scenario=created,
+            participant_id=PARTICIPANT_ID,
+            request_prefix="start-all-stale",
+        )
+        client.open_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=created["scenario_generation"],
+            scenario_state_revision=created["state_revision"],
+            request_id="start-all-stale-open",
+        )
+        with pytest.raises(HarnessClientError) as stale:
+            client.start_scenario_participants(
+                project_instance_id=PROJECT_ID,
+                scenario_id=SCENARIO_ID,
+                scenario_generation=created["scenario_generation"],
+                scenario_state_revision=created["state_revision"],
+                request_id="start-all-stale",
+            )
+        assert stale.value.code == "scenario.stale-fence"
+        assert driver.start_calls == 0
+
+
+def test_scenario_start_participants_progress_and_cooperative_cancel(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    second_id = "participant-two"
+    with running_host(state_root) as (_, client, driver):
+        driver.per_participant_resource_digests = True
+        created = client.create_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            project_binding_digest=PROJECT_DIGEST,
+            request_id="start-all-cancel-create",
+        )["scenario"]
+        for participant_id in (PARTICIPANT_ID, second_id):
+            _add_test_participant(
+                client,
+                scenario=created,
+                participant_id=participant_id,
+                request_prefix=f"start-all-cancel-{participant_id}",
+            )
+        opened = client.open_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=created["scenario_generation"],
+            scenario_state_revision=created["state_revision"],
+            request_id="start-all-cancel-open",
+        )["scenario"]
+        driver.start_release = threading.Event()
+        progress: list[dict[str, Any]] = []
+        progress_ready = threading.Event()
+        failures: list[HarnessClientError] = []
+
+        def observe_progress(event: dict[str, Any]) -> None:
+            progress.append(event)
+            progress_ready.set()
+
+        def start_all() -> None:
+            try:
+                client.start_scenario_participants(
+                    project_instance_id=PROJECT_ID,
+                    scenario_id=SCENARIO_ID,
+                    scenario_generation=opened["scenario_generation"],
+                    scenario_state_revision=opened["state_revision"],
+                    request_id="start-all-cancel",
+                    progress_callback=observe_progress,
+                )
+            except HarnessClientError as exc:
+                failures.append(exc)
+
+        thread = threading.Thread(target=start_all)
+        thread.start()
+        assert driver.start_started.wait(timeout=3)
+        assert progress_ready.wait(timeout=3)
+        operation_id = progress[0]["operation_id"]
+        cancelled = client.cancel_operation(operation_id)
+        assert cancelled == {
+            "operation_id": operation_id,
+            "outcome": "accepted",
+            "mutation_state": "committed",
+        }
+        driver.start_release.set()
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+        assert len(failures) == 1
+        assert failures[0].code == "operation.cancelled"
+        assert failures[0].mutation_state == "committed"
+        assert [event["sequence"] for event in progress] == list(
+            range(len(progress))
+        )
+        assert progress[-1]["state"] == "cancelled"
+        assert all(
+            event["operation_id"] == operation_id for event in progress
+        )
+        # The unit that already began keeps its durable outcome; the unit
+        # behind the cancel point was never driven.
+        participants = {
+            value["participant_id"]: value
+            for value in client.list_participants(
+                project_instance_id=PROJECT_ID, scenario_id=SCENARIO_ID
+            )["participants"]
+        }
+        assert participants[PARTICIPANT_ID]["observed_state"] == "ready"
+        assert participants[second_id]["observed_state"] == "stopped"
+        assert driver.start_calls == 1
 
 
 def test_host_restart_finishes_pending_scenario_resume(tmp_path: Path) -> None:

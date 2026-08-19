@@ -600,6 +600,80 @@ final class HarnessViewModel: ObservableObject {
         }
     }
 
+    func startAllParticipants() async {
+        guard let project = selectedProject, let scenario = selectedScenario else {
+            return refuse(.participantAction, "Select a Scenario first.")
+        }
+        let startable = participants.filter(\.canStart)
+        guard !startable.isEmpty else {
+            return refuse(
+                .participantAction,
+                "No participant is startable — every one is already running or needs repair."
+            )
+        }
+        let progressSessionID = UUID()
+        await performMutation(
+            activity: "Starting \(startable.count) participant(s)…",
+            scope: .participantAction
+        ) {
+            self.activeProgressSessionID = progressSessionID
+            defer {
+                if self.activeProgressSessionID == progressSessionID {
+                    self.activeProgressSessionID = nil
+                    self.activeOperationID = nil
+                    self.operationCanCancel = false
+                    self.operationProgressText = nil
+                }
+            }
+            let result: [String: Any]
+            do {
+                result = try await self.client.call(
+                    HarnessCall(
+                        operation: "scenario.start-participants",
+                        target: self.scenarioTarget(
+                            projectID: project.id, scenarioID: scenario.id
+                        ),
+                        fence: ["operation_generation": scenario.stateRevision],
+                        payload: self.scenarioFencePayload(scenario),
+                        responseTimeoutSeconds: max(360, startable.count * 60)
+                    ),
+                    progress: { [weak self] progress in
+                        Task { @MainActor in
+                            self?.applyProgress(
+                                progress, progressSessionID: progressSessionID
+                            )
+                        }
+                    }
+                )
+            } catch {
+                try? await self.reloadScenarios()
+                try? await self.refreshSelectedScenarioValues()
+                throw error
+            }
+            try await self.reloadScenarios()
+            try await self.refreshSelectedScenarioValues()
+            let counts =
+                (result["start_summary"] as? [String: Any])?["counts"]
+                as? [String: Any] ?? [:]
+            func count(_ key: String) -> Int { counts[key] as? Int ?? 0 }
+            let started = count("started")
+            let failed = count("failed")
+            let skipped = count("skipped")
+            if failed > 0 || skipped > 0 {
+                self.refuse(
+                    .participantAction,
+                    "Started \(started) of \(count("total")) — "
+                        + "\(failed) failed, \(skipped) skipped. "
+                        + "Use the participant rows to repair the rest."
+                )
+            } else if started == 0 {
+                self.noteSuccess("Every participant was already running.")
+            } else {
+                self.noteSuccess("Started \(started) participant(s).")
+            }
+        }
+    }
+
     func cancelActiveOperation() async {
         guard let operationID = activeOperationID, operationCanCancel else { return }
         do {

@@ -176,6 +176,14 @@ SCENARIO_CLOSE_RESULT_SCHEMA = {
         "close_summary": {"type": "object"},
     },
 }
+SCENARIO_START_PARTICIPANTS_RESULT_SCHEMA = {
+    "type": "object",
+    "required": ["scenario", "start_summary"],
+    "properties": {
+        "scenario": {"type": "scenario_record"},
+        "start_summary": {"type": "object"},
+    },
+}
 SCENARIO_DIAGNOSTIC_RESULT_SCHEMA = {
     "type": "object",
     "required": ["diagnostic"],
@@ -626,6 +634,15 @@ OPERATION_DESCRIPTORS = (
         mutation_class="external_effect",
         request_schema=CLOSE_REQUEST_SCHEMA,
         result_schema=SCENARIO_CLOSE_RESULT_SCHEMA,
+    ),
+    _descriptor(
+        "scenario.start-participants",
+        capability="participant.manage",
+        target_scope="scenario",
+        required_fences=["host_generation", "operation_generation"],
+        mutation_class="external_effect",
+        request_schema=SCENARIO_FENCED_REQUEST_SCHEMA,
+        result_schema=SCENARIO_START_PARTICIPANTS_RESULT_SCHEMA,
     ),
     _descriptor(
         "scenario.repair",
@@ -1328,6 +1345,7 @@ def _validate_payload(operation: str, value: Any) -> None:
         "scenario.destroy",
         "scenario.force-destroy",
         "scenario.focus",
+        "scenario.start-participants",
     }:
         payload = _require_exact_fields(
             value,

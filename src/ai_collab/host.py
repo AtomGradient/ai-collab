@@ -648,6 +648,295 @@ class HarnessHost:
             reports=reports,
         )
 
+    def _start_scenario_participants(
+        self,
+        *,
+        project_instance_id: str,
+        scenario_id: str,
+        request_id: str,
+        operation_id: str,
+        active: _ActiveOperation,
+        progress_callback: Callable[[dict[str, Any]], None] | None,
+    ) -> dict[str, Any]:
+        assert self.participants is not None
+        progress_sequence = 0
+
+        def emit_progress(
+            state: str,
+            *,
+            completed_units: int,
+            total_units: int,
+            participant_id: str | None = None,
+        ) -> None:
+            nonlocal progress_sequence
+            if progress_callback is not None:
+                try:
+                    progress_callback(
+                        progress_event(
+                            operation_id,
+                            progress_sequence,
+                            state,
+                            self.host_generation,
+                            {
+                                "phase": "starting_participants",
+                                "completed_units": completed_units,
+                                "total_units": total_units,
+                                "participant_id": participant_id,
+                                "cancellable": active.cancellable,
+                            },
+                        )
+                    )
+                except OSError:
+                    # Losing an observation client cannot cancel or corrupt
+                    # the already-started durable per-unit operations.
+                    pass
+            progress_sequence += 1
+
+        roster = self.store.list_participants(project_instance_id, scenario_id)[
+            "participants"
+        ]
+        planned = [
+            {
+                "participant_id": item["participant_id"],
+                "participant_generation": item["participant_generation"],
+            }
+            for item in roster
+        ]
+        total_units = len(planned)
+        reports: list[dict[str, Any]] = []
+        cancelled = False
+        emit_progress("running", completed_units=0, total_units=total_units)
+        for index, planned_item in enumerate(planned):
+            participant_id = planned_item["participant_id"]
+            if active.cancel_event.is_set():
+                cancelled = True
+                reports.append(
+                    {
+                        "participant_id": participant_id,
+                        "participant_generation": planned_item[
+                            "participant_generation"
+                        ],
+                        "observed_state": None,
+                        "outcome": "cancelled",
+                        "reason_code": "operation.cancelled",
+                        "resulting_state_revision": None,
+                    }
+                )
+                continue
+            current_scenario = self.store.scenario_status(
+                project_instance_id, scenario_id
+            )["scenario"]
+            current = next(
+                (
+                    item
+                    for item in self.store.list_participants(
+                        project_instance_id, scenario_id
+                    )["participants"]
+                    if item["participant_id"] == participant_id
+                ),
+                None,
+            )
+            if current is None:
+                reports.append(
+                    {
+                        "participant_id": participant_id,
+                        "participant_generation": planned_item[
+                            "participant_generation"
+                        ],
+                        "observed_state": None,
+                        "outcome": "skipped",
+                        "reason_code": "participant.not-found",
+                        "resulting_state_revision": None,
+                    }
+                )
+                emit_progress(
+                    "running",
+                    completed_units=index + 1,
+                    total_units=total_units,
+                    participant_id=participant_id,
+                )
+                continue
+            base_report = {
+                "participant_id": participant_id,
+                "participant_generation": current["participant_generation"],
+                "observed_state": current["observed_state"],
+            }
+            if current["observed_state"] == "ready":
+                reports.append(
+                    {
+                        **base_report,
+                        "outcome": "already_running",
+                        "reason_code": None,
+                        "resulting_state_revision": None,
+                    }
+                )
+                emit_progress(
+                    "running",
+                    completed_units=index + 1,
+                    total_units=total_units,
+                    participant_id=participant_id,
+                )
+                continue
+            if current["observed_state"] not in {"stopped", "detached"}:
+                # The batch never waits on transitional or degraded units;
+                # the per-row lifecycle actions stay the repair surface.
+                reports.append(
+                    {
+                        **base_report,
+                        "outcome": "skipped",
+                        "reason_code": "participant.not-startable",
+                        "resulting_state_revision": None,
+                    }
+                )
+                emit_progress(
+                    "running",
+                    completed_units=index + 1,
+                    total_units=total_units,
+                    participant_id=participant_id,
+                )
+                continue
+            child_request_id = "start-all-" + hashlib.sha256(
+                (
+                    request_id
+                    + "\0"
+                    + participant_id
+                    + "\0"
+                    + str(current["participant_generation"])
+                ).encode("utf-8")
+            ).hexdigest()[:32]
+            child_request_digest = canonical_json_sha256(
+                {
+                    "parent_request_id": request_id,
+                    "scenario_generation": current_scenario[
+                        "scenario_generation"
+                    ],
+                    "participant_id": participant_id,
+                    "participant_generation": current[
+                        "participant_generation"
+                    ],
+                }
+            )
+            participant_client: dict[str, str] | None = None
+            try:
+                participant_client = self._participant_launch_material(
+                    project_instance_id=project_instance_id,
+                    scenario_id=scenario_id,
+                    participant_id=participant_id,
+                    participant_generation=current["participant_generation"],
+                    participant_state_revision=current["state_revision"],
+                )
+                _, started = self.participants.start(
+                    request_id=child_request_id,
+                    request_digest=child_request_digest,
+                    host_generation=self.host_generation,
+                    project_instance_id=project_instance_id,
+                    scenario_id=scenario_id,
+                    participant_id=participant_id,
+                    scenario_generation=current_scenario["scenario_generation"],
+                    scenario_state_revision=current_scenario["state_revision"],
+                    participant_generation=current["participant_generation"],
+                    participant_state_revision=current["state_revision"],
+                    participant_client=participant_client,
+                )
+                started_participant = started["participant"]
+                self._participant_launch_material(
+                    project_instance_id=project_instance_id,
+                    scenario_id=scenario_id,
+                    participant_id=participant_id,
+                    participant_generation=started_participant[
+                        "participant_generation"
+                    ],
+                    participant_state_revision=started_participant[
+                        "state_revision"
+                    ],
+                )
+                reports.append(
+                    {
+                        **base_report,
+                        "outcome": "started",
+                        "reason_code": None,
+                        "resulting_state_revision": started_participant[
+                            "state_revision"
+                        ],
+                    }
+                )
+            except (
+                ParticipantAuthError,
+                ParticipantError,
+                DeliveryError,
+                StoreError,
+                OperationFailed,
+            ) as exc:
+                if participant_client is not None:
+                    self.participant_auth.revoke(
+                        project_instance_id=project_instance_id,
+                        scenario_id=scenario_id,
+                        participant_id=participant_id,
+                        participant_generation=current[
+                            "participant_generation"
+                        ],
+                    )
+                reports.append(
+                    {
+                        **base_report,
+                        "outcome": "failed",
+                        "reason_code": getattr(
+                            exc, "code", "participant.start-failed"
+                        ),
+                        "resulting_state_revision": None,
+                    }
+                )
+            emit_progress(
+                "cancelling" if active.cancel_event.is_set() else "running",
+                completed_units=index + 1,
+                total_units=total_units,
+                participant_id=participant_id,
+            )
+        with self._active_operation_lock:
+            active.cancellable = False
+        counts = {"total": total_units}
+        for outcome in (
+            "started",
+            "already_running",
+            "skipped",
+            "failed",
+            "cancelled",
+        ):
+            counts[outcome] = sum(
+                report["outcome"] == outcome for report in reports
+            )
+        if cancelled:
+            emit_progress(
+                "cancelled",
+                completed_units=sum(
+                    report["outcome"] != "cancelled" for report in reports
+                ),
+                total_units=total_units,
+            )
+            raise OperationFailed(
+                operation_id,
+                "operation.cancelled",
+                "Scenario participant batch start was cooperatively cancelled; refresh before deciding the next action",
+                "committed",
+                False,
+            )
+        scenario = self.store.scenario_status(project_instance_id, scenario_id)[
+            "scenario"
+        ]
+        result = {
+            "scenario": scenario,
+            "start_summary": {
+                "schema_version": 1,
+                "cancelled": cancelled,
+                "counts": counts,
+                "reports": reports,
+            },
+        }
+        emit_progress(
+            "completed", completed_units=total_units, total_units=total_units
+        )
+        return result
+
     def _start_resource_supervisor(self) -> None:
         if self.participants is None:
             return
@@ -1544,6 +1833,57 @@ class HarnessHost:
                 self.participant_auth.revoke_scenario(
                     target["project_instance_id"], target["scenario_id"]
                 )
+        elif operation == "scenario.start-participants":
+            payload = request["payload"]
+            if (
+                request["fence"]["operation_generation"]
+                != payload["scenario_state_revision"]
+            ):
+                raise ProtocolError(
+                    "fence.stale-operation-generation",
+                    "fencing",
+                    "operation generation differs from scenario revision",
+                    retryable=True,
+                )
+            if self.participants is None:
+                raise ProtocolError(
+                    "availability.driver-unavailable",
+                    "availability",
+                    "participant driver is not configured",
+                    False,
+                    "participant.driver-configure",
+                )
+            entry_scenario = self.store.scenario_status(
+                target["project_instance_id"], target["scenario_id"]
+            )["scenario"]
+            if (
+                entry_scenario["scenario_generation"]
+                != payload["scenario_generation"]
+                or entry_scenario["state_revision"]
+                != payload["scenario_state_revision"]
+            ):
+                raise ProtocolError(
+                    "scenario.stale-fence",
+                    "fencing",
+                    "scenario state fence differs",
+                    retryable=True,
+                )
+            operation_id = f"op-{request['request_id']}"
+            active = _ActiveOperation(threading.Event(), "committed")
+            with self._active_operation_lock:
+                self._active_operations[operation_id] = active
+            try:
+                result = self._start_scenario_participants(
+                    project_instance_id=target["project_instance_id"],
+                    scenario_id=target["scenario_id"],
+                    request_id=request["request_id"],
+                    operation_id=operation_id,
+                    active=active,
+                    progress_callback=progress_callback,
+                )
+            finally:
+                with self._active_operation_lock:
+                    self._active_operations.pop(operation_id, None)
         elif operation == "policy.template.list":
             result = self.projects.collaboration_templates(
                 target["project_instance_id"]
