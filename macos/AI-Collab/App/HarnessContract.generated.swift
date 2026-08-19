@@ -12,6 +12,9 @@ enum HarnessContract {
 
     static let capabilities: [String: String] = [
         "host.status": "host.read",
+        "presentation.permission-probe": "participant.read",
+        "presentation.permission-request": "participant.manage",
+        "environment.probe": "participant.read",
         "project.register": "project.manage",
         "project.list": "project.read",
         "project.unregister": "project.manage",
@@ -20,6 +23,7 @@ enum HarnessContract {
         "scenario.list": "scenario.read",
         "scenario.open": "scenario.manage",
         "scenario.close": "scenario.manage",
+        "scenario.start-participants": "participant.manage",
         "scenario.status": "scenario.read",
         "scenario.diagnostic": "scenario.read",
         "scenario.preflight": "scenario.read",

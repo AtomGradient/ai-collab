@@ -24,6 +24,9 @@ from ai_collab.protocol import (
 
 APP_OPERATIONS = (
     "host.status",
+    "presentation.permission-probe",
+    "presentation.permission-request",
+    "environment.probe",
     "project.register",
     "project.list",
     "project.unregister",
@@ -32,6 +35,7 @@ APP_OPERATIONS = (
     "scenario.list",
     "scenario.open",
     "scenario.close",
+    "scenario.start-participants",
     "scenario.status",
     "scenario.diagnostic",
     "scenario.preflight",

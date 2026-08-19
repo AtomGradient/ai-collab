@@ -53,6 +53,33 @@ def test_swift_client_binding_matches_python_operation_registry() -> None:
     }
 
 
+def test_every_app_invoked_operation_is_registered_in_the_capability_map() -> None:
+    """The App computes capability proofs from HarnessContract.capabilities.
+
+    An operation the Swift sources invoke but the generator's APP_OPERATIONS
+    allowlist omits fails at runtime only (HarnessIPC throws before the call
+    reaches the Host) — exactly the silent gap that shipped the v0.1.5
+    permission buttons dead. Catch it at test time instead.
+    """
+
+    invoked: set[str] = set()
+    for path in sorted(APP_ROOT.glob("*.swift")):
+        invoked.update(
+            re.findall(
+                r'operation:\s*"([a-z][a-z0-9.-]*)"',
+                path.read_text(encoding="utf-8"),
+            )
+        )
+    assert invoked, "no operation literals found — scan regex is broken"
+    contract_source = SWIFT_CONTRACT.read_text(encoding="utf-8")
+    declared = set(re.findall(r'"([a-z.-]+)": "[a-z.-]+",', contract_source))
+    missing = sorted(invoked - declared)
+    assert not missing, (
+        "App-invoked operations missing from generator APP_OPERATIONS: "
+        + ", ".join(missing)
+    )
+
+
 def test_app_is_vendor_neutral_and_does_not_shell_out() -> None:
     source = "\n".join(
         path.read_text(encoding="utf-8") for path in sorted(APP_ROOT.glob("*.swift"))
