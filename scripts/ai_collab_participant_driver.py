@@ -264,12 +264,23 @@ def list_templates(payload: Mapping[str, Any]) -> dict[str, Any]:
     return {"templates": templates}
 
 
-def _presentation_observation(*, prompt_requested: bool) -> dict[str, Any]:
-    """Build one provider-neutral presentation observation from live platform state."""
+def _presentation_observation(
+    *, prompt_requested: bool, ask_user_if_needed: bool | None = None
+) -> dict[str, Any]:
+    """Build one provider-neutral presentation observation from live platform state.
 
+    ``prompt_requested`` records whether this operation asked the platform to
+    show its consent UI; ``ask_user_if_needed`` controls the underlying
+    determine call and defaults to the same value. permission_request passes
+    False explicitly because it summons the dialog with a real AppleEvent
+    first and then only reads the resulting verdict here.
+    """
+
+    if ask_user_if_needed is None:
+        ask_user_if_needed = prompt_requested
     try:
         automation = automation_permission_status(
-            EXPECTED_ITERM_BUNDLE_ID, ask_user_if_needed=prompt_requested
+            EXPECTED_ITERM_BUNDLE_ID, ask_user_if_needed=ask_user_if_needed
         )
         authentication = authentication_bypass_status()
         private_socket = private_unix_socket_status()
@@ -375,9 +386,41 @@ def permission_request(payload: Mapping[str, Any]) -> dict[str, Any]:
                 }
             ]
         }
+    _provoke_automation_prompt(EXPECTED_ITERM_BUNDLE_ID)
     return {
-        "permission_observations": [_presentation_observation(prompt_requested=True)]
+        "permission_observations": [
+            _presentation_observation(
+                prompt_requested=True, ask_user_if_needed=False
+            )
+        ]
     }
+
+
+def _provoke_automation_prompt(bundle_identifier: str) -> None:
+    """Send one harmless real AppleEvent so macOS shows its consent dialog.
+
+    A pre-flight ask (AEDeterminePermissionToAutomateTarget with
+    askUserIfNeeded) is silently auto-denied when the responsible process is a
+    background service, verified live: the request returned denied, no dialog
+    appeared, and nothing was persisted. The dialog only appears for an
+    actual send — the same mechanism that summoned it during a real
+    participant start. The command is read-only, and the verdict is observed
+    afterwards, never inferred from this call's outcome.
+    """
+
+    script = f'tell application id "{bundle_identifier}" to count windows'
+    try:
+        subprocess.run(
+            ("/usr/bin/osascript", "-e", script),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=120,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        # The dialog may still be on screen; the observation below simply
+        # reports the still-unanswered state and the owner can ask again.
+        pass
 
 
 def _observed_tool_version(executable_path: str) -> str | None:

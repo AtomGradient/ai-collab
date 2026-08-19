@@ -380,7 +380,10 @@ final class HarnessViewModel: ObservableObject {
             let result = try await self.client.call(
                 HarnessCall(
                     operation: "presentation.permission-request",
-                    target: ["scope": "host"]
+                    target: ["scope": "host"],
+                    // The Host summons the real consent dialog and waits for
+                    // the user's decision; give them time to read it.
+                    responseTimeoutSeconds: 180
                 )
             )
             self.presentationPermissionStatus = Self.permissionStatus(result)

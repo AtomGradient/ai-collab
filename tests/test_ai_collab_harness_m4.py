@@ -2466,6 +2466,11 @@ def test_presentation_permission_request_guards_absent_target(
         "automation_permission_status",
         lambda _bundle, **kwargs: called.append(True),
     )
+    monkeypatch.setattr(
+        participant_driver,
+        "_provoke_automation_prompt",
+        lambda _bundle: called.append(True),
+    )
     observation = participant_driver.permission_request({})[
         "permission_observations"
     ][0]
@@ -2482,6 +2487,7 @@ def test_presentation_permission_request_prompts_when_target_running(
     monkeypatch: Any,
 ) -> None:
     asked: list[bool] = []
+    provoked: list[str] = []
 
     def fake_status(_bundle: str, **kwargs: Any) -> dict[str, Any]:
         asked.append(kwargs.get("ask_user_if_needed") is True)
@@ -2489,6 +2495,11 @@ def test_presentation_permission_request_prompts_when_target_running(
 
     monkeypatch.setattr(
         participant_driver, "_target_application_running", lambda _bundle: True
+    )
+    monkeypatch.setattr(
+        participant_driver,
+        "_provoke_automation_prompt",
+        lambda bundle: provoked.append(bundle),
     )
     monkeypatch.setattr(
         participant_driver, "automation_permission_status", fake_status
@@ -2511,6 +2522,9 @@ def test_presentation_permission_request_prompts_when_target_running(
     observation = participant_driver.permission_request({})[
         "permission_observations"
     ][0]
-    assert asked == [True]
+    # The dialog is summoned by one real harmless AppleEvent; the observation
+    # afterwards is a pure read (no second pre-flight ask).
+    assert provoked == [participant_driver.EXPECTED_ITERM_BUNDLE_ID]
+    assert asked == [False]
     assert observation["status"] == "granted"
     assert observation["prompt_requested"] is True

@@ -44,6 +44,7 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         INFOPLIST_KEY_CFBundleDisplayName: AI Collab
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
+        INFOPLIST_KEY_NSAppleEventsUsageDescription: AI Collab presents each agent session in an iTerm2 window and needs Automation access to open and control those windows.
         ENABLE_APP_SANDBOX: NO
         CODE_SIGN_STYLE: Automatic
   AICollabTests:
