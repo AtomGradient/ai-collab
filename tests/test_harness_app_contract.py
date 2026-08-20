@@ -96,8 +96,8 @@ def test_app_is_vendor_neutral_and_does_not_shell_out() -> None:
 def test_app_exposes_scenario_resume_and_participant_reports() -> None:
     content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
     view_model = (APP_ROOT / "HarnessViewModel.swift").read_text(encoding="utf-8")
-    assert 'Button("Resume")' in content
-    assert 'InspectorText(title: "Resume", text: model.resumeText)' in content
+    assert 'Button(S.Detail.resume)' in content
+    assert 'InspectorText(title: S.Inspector.resume, text: model.resumeText)' in content
     assert 'operation: "scenario.open"' in view_model
     assert 'result["resume_summary"]' in view_model
 
@@ -139,9 +139,10 @@ def test_app_requires_explicit_confirmation_before_recreate_handoff() -> None:
     content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
     view_model = (APP_ROOT / "HarnessViewModel.swift").read_text(encoding="utf-8")
     models = (APP_ROOT / "HarnessModels.swift").read_text(encoding="utf-8")
-    assert 'Button("Recreate + Handoff")' in content
+    assert 'Button(S.Colleagues.recreateHandoff)' in content
     assert "case recreateParticipantWithHandoff(ParticipantRecord)" in content
-    assert "the previous Agent conversation is not restored" in content
+    strings = (APP_ROOT / "Strings.swift").read_text(encoding="utf-8")
+    assert "the previous AI conversation is not restored" in strings
     assert "func recreateParticipantWithHandoff" in view_model
     assert 'launchSpec["continuity_mode"] = "explicit_recreate"' in view_model
     assert 'launchSpec["continuity_binding_ref"] = NSNull()' in view_model
@@ -155,14 +156,14 @@ def test_app_exposes_scenario_focus_and_topology_without_vendor_logic() -> None:
     ipc = (APP_ROOT / "HarnessIPC.swift").read_text(encoding="utf-8")
     # The section must exist and be labelled; whether it renders as a GroupBox or
     # a collapsible section is layout, not contract.
-    assert '"Window Topology"' in content
-    assert 'Button("Focus & Restore")' in content
+    assert 'Label(S.Topology.sectionTitle' in content
+    assert 'Button(S.Topology.focusRestore)' in content
     assert 'operation: "scenario.topology"' in view_model
     assert 'operation: "scenario.focus"' in view_model
     assert "func cancelActiveOperation() async" in view_model
     assert "func cancelOperation(_ operationID: String)" in ipc
     assert "struct HarnessProgress" in ipc
-    assert 'Button("Cancel safely")' in content
+    assert 'Button(S.Banner.cancelSafely)' in content
     assert "struct ScenarioTopologyRecord" in models
     assert "struct PresentationTopologyRecord" in models
 
@@ -177,10 +178,11 @@ def test_app_exposes_degraded_and_high_risk_repair_actions() -> None:
     for operation in ("scenario.repair", "participant.force-stop", "resource.break"):
         assert f'operation: "{operation}"' in view_model
         assert f'"{operation}"' in generator
-    assert 'Button("Repair Scenario")' in content
-    assert 'Button("Force Stop", role: .destructive)' in content
-    assert 'Button("Break Lease", role: .destructive)' in content
-    assert "Continue to Host confirmation" in content
+    assert 'Button(S.Risk.repairScenario)' in content
+    assert 'Button(S.Colleagues.forceStop, role: .destructive)' in content
+    assert 'Button(S.Risk.breakLease, role: .destructive)' in content
+    strings = (APP_ROOT / "Strings.swift").read_text(encoding="utf-8")
+    assert "Continue to Host confirmation" in strings
     assert "cleanupPending" in models
     assert "ResourceLeaseRecord" in models
 
@@ -189,9 +191,10 @@ def test_app_exposes_single_entry_context_menu_force_destroy() -> None:
     content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
     view_model = (APP_ROOT / "HarnessViewModel.swift").read_text(encoding="utf-8")
     assert '.contextMenu {' in content
-    assert 'Button("Force Delete Scenario…", role: .destructive)' in content
+    assert 'Button(S.Rooms.forceDelete, role: .destructive)' in content
     assert "case forceDestroyScenario(ScenarioRecord)" in content
-    assert "The registered project source is never deleted" in content
+    strings = (APP_ROOT / "Strings.swift").read_text(encoding="utf-8")
+    assert "registered project source is never deleted" in strings
     assert 'operation: "scenario.force-destroy"' in view_model
     assert "func forceDestroyScenario(_ scenario: ScenarioRecord)" in view_model
 
@@ -202,7 +205,7 @@ def test_app_exposes_preflight_and_structured_actionable_errors() -> None:
     models = (APP_ROOT / "HarnessModels.swift").read_text(encoding="utf-8")
     ipc = (APP_ROOT / "HarnessIPC.swift").read_text(encoding="utf-8")
     assert 'operation: "scenario.preflight"' in view_model
-    assert 'Button("Run Preflight")' in content
+    assert 'Button(S.Preflight.runButton)' in content
     assert "ScenarioPreflightRecord" in models
     assert "repairAction" in models
     assert "mutationState" in ipc
@@ -255,3 +258,22 @@ def test_app_reregisters_changed_embedded_service() -> None:
     app = (APP_ROOT / "AICollabApp.swift").read_text(encoding="utf-8")
     assert "--unregister-host-service" in app
     assert "try await HarnessServiceController().unregister()" in app
+
+
+def test_app_offers_colleague_deletion_only_for_stopped_with_confirmation() -> None:
+    """R1 presentation pins: stopped-only affordance, approved copy, exact
+    operation, and the explicit confirmed flag must survive later re-layouts."""
+
+    content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
+    view_model = (APP_ROOT / "HarnessViewModel.swift").read_text(encoding="utf-8")
+    strings = (APP_ROOT / "Strings.swift").read_text(encoding="utf-8")
+    assert 'if state == "stopped" {' in content
+    assert "Button(S.Colleagues.deleteMenu, role: .destructive)" in content
+    assert "pendingDeletion = participant" in content
+    assert "Button(S.Common.delete, role: .destructive)" in content
+    assert 'guard participant.observedState == "stopped"' in view_model
+    assert 'operation: "participant.destroy"' in view_model
+    assert '"confirmed": true' in view_model
+    assert "will disappear from this room" in strings
+    assert "将从这个房间消失" in strings
+    assert "正在工作的成员需要先停止" in strings

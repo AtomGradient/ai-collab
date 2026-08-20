@@ -11,6 +11,21 @@ import XCTest
 /// rather than pass.
 @MainActor
 final class HarnessViewModelRefusalTests: XCTestCase {
+
+    override func setUp() {
+        super.setUp()
+        // Copy assertions are language-exact; pin English regardless of the
+        // machine locale, and restore the employee preference afterwards.
+        previousLanguage = L10n.shared.preference
+        L10n.shared.preference = .english
+    }
+
+    override func tearDown() {
+        L10n.shared.preference = previousLanguage
+        super.tearDown()
+    }
+
+    private var previousLanguage: AppLanguage = .system
     private func participant(
         _ id: String,
         observed: String,
@@ -123,7 +138,7 @@ final class HarnessViewModelRefusalTests: XCTestCase {
         await model.createScenario()
         XCTAssertEqual(
             model.validationMessage(for: .scenarioCreate),
-            "Give the Scenario a name."
+            "Give the task room a name."
         )
     }
 
@@ -134,7 +149,7 @@ final class HarnessViewModelRefusalTests: XCTestCase {
         await model.createScenario()
         XCTAssertEqual(
             model.validationMessage(for: .scenarioCreate),
-            "This project already has a Scenario named “room-1”."
+            "This project already has a task room named “room-1”."
         )
     }
 
@@ -144,7 +159,7 @@ final class HarnessViewModelRefusalTests: XCTestCase {
         let reason = model.validationMessage(for: .participantAction)
         XCTAssertEqual(
             reason,
-            "analyst is ready; only a stopped participant can be started."
+            "analyst is “Ready”; only a stopped colleague can be started."
         )
         XCTAssertFalse(reason?.contains("_") ?? true, "the reason must not leak a machine state")
     }
@@ -154,7 +169,7 @@ final class HarnessViewModelRefusalTests: XCTestCase {
         await model.stopParticipant(participant("analyst", observed: "stopped"))
         XCTAssertEqual(
             model.validationMessage(for: .participantAction),
-            "analyst is stopped; there is nothing to stop."
+            "analyst is “Stopped”; there is nothing to stop."
         )
     }
 
@@ -174,7 +189,7 @@ final class HarnessViewModelRefusalTests: XCTestCase {
         await model.addParticipant()
         XCTAssertEqual(
             model.validationMessage(for: .participantAdd),
-            "Select a Scenario first."
+            "Select a task room first."
         )
     }
 
@@ -195,7 +210,7 @@ final class HarnessViewModelRefusalTests: XCTestCase {
         await model.addParticipant()
         XCTAssertEqual(
             model.validationMessage(for: .participantAdd),
-            "Give the participant a name."
+            "Give the colleague a name."
         )
     }
 
@@ -246,7 +261,7 @@ final class HarnessViewModelRefusalTests: XCTestCase {
 
         XCTAssertEqual(
             model.validationMessage(for: .policy),
-            "The Scenario changed after this plan was previewed. "
+            "The room changed after this plan was previewed. "
                 + "Preview it again to pick up the current state."
         )
     }
@@ -271,7 +286,7 @@ final class HarnessViewModelRefusalTests: XCTestCase {
         model.dismissValidation()
         XCTAssertNil(model.validationMessage(for: .participantAdd))
 
-        model.successMessage = "done"
+        model.noteSuccess("done")
         model.dismissSuccess()
         XCTAssertNil(model.successMessage)
 
@@ -309,13 +324,13 @@ final class HarnessViewModelRefusalTests: XCTestCase {
         ] {
             model.scenarios = [scenario("room-1", observed: state)]
             XCTAssertEqual(HarnessViewModel.humanState(state), label)
-            XCTAssertEqual(model.scenarioHeadline, "\(label) · no participants yet")
+            XCTAssertEqual(model.scenarioHeadline, "\(label) · no colleagues yet")
         }
     }
 
     func testScenarioHeadlineReplacesTheDesiredObservedPair() {
         let model = HarnessViewModel()
-        XCTAssertEqual(model.scenarioHeadline, "No Scenario selected")
+        XCTAssertEqual(model.scenarioHeadline, "No Task Room selected")
 
         model.scenarios = [scenario("room-1", observed: "provision_failed")]
         model.selectedScenarioID = "room-1"
@@ -325,7 +340,7 @@ final class HarnessViewModelRefusalTests: XCTestCase {
         ]
 
         let headline = model.scenarioHeadline
-        XCTAssertEqual(headline, "Workspace setup failed · 1 of 2 participants running")
+        XCTAssertEqual(headline, "Workspace setup failed · 1 of 2 colleagues working")
         XCTAssertFalse(headline.contains("desired"))
         XCTAssertFalse(headline.contains("observed"))
         XCTAssertEqual(model.runningParticipantCount, 1)
@@ -337,18 +352,18 @@ final class HarnessViewModelRefusalTests: XCTestCase {
         model.selectedScenarioID = "room-1"
 
         model.participants = []
-        XCTAssertEqual(model.scenarioHeadline, "Ready · no participants yet")
+        XCTAssertEqual(model.scenarioHeadline, "Ready · no colleagues yet")
 
         model.participants = [participant("a", observed: "ready")]
-        XCTAssertEqual(model.scenarioHeadline, "Ready · 1 participant running")
+        XCTAssertEqual(model.scenarioHeadline, "Ready · 1 colleague working")
 
         model.participants = [
             participant("a", observed: "ready"),
             participant("b", observed: "ready"),
         ]
-        XCTAssertEqual(model.scenarioHeadline, "Ready · all 2 participants running")
+        XCTAssertEqual(model.scenarioHeadline, "Ready · all 2 colleagues working")
 
         model.participants = [participant("a", observed: "stopped")]
-        XCTAssertEqual(model.scenarioHeadline, "Ready · 1 participant, none running")
+        XCTAssertEqual(model.scenarioHeadline, "Ready · 1 colleague, none working")
     }
 }

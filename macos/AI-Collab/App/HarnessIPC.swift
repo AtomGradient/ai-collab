@@ -25,13 +25,13 @@ enum HarnessIPCError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .invalidStateRoot: "Harness state directory is unavailable or not owner-private."
-        case .invalidProjectDirectory: "The selected project must be a readable directory."
-        case .capabilityUnavailable: "Harness owner capability is unavailable or invalid."
-        case .hostUnavailable: "Harness Host is not running."
-        case .operationTimedOut: "Harness operation timed out. The Host may still be finishing it; refresh before retrying."
-        case .invalidReply: "Harness Host returned an invalid reply."
-        case .contractMismatch: "This App and Harness Host use different typed contracts."
+        case .invalidStateRoot: S.IPC.invalidStateRoot
+        case .invalidProjectDirectory: S.IPC.invalidProjectDirectory
+        case .capabilityUnavailable: S.IPC.capabilityUnavailable
+        case .hostUnavailable: S.IPC.hostUnavailable
+        case .operationTimedOut: S.IPC.operationTimedOut
+        case .invalidReply: S.IPC.invalidReply
+        case .contractMismatch: S.IPC.contractMismatch
         case let .hostRejected(code, category, message, retryable, mutationState, repairAction):
             "\(message) [\(code) · \(category) · \(mutationState)"
                 + "\(retryable ? " · retryable" : "")"
@@ -389,7 +389,7 @@ final class HarnessIPCClient: @unchecked Sendable {
         throw HarnessIPCError.hostRejected(
             code: error["code"] as? String ?? "operation.failed",
             category: error["category"] as? String ?? "operation",
-            message: error["redacted_message"] as? String ?? "Harness operation failed.",
+            message: error["redacted_message"] as? String ?? S.IPC.operationFailedFallback,
             retryable: error["retryable"] as? Bool ?? false,
             mutationState: value["mutation_state"] as? String ?? "not_started",
             repairAction: error["repair_action"] as? String

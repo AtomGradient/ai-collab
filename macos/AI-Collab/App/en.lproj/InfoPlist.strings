@@ -1,0 +1,2 @@
+/* System permission dialogs follow the macOS system language. */
+"NSAppleEventsUsageDescription" = "AI Collab presents each AI colleague's session in an iTerm2 window and needs Automation access to open and control those windows.";

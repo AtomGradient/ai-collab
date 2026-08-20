@@ -444,10 +444,25 @@ struct ScenarioTopologyRecord: Equatable {
 struct ActionableErrorRecord: Equatable {
     let code: String
     let category: String
-    let message: String
     let retryable: Bool
     let mutationState: String
     let repairAction: String?
+    /// Raw Host evidence (verbatim) for Host-rejected operations.
+    private let hostMessage: String?
+    /// App-generated copy, rendered at read time so a language switch
+    /// retranslates instantly. Raw Host evidence is never re-rendered.
+    private let localRender: (() -> String)?
+
+    var message: String { localRender?() ?? hostMessage ?? "" }
+
+    static func == (left: ActionableErrorRecord, right: ActionableErrorRecord) -> Bool {
+        left.code == right.code
+            && left.category == right.category
+            && left.retryable == right.retryable
+            && left.mutationState == right.mutationState
+            && left.repairAction == right.repairAction
+            && left.hostMessage == right.hostMessage
+    }
 
     init(_ error: Error) {
         if let ipcError = error as? HarnessIPCError, case let .hostRejected(
@@ -455,14 +470,16 @@ struct ActionableErrorRecord: Equatable {
         ) = ipcError {
             self.code = code
             self.category = category
-            self.message = message
+            self.hostMessage = message
+            self.localRender = nil
             self.retryable = retryable
             self.mutationState = mutationState
             self.repairAction = repairAction
         } else if let ipcError = error as? HarnessIPCError {
             self.code = "availability.host-unavailable"
             self.category = "availability"
-            self.message = ipcError.localizedDescription
+            self.hostMessage = nil
+            self.localRender = { ipcError.localizedDescription }
             self.retryable = true
             self.mutationState = ipcError.isOperationTimeout ? "unknown" : "not_started"
             switch ipcError {
@@ -478,7 +495,8 @@ struct ActionableErrorRecord: Equatable {
         } else {
             self.code = "client.failure"
             self.category = "client"
-            self.message = error.localizedDescription
+            self.hostMessage = nil
+            self.localRender = { error.localizedDescription }
             self.retryable = false
             self.mutationState = "not_started"
             self.repairAction = nil
@@ -767,10 +785,10 @@ func dictionaries(_ value: Any?) -> [[String: Any]] {
 }
 
 func prettyJSON(_ value: Any?) -> String {
-    guard let value, JSONSerialization.isValidJSONObject(value) else { return "Not available" }
+    guard let value, JSONSerialization.isValidJSONObject(value) else { return S.Common.notAvailable }
     guard
         let data = try? JSONSerialization.data(withJSONObject: value, options: [.prettyPrinted, .sortedKeys]),
         let text = String(data: data, encoding: .utf8)
-    else { return "Not available" }
+    else { return S.Common.notAvailable }
     return text
 }

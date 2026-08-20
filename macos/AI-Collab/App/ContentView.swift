@@ -30,32 +30,34 @@ private enum HighRiskIntent: Identifiable {
 
     var title: String {
         switch self {
-        case .repairScenario: "Request Scenario repair?"
-        case .forceStop: "Request forced Participant stop?"
-        case .recreateParticipantWithHandoff: "Start a new Agent conversation?"
-        case .breakResource: "Request stale resource release?"
-        case .destroyScenario: "Request Scenario destruction?"
-        case .forceDestroyScenario: "Force delete this Scenario?"
-        case .unregisterProject: "Unregister this project?"
+        case .repairScenario: S.HighRisk.repairTitle
+        case .forceStop: S.HighRisk.forceStopTitle
+        case .recreateParticipantWithHandoff: S.HighRisk.recreateTitle
+        case .breakResource: S.HighRisk.breakResourceTitle
+        case .destroyScenario: S.HighRisk.destroyTitle
+        case .forceDestroyScenario: S.HighRisk.forceDestroyTitle
+        case .unregisterProject: S.HighRisk.unregisterTitle
         }
     }
 
     var message: String {
         switch self {
         case .repairScenario:
-            "Repair preserves Scenario WIP and audit history. The Host will independently verify the exact degraded state, workspace fence, permissions, effect preview, and trusted single-use authorization."
+            S.HighRisk.repairMessage
         case let .forceStop(participant):
-            "Force Stop may terminate the exact Harness-owned process for \(participant.id) generation \(participant.generation). The Host will independently revalidate its binding and require trusted single-use authorization."
+            S.HighRisk.forceStopMessage(participant.id, participant.generation)
         case let .recreateParticipantWithHandoff(participant):
-            "Exact conversation recovery for \(participant.id) generation \(participant.generation) did not complete. Continuing creates a new Participant generation and a new Agent conversation. Code and WIP stay in the Scenario workspace, and the new Agent receives the current Harness identity, peers, policy, and reply rules; the previous Agent conversation is not restored."
+            S.HighRisk.recreateMessage(participant.id, participant.generation)
         case let .breakResource(resource):
-            "Break Lease releases only stale \(resource.resourceClass) lease \(String(resource.id.prefix(12))) after the Host proves the exact owned process is absent and obtains trusted single-use authorization."
+            S.HighRisk.breakResourceMessage(
+                resource.resourceClass, String(resource.id.prefix(12))
+            )
         case .destroyScenario:
-            "The Harness Host will independently verify the current target, fences, permissions, effect preview, and trusted single-use authorization."
+            S.HighRisk.destroyMessage
         case let .forceDestroyScenario(scenario):
-            "This permanently deletes Scenario \(scenario.id), its isolated Workspace and uncommitted Scenario WIP. Exact Harness-owned Agent windows, processes, and leases are force-cleaned first. The registered project source is never deleted; any unproven ownership or changed fence stops the operation."
+            S.HighRisk.forceDestroyMessage(scenario.id)
         case let .unregisterProject(project):
-            "This removes only the registration record for \(project.key). The Host refuses while the project still owns any Scenario, nothing on disk is touched, and the project can simply be registered again."
+            S.HighRisk.unregisterMessage(project.key)
         }
     }
 }
@@ -65,6 +67,7 @@ private enum HighRiskIntent: Identifiable {
 struct ContentView: View {
     @EnvironmentObject private var model: HarnessViewModel
     @State private var highRiskIntent: HighRiskIntent?
+    @State private var pendingDeletion: ParticipantRecord?
 
     var body: some View {
         NavigationSplitView {
@@ -76,10 +79,10 @@ struct ContentView: View {
         }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
-                Button("Register Project", systemImage: "plus") {
+                Button(S.Chrome.registerProject, systemImage: "plus") {
                     Task { await model.chooseAndRegisterProject() }
                 }
-                .help("Register Project")
+                .help(S.Chrome.registerProject)
             }
         }
         .disabled(model.isBusy)
@@ -92,14 +95,34 @@ struct ContentView: View {
             titleVisibility: .visible
         ) {
             if let intent = highRiskIntent {
-                Button("Continue to Host confirmation", role: .destructive) {
+                Button(S.Common.continueToHostConfirmation, role: .destructive) {
                     Task { await performHighRiskIntent(intent) }
                 }
-                Button("Cancel", role: .cancel) {}
+                Button(S.Common.cancel, role: .cancel) {}
             }
         } message: {
             if let intent = highRiskIntent {
                 Text(intent.message)
+            }
+        }
+        .confirmationDialog(
+            S.Colleagues.deleteConfirmTitle(pendingDeletion?.id ?? ""),
+            isPresented: Binding(
+                get: { pendingDeletion != nil },
+                set: { if !$0 { pendingDeletion = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            if let participant = pendingDeletion {
+                Button(S.Common.delete, role: .destructive) {
+                    pendingDeletion = nil
+                    Task { await model.deleteParticipant(participant) }
+                }
+                Button(S.Common.cancel, role: .cancel) {}
+            }
+        } message: {
+            if let participant = pendingDeletion {
+                Text(S.Colleagues.deleteConfirmMessage(participant.id))
             }
         }
         .overlay(alignment: .top) { errorBanner }
@@ -116,28 +139,28 @@ struct ContentView: View {
             get: { model.selectedProjectID },
             set: { id in Task { await model.selectProject(id) } }
         )) {
-            Section("Projects") {
+            Section(S.Projects.sectionTitle) {
                 ForEach(model.projects) { project in
                     VStack(alignment: .leading, spacing: 2) {
                         Text(project.key)
-                        Text("Contract \(project.productContractVersion)")
+                        Text(S.Projects.contractVersion(project.productContractVersion))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                         if let reconciliation = model.projectReconciliations[project.id],
                            reconciliation.status == "attention" {
                             Text(
                                 reconciliation.bindingChanged
-                                    ? "Project configuration update available"
+                                    ? S.Projects.updateAvailable
                                     : reconciliation.changes.isEmpty
-                                        ? "Project configuration needs attention"
-                                        : "\(reconciliation.changes.count) repository change"
-                                            + (reconciliation.changes.count == 1 ? "" : "s")
-                                            + " detected"
+                                        ? S.Projects.needsAttention
+                                        : S.Projects.repositoryChanges(
+                                            reconciliation.changes.count
+                                        )
                             )
                             .font(.caption)
                             .foregroundStyle(.orange)
                             if reconciliation.bindingChanged {
-                                Button("Apply project update") {
+                                Button(S.Projects.applyUpdate) {
                                     Task {
                                         await model.acceptProjectReconciliation(project.id)
                                     }
@@ -149,25 +172,25 @@ struct ContentView: View {
                     }
                     .tag(project.id)
                     .contextMenu {
-                        Button("Check Project Updates") {
+                        Button(S.Projects.checkUpdates) {
                             Task { await model.reconcileProject(project.id, surfaceErrors: true) }
                         }
                         if let reconciliation = model.projectReconciliations[project.id],
                            reconciliation.bindingChanged {
-                            Button("Apply Detected Project Update") {
+                            Button(S.Projects.applyDetectedUpdate) {
                                 Task { await model.acceptProjectReconciliation(project.id) }
                             }
                         }
-                        Button("Unregister Project…", role: .destructive) {
+                        Button(S.Projects.unregister, role: .destructive) {
                             highRiskIntent = .unregisterProject(project)
                         }
                     }
                 }
             }
         }
-        .navigationTitle("AI Collab")
+        .navigationTitle(S.Chrome.appTitle)
         .confirmationDialog(
-            "Register this Git project?",
+            S.Register.confirmTitle,
             isPresented: Binding(
                 get: { model.pendingRegistrationURL != nil },
                 set: { if !$0 { model.pendingRegistrationURL = nil } }
@@ -175,50 +198,42 @@ struct ContentView: View {
             titleVisibility: .visible
         ) {
             if let url = model.pendingRegistrationURL {
-                Button("Register Project") {
+                Button(S.Register.confirmAction) {
                     model.pendingRegistrationURL = nil
                     Task { await model.confirmProjectRegistration(url) }
                 }
-                Button("Cancel", role: .cancel) {}
+                Button(S.Common.cancel, role: .cancel) {}
             }
         } message: {
             if let url = model.pendingRegistrationURL {
-                Text(
-                    "AICollab will use \(url.lastPathComponent)'s tracked team intent "
-                        + "when present, read older project contracts compatibly, or pin "
-                        + "a built-in default for a fileless project. Registration never "
-                        + "writes to the selected repository."
-                )
+                Text(S.Register.confirmMessage(url.lastPathComponent))
             }
         }
         .safeAreaInset(edge: .bottom) {
             HStack {
                 Circle()
-                    .fill(model.hostStatus == "ready" ? .green : .orange)
+                    .fill(model.hostReady ? .green : .orange)
                     .frame(width: 8, height: 8)
-                Text("Host: \(model.hostStatus)")
+                Text(S.Chrome.hostStatusLine(model.hostStatusDisplay))
                     .font(.caption)
                 Spacer()
-                if model.hostStatus != "ready" {
-                    Button("Retry") { Task { await model.retryHostService() } }
+                if !model.hostReady {
+                    Button(S.Common.retry) { Task { await model.retryHostService() } }
                         .controlSize(.small)
                 } else if let permission = model.presentationPermissionStatus,
                           permission != "granted" {
-                    Button("Grant iTerm2 Access") {
+                    Button(S.Chrome.grantITermAccess) {
                         Task { await model.requestPresentationPermission() }
                     }
                     .controlSize(.small)
-                    .help(
-                        "Let macOS ask for the Automation permission AI Collab "
-                            + "needs to present agents in iTerm2 windows."
-                    )
+                    .help(S.Chrome.grantITermHelp)
                 }
                 SettingsLink {
-                    Label("Diagnostics", systemImage: "stethoscope")
+                    Label(S.Settings.diagnosticsTab, systemImage: "stethoscope")
                         .labelStyle(.iconOnly)
                 }
                 .controlSize(.small)
-                .help("Open the Diagnostics report (also under Settings, ⌘,)")
+                .help(S.Chrome.diagnosticsHelp)
             }
             .padding(10)
             .background(.bar)
@@ -230,12 +245,12 @@ struct ContentView: View {
     private var scenariosList: some View {
         VStack(spacing: 0) {
             HStack {
-                TextField("Scenario identity", text: $model.newScenarioID)
+                TextField(S.Rooms.identityPlaceholder, text: $model.newScenarioID)
                     .onSubmit {
                         guard model.selectedProject != nil, !model.isBusy else { return }
                         Task { await model.createScenario() }
                     }
-                Button("Create") { Task { await model.createScenario() } }
+                Button(S.Rooms.createButton) { Task { await model.createScenario() } }
                     .disabled(model.selectedProject == nil || model.isBusy)
             }
             .padding()
@@ -251,7 +266,7 @@ struct ContentView: View {
                         .listRowInsets(EdgeInsets(top: 3, leading: 6, bottom: 3, trailing: 6))
                         .listRowSeparator(.hidden)
                         .contextMenu {
-                            Button("Force Delete Scenario…", role: .destructive) {
+                            Button(S.Rooms.forceDelete, role: .destructive) {
                                 highRiskIntent = .forceDestroyScenario(scenario)
                             }
                         }
@@ -259,7 +274,7 @@ struct ContentView: View {
             }
             .listStyle(.plain)
         }
-        .navigationTitle("Scenarios")
+        .navigationTitle(S.Rooms.listTitle)
     }
 
     // MARK: - Detail: Scenario
@@ -286,9 +301,9 @@ struct ContentView: View {
                 }
             } else {
                 ContentUnavailableView(
-                    "Select a Scenario",
+                    S.Rooms.selectTitle,
                     systemImage: "square.stack.3d.up",
-                    description: Text("Register a project, create a Scenario, and operate it through the typed Harness Host.")
+                    description: Text(S.Rooms.selectDescription)
                 )
             }
         }
@@ -310,19 +325,19 @@ struct ContentView: View {
                 }
                 Spacer()
                 HStack(spacing: 8) {
-                    Button("Refresh", systemImage: "arrow.clockwise") {
+                    Button(S.Detail.refresh, systemImage: "arrow.clockwise") {
                         Task { await model.refreshSelectedScenario() }
                     }
                     .labelStyle(.iconOnly)
-                    Button("Prepare Workspace") {
+                    Button(S.Detail.prepareWorkspace) {
                         Task { await model.prepareWorkspace() }
                     }
-                    Button("Resume") { Task { await model.openScenario() } }
+                    Button(S.Detail.resume) { Task { await model.openScenario() } }
                         .disabled(
                             model.isBusy
                                 || !["closed", "degraded"].contains(scenario.observedState)
                         )
-                    Button("Start All") {
+                    Button(S.Detail.startAll) {
                         Task { await model.startAllParticipants() }
                     }
                     .disabled(
@@ -334,20 +349,20 @@ struct ContentView: View {
                             )
                     )
                     .help(
-                        "Start every stopped or detached participant in this Scenario"
+                        S.Detail.startAllHelp
                     )
-                    Button("Close") { Task { await model.closeScenario() } }
+                    Button(S.Detail.close) { Task { await model.closeScenario() } }
                 }
             }
             HStack(spacing: 16) {
                 Label(
-                    "\(model.runningParticipantCount) running",
+                    S.Colleagues.runningCount(model.runningParticipantCount),
                     systemImage: "person.2.fill"
                 )
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 Label(
-                    "\(model.deliveryTotal) deliveries",
+                    S.Colleagues.deliveryCount(model.deliveryTotal),
                     systemImage: "envelope.fill"
                 )
                 .font(.caption)
@@ -355,7 +370,7 @@ struct ContentView: View {
                 if !model.deliveryStates.isEmpty {
                     Text(
                         model.deliveryStates.keys.sorted().map {
-                            "\($0) \(model.deliveryStates[$0] ?? 0)"
+                            "\(S.Delivery.stateLabel($0)) \(model.deliveryStates[$0] ?? 0)"
                         }.joined(separator: " · ")
                     )
                     .font(.caption)
@@ -389,17 +404,17 @@ struct ContentView: View {
         GroupBox {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
-                    TextField("Participant identity", text: $model.newParticipantID)
+                    TextField(S.Colleagues.identityPlaceholder, text: $model.newParticipantID)
                         .onSubmit {
                             Task { await model.addParticipant() }
                         }
-                    Picker("Template", selection: $model.selectedTemplateID) {
+                    Picker(S.Colleagues.templatePicker, selection: $model.selectedTemplateID) {
                         ForEach(model.interactiveTemplates) { template in
                             Text(template.displayName).tag(Optional(template.id))
                         }
                         if !model.diagnosticTemplates.isEmpty {
                             Divider()
-                            Section("Advanced") {
+                            Section(S.Colleagues.advanced) {
                                 ForEach(model.diagnosticTemplates) { template in
                                     Text(template.displayName).tag(Optional(template.id))
                                 }
@@ -407,12 +422,12 @@ struct ContentView: View {
                         }
                     }
                     .frame(minWidth: 180)
-                    Button("Add") { Task { await model.addParticipant() } }
+                    Button(S.Colleagues.add) { Task { await model.addParticipant() } }
                 }
                 validationBanner(for: .participantAdd)
                 validationBanner(for: .participantAction)
                 if model.participants.isEmpty {
-                    Text("No participants yet. Add one above to get started.")
+                    Text(S.Colleagues.emptyHint)
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .center)
@@ -428,7 +443,7 @@ struct ContentView: View {
             }
             .padding(6)
         } label: {
-            Label("Participants", systemImage: "person.3.fill")
+            Label(S.Colleagues.sectionTitle, systemImage: "person.3.fill")
                 .font(.headline)
         }
     }
@@ -451,7 +466,7 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                 }
                 if participant.cleanupPending {
-                    Text(participant.degradedReason ?? "repair required")
+                    Text(participant.degradedReason ?? S.Colleagues.repairRequired)
                         .font(.caption)
                         .foregroundStyle(.orange)
                 }
@@ -466,36 +481,42 @@ struct ContentView: View {
         let state = participant.observedState
         HStack(spacing: 6) {
             if participant.canStart {
-                Button("Start") {
+                Button(S.Colleagues.start) {
                     Task { await model.startParticipant(participant) }
                 }
                 .controlSize(.small)
             }
             if participant.canStop {
-                Button("Stop") {
+                Button(S.Colleagues.stop) {
                     Task { await model.stopParticipant(participant) }
                 }
                 .controlSize(.small)
             }
             if participant.canRecover {
-                Button("Recover") {
+                Button(S.Colleagues.recover) {
                     Task { await model.recoverParticipant(participant) }
                 }
                 .controlSize(.small)
             }
             Menu {
                 if participant.canForceStop {
-                    Button("Force Stop", role: .destructive) {
+                    Button(S.Colleagues.forceStop, role: .destructive) {
                         highRiskIntent = .forceStop(participant)
                     }
                 }
                 if participant.canRecreateWithHandoff {
-                    Button("Recreate + Handoff") {
+                    Button(S.Colleagues.recreateHandoff) {
                         highRiskIntent = .recreateParticipantWithHandoff(participant)
                     }
                 }
+                if state == "stopped" {
+                    Divider()
+                    Button(S.Colleagues.deleteMenu, role: .destructive) {
+                        pendingDeletion = participant
+                    }
+                }
                 if ["stopped", "ready", "degraded", "detached"].contains(state) {
-                    Menu("Replace with") {
+                    Menu(S.Colleagues.replaceWith) {
                         ForEach(model.interactiveTemplates) { template in
                             Button(template.displayName) {
                                 Task {
@@ -507,7 +528,7 @@ struct ContentView: View {
                         }
                         if !model.diagnosticTemplates.isEmpty {
                             Divider()
-                            Section("Advanced") {
+                            Section(S.Colleagues.advanced) {
                                 ForEach(model.diagnosticTemplates) { template in
                                     Button(template.displayName) {
                                         Task {
@@ -546,17 +567,17 @@ struct ContentView: View {
                         StateBadge(state: preflight.status)
                         Text(
                             preflight.status == "ready"
-                                ? "All readiness checks passed."
-                                : "Resolve blocked checks before starting affected work."
+                                ? S.Preflight.allPassed
+                                : S.Preflight.resolveBlocked
                         )
                         .font(.callout)
                     } else {
-                        Text("Run preflight to check permissions and readiness.")
+                        Text(S.Preflight.runHint)
                             .font(.callout)
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
-                    Button("Run Preflight") {
+                    Button(S.Preflight.runButton) {
                         Task { await model.runPreflight() }
                     }
                     .controlSize(.small)
@@ -596,7 +617,7 @@ struct ContentView: View {
                             Image(systemName: "lock.shield")
                             Text(permission.permissionID)
                             Spacer()
-                            Text(permission.status)
+                            Text(S.Preflight.permissionStatus(permission.status))
                                 .font(.caption.bold())
                             if let code = permission.providerErrorCode {
                                 Text(code)
@@ -610,7 +631,7 @@ struct ContentView: View {
             .padding(.vertical, 6)
         } label: {
             HStack {
-                Label("Preflight", systemImage: "checkmark.shield")
+                Label(S.Preflight.sectionTitle, systemImage: "checkmark.shield")
                     .font(.headline)
                 Spacer()
                 if let preflight = model.preflight {
@@ -626,18 +647,18 @@ struct ContentView: View {
         DisclosureGroup(isExpanded: $showTopology) {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
-                    Text("Exact window and topology-scoped geometry per interactive Participant.")
+                    Text(S.Topology.description)
                         .font(.callout)
                         .foregroundStyle(.secondary)
                     Spacer()
-                    Button("Focus & Restore") {
+                    Button(S.Topology.focusRestore) {
                         Task { await model.focusScenario() }
                     }
                     .controlSize(.small)
                 }
                 if let topology = model.topology {
                     if topology.participants.isEmpty {
-                        Text("No topology entries.")
+                        Text(S.Topology.noEntries)
                             .font(.callout)
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity, alignment: .center)
@@ -665,7 +686,7 @@ struct ContentView: View {
                         }
                     }
                 } else {
-                    Text("No topology data. Resume or refresh the Scenario first.")
+                    Text(S.Topology.noData)
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .center)
@@ -674,7 +695,7 @@ struct ContentView: View {
             }
             .padding(.vertical, 6)
         } label: {
-            Label("Window Topology", systemImage: "macwindow.on.rectangle")
+            Label(S.Topology.sectionTitle, systemImage: "macwindow.on.rectangle")
                 .font(.headline)
         }
         .padding(10)
@@ -688,7 +709,7 @@ struct ContentView: View {
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(status.policyID).font(.callout.bold())
-                            Text("Version \(status.policyVersion)")
+                            Text(S.Policy.version(status.policyVersion))
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -699,11 +720,11 @@ struct ContentView: View {
                     }
                     if !status.generationDrift.isEmpty {
                         VStack(alignment: .leading, spacing: 4) {
-                            Text("Participant generation changed")
+                            Text(S.Policy.generationChanged)
                                 .font(.callout.bold())
                             ForEach(status.generationDrift) { drift in
                                 Text(
-                                    "\(drift.participantID): policy g\(drift.policyGeneration) → current g\(drift.currentGeneration)"
+                                    S.Policy.driftRow(drift.participantID, drift.policyGeneration, drift.currentGeneration)
                                 )
                                 .font(.caption)
                             }
@@ -712,14 +733,14 @@ struct ContentView: View {
                         .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
                     }
                 } else {
-                    Text("No active policy. Choose a team template below.")
+                    Text(S.Policy.noActivePolicy)
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }
 
                 HStack {
                     Picker(
-                        "Team template",
+                        S.Policy.teamTemplate,
                         selection: Binding(
                             get: { model.selectedPolicyTemplateID },
                             set: { model.selectPolicyTemplate($0) }
@@ -732,14 +753,14 @@ struct ContentView: View {
                     .frame(minWidth: 240)
                     Button(
                         model.policyStatus?.requiresReplan == true
-                            ? "Create Repair Plan"
-                            : "Preview Plan"
+                            ? S.Policy.createRepairPlan
+                            : S.Policy.previewPlan
                     ) {
                         Task { await model.planSelectedPolicy() }
                     }
                     .controlSize(.small)
                     .disabled(model.selectedPolicyTemplate == nil)
-                    Button("Apply Plan") {
+                    Button(S.Policy.applyPlan) {
                         Task { await model.applySelectedPolicyPlan() }
                     }
                     .controlSize(.small)
@@ -751,7 +772,7 @@ struct ContentView: View {
                 }
 
                 if let template = model.selectedPolicyTemplate {
-                    Text("Team: \(template.participantIDs.joined(separator: ", "))")
+                    Text(S.Policy.teamLine(template.participantIDs.joined(separator: ", ")))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -759,7 +780,7 @@ struct ContentView: View {
                 if let plan = model.policyPlan {
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
-                            Text("Plan preview").font(.callout.bold())
+                            Text(S.Policy.planPreview).font(.callout.bold())
                             Spacer()
                             StateBadge(state: plan.canApply ? "ready" : "blocked")
                         }
@@ -774,7 +795,7 @@ struct ContentView: View {
                                 Text(member.participantID)
                                 Spacer()
                                 Text(
-                                    member.generation.map { "g\($0)" } ?? "missing"
+                                    member.generation.map { "g\($0)" } ?? S.Policy.memberMissing
                                 )
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
@@ -788,7 +809,7 @@ struct ContentView: View {
                                 .font(.callout.bold())
                                 Text(
                                     "\(route.messageKind) · \(route.effect)"
-                                        + (route.maxAttempts.map { " · up to \($0) attempts" } ?? "")
+                                        + (route.maxAttempts.map { S.Policy.upToAttempts($0) } ?? "")
                                 )
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
@@ -807,7 +828,7 @@ struct ContentView: View {
             .padding(.vertical, 6)
         } label: {
             HStack {
-                Label("Collaboration Policy", systemImage: "shared.with.you")
+                Label(S.Policy.sectionTitle, systemImage: "shared.with.you")
                     .font(.headline)
                 Spacer()
                 if let status = model.policyStatus {
@@ -825,7 +846,7 @@ struct ContentView: View {
         DisclosureGroup(isExpanded: $showDeliveries) {
             VStack(alignment: .leading, spacing: 10) {
                 if model.deliveries.isEmpty {
-                    Text("No deliveries recorded yet.")
+                    Text(S.Deliveries.empty)
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .center)
@@ -834,7 +855,7 @@ struct ContentView: View {
                     ForEach(model.deliveries) { delivery in
                         VStack(alignment: .leading, spacing: 5) {
                             HStack {
-                                Text(delivery.isThreadRoot ? "Thread" : "Reply")
+                                Text(delivery.isThreadRoot ? S.Deliveries.thread : S.Deliveries.reply)
                                     .font(.caption.bold())
                                 Text(String(delivery.id.prefix(12)))
                                     .font(.system(.caption, design: .monospaced))
@@ -844,7 +865,7 @@ struct ContentView: View {
                                 Spacer()
                                 StateBadge(state: delivery.state)
                                 if delivery.retryEligible {
-                                    Button("Retry") {
+                                    Button(S.Common.retry) {
                                         Task { await model.retryDelivery(delivery) }
                                     }
                                     .controlSize(.small)
@@ -855,7 +876,7 @@ struct ContentView: View {
                             )
                             .font(.callout)
                             Text(
-                                "Last: \(delivery.lastEvent) · seq \(delivery.eventSequence)"
+                                S.Deliveries.lastEvent(delivery.lastEvent, delivery.eventSequence)
                             )
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -869,7 +890,7 @@ struct ContentView: View {
                         Divider()
                     }
                     if model.nextDeliveryPage != nil {
-                        Button("Load More") {
+                        Button(S.Deliveries.loadMore) {
                             Task { await model.loadMoreDeliveries() }
                         }
                         .controlSize(.small)
@@ -879,7 +900,7 @@ struct ContentView: View {
             .padding(.vertical, 6)
         } label: {
             HStack {
-                Label("Agent Deliveries", systemImage: "envelope.fill")
+                Label(S.Deliveries.sectionTitle, systemImage: "envelope.fill")
                     .font(.headline)
                 Spacer()
                 if model.deliveryTotal > 0 {
@@ -896,20 +917,20 @@ struct ContentView: View {
     private var inspectorSection: some View {
         DisclosureGroup(isExpanded: $showInspector) {
             TabView {
-                InspectorText(title: "Diagnostics", text: model.diagnosticText)
-                    .tabItem { Text("Diagnostics") }
-                InspectorText(title: "Resources", text: model.resourceText)
-                    .tabItem { Text("Resources") }
-                InspectorText(title: "Policy", text: model.policyText)
-                    .tabItem { Text("Policy") }
-                InspectorText(title: "Receipt", text: model.receiptText)
-                    .tabItem { Text("Receipt") }
-                InspectorText(title: "Resume", text: model.resumeText)
-                    .tabItem { Text("Resume") }
+                InspectorText(title: S.Settings.diagnosticsTab, text: model.diagnosticText)
+                    .tabItem { Text(S.Settings.diagnosticsTab) }
+                InspectorText(title: S.Inspector.resources, text: model.resourceText)
+                    .tabItem { Text(S.Inspector.resources) }
+                InspectorText(title: S.Inspector.policy, text: model.policyText)
+                    .tabItem { Text(S.Inspector.policy) }
+                InspectorText(title: S.Inspector.receipt, text: model.receiptText)
+                    .tabItem { Text(S.Inspector.receipt) }
+                InspectorText(title: S.Inspector.resume, text: model.resumeText)
+                    .tabItem { Text(S.Inspector.resume) }
             }
             .frame(minHeight: 220)
         } label: {
-            Label("Inspector", systemImage: "terminal")
+            Label(S.Inspector.sectionTitle, systemImage: "terminal")
                 .font(.headline)
         }
         .padding(10)
@@ -919,21 +940,21 @@ struct ContentView: View {
     private func highRiskSection(_ scenario: ScenarioRecord) -> some View {
         DisclosureGroup {
             VStack(alignment: .leading, spacing: 10) {
-                Text("The Host presents its trusted native single-use confirmation; this App cannot bypass it.")
+                Text(S.Risk.hostConfirmNote)
                     .font(.callout)
                     .foregroundStyle(.secondary)
                 HStack {
                     if ["provision_failed", "degraded"].contains(scenario.observedState) {
-                        Button("Repair Scenario") {
+                        Button(S.Risk.repairScenario) {
                             highRiskIntent = .repairScenario
                         }
                         .controlSize(.small)
                     }
-                    Button("Load Destroy Preview") {
+                    Button(S.Risk.loadDestroyPreview) {
                         Task { await model.loadDestroyPreview() }
                     }
                     .controlSize(.small)
-                    Button("Destroy Scenario", role: .destructive) {
+                    Button(S.Risk.destroyScenario, role: .destructive) {
                         highRiskIntent = .destroyScenario
                     }
                     .controlSize(.small)
@@ -942,16 +963,16 @@ struct ContentView: View {
                 ForEach(model.resources.filter(\.canBreak)) { resource in
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("Stale \(resource.resourceClass) lease")
+                            Text(S.Risk.staleLease(resource.resourceClass))
                                 .font(.callout.bold())
                             Text(
-                                "\(String(resource.id.prefix(12))) · \(resource.participantID) g\(resource.participantGeneration) · \(resource.staleReason ?? "stale")"
+                                "\(String(resource.id.prefix(12))) · \(resource.participantID) g\(resource.participantGeneration) · \(resource.staleReason ?? S.Risk.staleDefault)"
                             )
                             .font(.caption)
                             .foregroundStyle(.secondary)
                         }
                         Spacer()
-                        Button("Break Lease", role: .destructive) {
+                        Button(S.Risk.breakLease, role: .destructive) {
                             highRiskIntent = .breakResource(resource)
                         }
                         .controlSize(.small)
@@ -965,7 +986,7 @@ struct ContentView: View {
             }
             .padding(.vertical, 6)
         } label: {
-            Label("High-risk Actions", systemImage: "exclamationmark.triangle")
+            Label(S.Risk.sectionTitle, systemImage: "exclamationmark.triangle")
                 .font(.headline)
                 .foregroundStyle(.red)
         }
@@ -982,16 +1003,18 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(error.message).font(.callout.bold())
                     Text(
-                        "\(error.code) · \(error.category) · mutation \(error.mutationState)"
-                            + (error.retryable ? " · retryable" : "")
+                        S.Banner.machineLine(
+                            error.code, error.category, error.mutationState,
+                            retryable: error.retryable
+                        )
                     )
                     .font(.caption.monospaced())
                     if let action = error.repairAction {
                         HStack {
-                            Text("Recommended: \(model.repairActionLabel(action))")
+                            Text(S.Banner.recommended(model.repairActionLabel(action)))
                                 .font(.caption)
                             if action == "scenario.repair" {
-                                Button("Review Repair") { highRiskIntent = .repairScenario }
+                                Button(S.Banner.reviewRepair) { highRiskIntent = .repairScenario }
                                     .controlSize(.small)
                             } else if model.canPerformRepairAction(action) {
                                 Button(model.repairActionLabel(action)) {
@@ -1057,7 +1080,7 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                 }
                 if model.operationCanCancel {
-                    Button("Cancel safely") {
+                    Button(S.Banner.cancelSafely) {
                         Task { await model.cancelActiveOperation() }
                     }
                 }
@@ -1099,30 +1122,33 @@ struct DiagnosticsView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                GroupBox("About") {
+                GroupBox(S.Diagnostics.about) {
                     VStack(alignment: .leading, spacing: 6) {
-                        aboutRow("App version", HarnessViewModel.appVersionText)
+                        aboutRow(S.Diagnostics.appVersion, HarnessViewModel.appVersionText)
                         aboutRow(
-                            "Harness contract",
+                            S.Diagnostics.harnessContract,
                             HarnessViewModel.contractVersionText
                         )
                         HStack {
-                            Text("Host")
+                            Text(S.Diagnostics.host)
                                 .foregroundStyle(.secondary)
                             Spacer()
-                            StateBadge(state: model.hostStatus)
+                            HStack(spacing: 6) {
+                                Circle()
+                                    .fill(model.hostReady ? .green : .orange)
+                                    .frame(width: 8, height: 8)
+                                Text(model.hostStatusDisplay)
+                                    .font(.caption.bold())
+                            }
                         }
                     }
                     .padding(6)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                GroupBox("Machine Readiness") {
+                GroupBox(S.Diagnostics.machineReadiness) {
                     VStack(alignment: .leading, spacing: 8) {
                         if model.environmentObservations.isEmpty {
-                            Text(
-                                "No report yet. The Host may still be starting "
-                                    + "— use Refresh below."
-                            )
+                            Text(S.Diagnostics.noReport)
                             .font(.callout)
                             .foregroundStyle(.secondary)
                         }
@@ -1133,11 +1159,11 @@ struct DiagnosticsView: View {
                     .padding(6)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                GroupBox("Automation Permission") {
+                GroupBox(S.Diagnostics.automationPermission) {
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("iTerm2 control")
-                            Text("Required before agents can be presented")
+                            Text(S.Diagnostics.itermControl)
+                            Text(S.Diagnostics.requiredBefore)
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -1146,7 +1172,7 @@ struct DiagnosticsView: View {
                             state: model.presentationPermissionStatus ?? "unknown"
                         )
                         if model.presentationPermissionStatus != "granted" {
-                            Button("Request Permission") {
+                            Button(S.Diagnostics.requestPermission) {
                                 Task {
                                     await model.requestPresentationPermission()
                                 }
@@ -1158,7 +1184,7 @@ struct DiagnosticsView: View {
                 }
                 HStack {
                     Spacer()
-                    Button("Refresh", systemImage: "arrow.clockwise") {
+                    Button(S.Detail.refresh, systemImage: "arrow.clockwise") {
                         Task {
                             await model.refreshEnvironmentReport()
                             await model.refreshPresentationPermission()
@@ -1169,7 +1195,7 @@ struct DiagnosticsView: View {
             .padding(20)
         }
         .frame(minWidth: 560, minHeight: 460)
-        .navigationTitle("Diagnostics")
+        .navigationTitle(S.Settings.diagnosticsTab)
         .task {
             await model.refreshEnvironmentReport()
             await model.refreshPresentationPermission()
@@ -1196,7 +1222,7 @@ struct DiagnosticsView: View {
                     .foregroundStyle(.tertiary)
                 if observation.status != "available",
                    let remediation = observation.remediationRef {
-                    Text("Install it on this Mac, then Refresh · \(remediation)")
+                    Text(S.Diagnostics.installHint(remediation))
                         .font(.caption)
                         .foregroundStyle(.orange)
                 }
@@ -1275,13 +1301,13 @@ private struct ScenarioRoomCard: View {
         let count = scenario.participantIDs.count
         switch scenario.observedState {
         case "ready", "running":
-            return "\(count) participant\(count == 1 ? "" : "s")"
+            return S.Rooms.memberCount(count)
         case "closed":
-            return "closed · \(count) participant\(count == 1 ? "" : "s")"
+            return S.Rooms.closedSummary(count)
         case "degraded":
-            return "\(count) participant\(count == 1 ? "" : "s") · degraded"
+            return S.Rooms.degradedSummary(count)
         case "provision_failed":
-            return "workspace setup failed"
+            return S.Status.label("provision_failed")
         default:
             return HarnessViewModel.humanState(scenario.observedState)
         }

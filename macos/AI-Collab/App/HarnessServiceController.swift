@@ -34,24 +34,23 @@ enum HarnessServiceError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .approvalRequired:
-            return "Harness Host requires approval in System Settings → General → Login Items."
+            return S.Service.approvalRequired
         case let .registrationFailed(underlying):
             let value = underlying as NSError
-            return "Harness Host registration failed (\(value.domain) \(value.code)): "
-                + value.localizedDescription
+            return S.Service.registrationFailed(
+                value.domain, value.code, value.localizedDescription
+            )
         case let .unregisterFailed(underlying):
             let value = underlying as NSError
-            return "Harness Host re-registration could not release the previous "
-                + "registration (\(value.domain) \(value.code)): "
-                + value.localizedDescription
+            return S.Service.unregisterFailed(
+                value.domain, value.code, value.localizedDescription
+            )
         case let .serviceUnresolved(status):
-            return "macOS Service Management could not resolve the Harness Host "
-                + "service after registration (status: \(status.label)). Make sure "
-                + "the App runs from /Applications, then quit and reopen it."
+            return S.Service.serviceUnresolved(S.Service.statusLabel(status.label))
         case .buildIdentityMissing:
-            return "The signed App does not contain its Harness service build identity."
+            return S.Service.buildIdentityMissing
         case .registrationStateUnavailable:
-            return "Harness Host registration state could not be stored securely."
+            return S.Service.registrationStateUnavailable
         }
     }
 }

@@ -1,0 +1,2 @@
+/* 系统权限弹窗跟随 macOS 系统语言。 */
+"NSAppleEventsUsageDescription" = "AI Collab 会在 iTerm2 窗口中展示每位 AI 同事的会话，需要「自动化」权限来打开并控制这些窗口。";
