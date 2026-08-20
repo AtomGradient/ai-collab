@@ -19,7 +19,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from .protocol import (
     CONTRACT_VERSION,
@@ -239,6 +239,7 @@ class HarnessHost:
         # Host-owned critical section.  Workspace also serializes internally,
         # but this lock covers the cross-coordinator handoff.
         self._workspace_operation_lock = threading.RLock()
+        self._participant_destroy_lock = threading.RLock()
         self._workspace_join_attempted_this_host: set[str] = set()
         self.host_generation = 0
         self.host_instance_fingerprint = "0" * 64
@@ -374,13 +375,22 @@ class HarnessHost:
                     # from which manual recovery can proceed.  Preserve the
                     # transitional intent until the coordinator returns.
                     self._mark_workspace_join_unknown(pending["request_digest"])
+            if self.delivery is not None:
+                self._reconcile_participant_destroy_operations()
             self.store.reconcile_recorded_outcomes()
             preserved_workspace_operations = {
                 pending["operation_id"]
                 for pending in self.store.pending_workspace_operations()
             }
+            preserved_participant_destroy_operations = {
+                pending["operation_id"]
+                for pending in self.store.pending_participant_destroy_operations()
+            }
             started = self.store.start_host(
-                preserve_workspace_operation_ids=preserved_workspace_operations
+                preserve_workspace_operation_ids=preserved_workspace_operations,
+                preserve_participant_destroy_operation_ids=(
+                    preserved_participant_destroy_operations
+                ),
             )
         except BaseException:
             server.server_close()
@@ -398,6 +408,95 @@ class HarnessHost:
             raise
         self._server = server
         self._start_resource_supervisor()
+
+    def _complete_participant_destroy(
+        self, pending: Mapping[str, Any]
+    ) -> tuple[str, dict[str, Any]]:
+        if self.delivery is None:
+            raise DeliveryError(
+                "availability.driver-unavailable",
+                "Delivery coordinator is not configured",
+                True,
+            )
+        with self._participant_destroy_lock:
+            _, delivery_result = self.delivery.settle_deleted_recipient(
+                request_id=pending["delivery_request_id"],
+                request_digest=pending["delivery_request_digest"],
+                project_instance_id=pending["project_instance_id"],
+                scenario_id=pending["scenario_id"],
+                participant_id=pending["participant_id"],
+                participant_generation=pending["participant_generation"],
+            )
+            self.store.record_participant_destroy_evidence(
+                project_instance_id=pending["project_instance_id"],
+                scenario_id=pending["scenario_id"],
+                participant_id=pending["participant_id"],
+                request_id=pending["request_id"],
+                operation_id=pending["operation_id"],
+                delivery_settlement=delivery_result["delivery_settlement"],
+            )
+            self.participant_auth.revoke(
+                project_instance_id=pending["project_instance_id"],
+                scenario_id=pending["scenario_id"],
+                participant_id=pending["participant_id"],
+                participant_generation=pending["participant_generation"],
+            )
+            result = self.store.finalize_participant_destroy(
+                project_instance_id=pending["project_instance_id"],
+                scenario_id=pending["scenario_id"],
+                participant_id=pending["participant_id"],
+                request_id=pending["request_id"],
+                operation_id=pending["operation_id"],
+            )
+            self._refresh_participant_collaboration_contexts(
+                pending["project_instance_id"], pending["scenario_id"]
+            )
+            return pending["operation_id"], result
+
+    def _reconcile_participant_destroy_operations(self) -> None:
+        if self.delivery is None:
+            return
+        for pending in self.store.pending_participant_destroy_operations():
+            try:
+                self._complete_participant_destroy(pending)
+            except (DeliveryError, ParticipantAuthError, StoreError, OSError):
+                # Store keeps the exact destroying intent.  A later exact
+                # retry or Host restart rejoins the idempotent settlement.
+                continue
+
+    def _refresh_participant_collaboration_contexts(
+        self, project_instance_id: str, scenario_id: str
+    ) -> None:
+        try:
+            participants = self.store.list_participants(
+                project_instance_id, scenario_id
+            )["participants"]
+        except (StoreError, OSError):
+            return
+        for participant in participants:
+            if participant["observed_state"] != "ready":
+                continue
+            try:
+                self._participant_launch_material(
+                    project_instance_id=project_instance_id,
+                    scenario_id=scenario_id,
+                    participant_id=participant["participant_id"],
+                    participant_generation=participant[
+                        "participant_generation"
+                    ],
+                    participant_state_revision=participant["state_revision"],
+                )
+            except (
+                DeliveryError,
+                ParticipantAuthError,
+                ParticipantError,
+                StoreError,
+                OSError,
+            ):
+                # Context is derived owner-private guidance; live Host routing
+                # already rejects the deleted generation.  A later refresh or
+                # participant restart regenerates it from current authority.
+                continue
 
     def serve_forever(self) -> None:
         self.bind()
@@ -1479,36 +1578,38 @@ class HarnessHost:
                 ) from exc
             payload = request["payload"]
             if operation == "message.reply-self":
-                operation_id, result = self.delivery.reply_message(
-                    request_id=request["request_id"],
-                    request_digest=request_digest,
-                    project_instance_id=target["project_instance_id"],
-                    scenario_id=target["scenario_id"],
-                    scenario=scenario,
-                    sender=sender,
-                    receiver_participant_id=payload[
-                        "receiver_participant_id"
-                    ],
-                    reply_to_delivery_id=payload["reply_to_delivery_id"],
-                    message_id=payload["message_id"],
-                    message_kind=payload["message_kind"],
-                    message=payload["message"],
-                )
+                with self._participant_destroy_lock:
+                    operation_id, result = self.delivery.reply_message(
+                        request_id=request["request_id"],
+                        request_digest=request_digest,
+                        project_instance_id=target["project_instance_id"],
+                        scenario_id=target["scenario_id"],
+                        scenario=scenario,
+                        sender=sender,
+                        receiver_participant_id=payload[
+                            "receiver_participant_id"
+                        ],
+                        reply_to_delivery_id=payload["reply_to_delivery_id"],
+                        message_id=payload["message_id"],
+                        message_kind=payload["message_kind"],
+                        message=payload["message"],
+                    )
             else:
-                operation_id, result = self.delivery.send_self_message(
-                    request_id=request["request_id"],
-                    request_digest=request_digest,
-                    project_instance_id=target["project_instance_id"],
-                    scenario_id=target["scenario_id"],
-                    scenario=scenario,
-                    sender=sender,
-                    receiver_participant_id=payload[
-                        "receiver_participant_id"
-                    ],
-                    message_id=payload["message_id"],
-                    message_kind=payload["message_kind"],
-                    message=payload["message"],
-                )
+                with self._participant_destroy_lock:
+                    operation_id, result = self.delivery.send_self_message(
+                        request_id=request["request_id"],
+                        request_digest=request_digest,
+                        project_instance_id=target["project_instance_id"],
+                        scenario_id=target["scenario_id"],
+                        scenario=scenario,
+                        sender=sender,
+                        receiver_participant_id=payload[
+                            "receiver_participant_id"
+                        ],
+                        message_id=payload["message_id"],
+                        message_kind=payload["message_kind"],
+                        message=payload["message"],
+                    )
         elif operation == "host.status":
             result = self.store.host_status()
             operation_id = f"read-{request['request_id']}"
@@ -2666,24 +2767,29 @@ class HarnessHost:
                         "message sender fence differs",
                         retryable=True,
                     )
-                operation_id, result = self.delivery.send_message(
-                    request_id=request["request_id"],
-                    request_digest=request_digest,
-                    scenario_generation=payload["scenario_generation"],
-                    scenario_state_revision=payload["scenario_state_revision"],
-                    sender_participant_id=payload["sender_participant_id"],
-                    sender_participant_generation=payload[
-                        "sender_participant_generation"
-                    ],
-                    sender_participant_state_revision=payload[
-                        "sender_participant_state_revision"
-                    ],
-                    receiver_intent=payload["receiver_intent"],
-                    message_id=payload["message_id"],
-                    message_kind=payload["message_kind"],
-                    message=payload["message"],
-                    **common,
-                )
+                with self._participant_destroy_lock:
+                    operation_id, result = self.delivery.send_message(
+                        request_id=request["request_id"],
+                        request_digest=request_digest,
+                        scenario_generation=payload["scenario_generation"],
+                        scenario_state_revision=payload[
+                            "scenario_state_revision"
+                        ],
+                        sender_participant_id=payload[
+                            "sender_participant_id"
+                        ],
+                        sender_participant_generation=payload[
+                            "sender_participant_generation"
+                        ],
+                        sender_participant_state_revision=payload[
+                            "sender_participant_state_revision"
+                        ],
+                        receiver_intent=payload["receiver_intent"],
+                        message_id=payload["message_id"],
+                        message_kind=payload["message_kind"],
+                        message=payload["message"],
+                        **common,
+                    )
             elif operation == "delivery.list":
                 operation_id, result = self.delivery.list_deliveries(
                     limit=payload["limit"],
@@ -2740,6 +2846,184 @@ class HarnessHost:
                 )
             result = self.participants.list_templates()
             operation_id = f"read-{request['request_id']}"
+        elif operation == "participant.destroy":
+            payload = request["payload"]
+            participant_generation = request["fence"]["participant_generation"]
+            if (
+                request["fence"]["operation_generation"]
+                != payload["participant_state_revision"]
+            ):
+                raise ProtocolError(
+                    "fence.stale-operation-generation",
+                    "fencing",
+                    "participant deletion generation differs from revision",
+                    retryable=True,
+                )
+            if payload["confirmed"] is not True:
+                raise ProtocolError(
+                    "auth.confirmation-required",
+                    "authorization",
+                    "participant deletion requires confirmation",
+                )
+            if self.delivery is None:
+                raise ProtocolError(
+                    "availability.driver-unavailable",
+                    "availability",
+                    "Delivery coordinator is not configured",
+                    retryable=True,
+                )
+            self._reconcile_participant_destroy_operations()
+            try:
+                replayed = self.store.replay_request(
+                    request["request_id"], request_digest
+                )
+            except StoreError as exc:
+                if exc.code != "scenario.operation-in-progress":
+                    raise
+                pending = next(
+                    (
+                        value
+                        for value in self.store.pending_participant_destroy_operations()
+                        if value["request_id"] == request["request_id"]
+                        and value["request_digest"] == request_digest
+                    ),
+                    None,
+                )
+                if pending is None:
+                    raise
+                raise OperationFailed(
+                    pending["operation_id"],
+                    "operation.external-failure",
+                    "participant deletion is awaiting delivery settlement",
+                    "committed",
+                    True,
+                ) from exc
+            if replayed is not None:
+                operation_id, result = replayed
+            else:
+                try:
+                    operation_id, result, settlement = (
+                        self.store.begin_participant_destroy(
+                            request_id=request["request_id"],
+                            request_digest=request_digest,
+                            host_generation=self.host_generation,
+                            project_instance_id=target["project_instance_id"],
+                            scenario_id=target["scenario_id"],
+                            participant_id=target["participant_id"],
+                            scenario_generation=payload["scenario_generation"],
+                            scenario_state_revision=payload[
+                                "scenario_state_revision"
+                            ],
+                            participant_generation=participant_generation,
+                            participant_state_revision=payload[
+                                "participant_state_revision"
+                            ],
+                        )
+                    )
+                except OSError as exc:
+                    try:
+                        durable_status, durable_operation_id = (
+                            self.store.inspect_request_status(
+                                request["request_id"], request_digest
+                            )
+                        )
+                    except (StoreError, OSError) as inspect_error:
+                        raise ProtocolError(
+                            "availability.host-degraded",
+                            "availability",
+                            "participant deletion intent outcome is unavailable",
+                            retryable=True,
+                        ) from inspect_error
+                    if durable_status == "completed":
+                        replayed = self.store.replay_request(
+                            request["request_id"], request_digest
+                        )
+                        assert replayed is not None
+                        operation_id, result = replayed
+                        settlement = None
+                    elif durable_status == "pending":
+                        pending = next(
+                            (
+                                value
+                                for value in self.store.pending_participant_destroy_operations()
+                                if value["request_id"] == request["request_id"]
+                                and value["request_digest"] == request_digest
+                            ),
+                            None,
+                        )
+                        if pending is None or durable_operation_id != pending[
+                            "operation_id"
+                        ]:
+                            raise ProtocolError(
+                                "availability.host-degraded",
+                                "availability",
+                                "participant deletion intent differs",
+                                retryable=True,
+                            ) from exc
+                        try:
+                            operation_id, result = (
+                                self._complete_participant_destroy(pending)
+                            )
+                        except (
+                            DeliveryError,
+                            ParticipantAuthError,
+                            StoreError,
+                            OSError,
+                        ) as completion_error:
+                            raise OperationFailed(
+                                pending["operation_id"],
+                                "operation.external-failure",
+                                (
+                                    "participant deletion is awaiting "
+                                    "delivery settlement"
+                                ),
+                                "committed",
+                                True,
+                            ) from completion_error
+                        settlement = None
+                    else:
+                        raise ProtocolError(
+                            "operation.external-failure",
+                            "operation",
+                            "participant deletion did not start; retry the request",
+                            retryable=True,
+                        ) from exc
+                if result is None:
+                    assert settlement is not None
+                    pending = {
+                        "project_instance_id": target["project_instance_id"],
+                        "scenario_id": target["scenario_id"],
+                        "participant_id": target["participant_id"],
+                        "participant_generation": participant_generation,
+                        "request_id": request["request_id"],
+                        "request_digest": request_digest,
+                        "operation_id": operation_id,
+                        "delivery_request_id": settlement[
+                            "delivery_request_id"
+                        ],
+                        "delivery_request_digest": settlement[
+                            "delivery_request_digest"
+                        ],
+                    }
+                    try:
+                        operation_id, result = self._complete_participant_destroy(
+                            pending
+                        )
+                    except (
+                        DeliveryError,
+                        ParticipantAuthError,
+                        StoreError,
+                        OSError,
+                    ) as exc:
+                        raise OperationFailed(
+                            operation_id,
+                            "operation.external-failure",
+                            "participant deletion is awaiting delivery settlement",
+                            "committed",
+                            True,
+                        ) from exc
+                else:
+                    assert result is not None
         elif operation.startswith("participant."):
             if self.participants is None:
                 raise ProtocolError(
@@ -4762,6 +5046,7 @@ class HarnessHost:
             "participant.binding-drift",
             "resource.invalid-transition",
             "resource.release-invalid",
+            "resource.release-pending",
         }:
             return ProtocolError(
                 "operation.precondition-failed",

@@ -76,7 +76,7 @@
       ]
     },
     "participant_desired_state": {
-      "enum": ["detached", "stopped", "running"]
+      "enum": ["detached", "stopped", "running", "destroyed"]
     },
     "participant_observed_state": {
       "enum": [
@@ -87,6 +87,7 @@
         "stopping",
         "recovering",
         "replacing",
+        "destroying",
         "degraded"
       ]
     },
@@ -419,7 +420,8 @@
       {"trigger": "replace_to_stopped", "from": ["replacing"], "to": "stopped", "desired_after": "preserve"},
       {"trigger": "replace_to_starting", "from": ["replacing"], "to": "starting", "desired_after": "preserve"},
       {"trigger": "replace_failed_after_cas", "from": ["replacing"], "to": "degraded", "desired_after": "preserve"},
-      {"trigger": "destroy", "from": ["detached"], "to": "absent", "desired_after": "record_absent"}
+      {"trigger": "destroy", "from": ["stopped"], "to": "destroying", "desired_after": "destroyed"},
+      {"trigger": "destroy_succeeded", "from": ["destroying"], "to": "absent", "desired_after": "record_absent"}
     ],
     "operation_protocol": {
       "phases": [
@@ -480,6 +482,16 @@
       "cleanup_pending_is_degraded_not_deleted": true,
       "stop_detach_and_repair_remain_retryable": true,
       "history_retained_until_separate_gated_destroy": true
+    },
+    "destroy_protocol": {
+      "source": "user_decision",
+      "decision_date": "2026-08-20",
+      "stopped_only": true,
+      "live_bindings_and_unreleased_resources_forbidden": true,
+      "inbound_nonconsumed_deliveries_become_recipient_deleted": true,
+      "destroyed_generation_history_is_retained": true,
+      "same_name_readd_uses_a_fresh_generation": true,
+      "workspace_and_canonical_source_are_untouched": true
     },
     "invariants": {
       "participant_identity_is_scenario_and_participant_id": true,

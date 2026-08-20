@@ -671,6 +671,36 @@ class HarnessClient:
             request_id=request_id,
         )
 
+    def destroy_participant(
+        self,
+        *,
+        project_instance_id: str,
+        scenario_id: str,
+        participant_id: str,
+        scenario_generation: int,
+        scenario_state_revision: int,
+        participant_generation: int,
+        participant_state_revision: int,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        return self._call(
+            "participant.destroy",
+            self._participant_target(
+                project_instance_id, scenario_id, participant_id
+            ),
+            {
+                "operation_generation": participant_state_revision,
+                "participant_generation": participant_generation,
+            },
+            {
+                "scenario_generation": scenario_generation,
+                "scenario_state_revision": scenario_state_revision,
+                "participant_state_revision": participant_state_revision,
+                "confirmed": True,
+            },
+            request_id=request_id,
+        )
+
     def force_stop_participant(
         self,
         *,

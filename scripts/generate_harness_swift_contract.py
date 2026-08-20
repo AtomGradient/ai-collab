@@ -57,6 +57,7 @@ APP_OPERATIONS = (
     "participant.recover",
     "participant.replace",
     "participant.force-stop",
+    "participant.destroy",
     "resource.list",
     "resource.break",
     "policy.template.list",

@@ -67,11 +67,17 @@ DELIVERY_STATES = (
     "delivery_attempted",
     "delivered",
     "consumed",
+    "recipient_deleted",
 )
 DELIVERY_TRANSITIONS = (
     ("attempt", ("queued", "delivery_attempted"), "delivery_attempted"),
     ("matching_delivery_ack", ("delivery_attempted",), "delivered"),
     ("matching_consumption_ack", ("delivered",), "consumed"),
+    (
+        "recipient_deleted",
+        ("queued", "delivery_attempted", "delivered"),
+        "recipient_deleted",
+    ),
 )
 EXPECTED_ROUTING_PROTOCOL = {
     "route_rules_are_ordered_first_match": True,
@@ -92,6 +98,7 @@ EXPECTED_DELIVERY_PROTOCOL = {
     "retry_is_bounded_and_backoff_nondecreasing": True,
     "restart_resumes_all_nonterminal_without_redelivering_delivered": True,
     "retry_exhaustion_degrades_only_exact_target": True,
+    "recipient_deletion_terminalizes_nonconsumed_exact_target": True,
     "no_role_recent_session_or_other_mailbox_fallback": True,
 }
 EXPECTED_INVARIANTS = {

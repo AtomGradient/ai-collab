@@ -16,6 +16,7 @@ from typing import Any, Iterator, Mapping
 
 import pytest
 
+from ai_collab import cli as cli_main
 from ai_collab.client import (
     HarnessClient,
     HarnessClientError,
@@ -573,6 +574,523 @@ def _wait_delivery(
                 f"delivery {delivery_id} stayed {record['state']} instead of {state}"
             )
         time.sleep(0.01)
+
+
+def test_stopped_participant_delete_settles_delivery_and_readd_rotates_identity(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    with running_host(state_root) as (host, client, _):
+        opened, sender, receiver = _prepare(client)
+        client.apply_policy(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=opened["scenario_generation"],
+            scenario_state_revision=opened["state_revision"],
+            policy_pack=_policy(sender, receiver),
+            request_id="delete-apply-policy",
+        )
+        assert host.delivery is not None
+        host.delivery.stop_supervision()
+        queued = _send(
+            client,
+            opened,
+            sender,
+            receiver,
+            request_id="delete-queued-message",
+        )["deliveries"][0]
+        assert queued["state"] == "queued"
+
+        with pytest.raises(HarnessClientError) as active_delete:
+            client.destroy_participant(
+                project_instance_id=PROJECT_ID,
+                scenario_id=SCENARIO_ID,
+                participant_id=RECEIVER_ID,
+                scenario_generation=opened["scenario_generation"],
+                scenario_state_revision=opened["state_revision"],
+                participant_generation=receiver["participant_generation"],
+                participant_state_revision=receiver["state_revision"],
+                request_id="delete-active-receiver",
+            )
+        assert active_delete.value.code == "operation.precondition-failed"
+
+        stopped = client.stop_participant(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            participant_id=RECEIVER_ID,
+            scenario_generation=opened["scenario_generation"],
+            scenario_state_revision=opened["state_revision"],
+            participant_generation=receiver["participant_generation"],
+            participant_state_revision=receiver["state_revision"],
+            request_id="delete-stop-receiver",
+        )["participant"]
+        old_context_path = Path(
+            host.participant_auth.ensure(
+                project_instance_id=PROJECT_ID,
+                scenario_id=SCENARIO_ID,
+                participant_id=RECEIVER_ID,
+                participant_generation=stopped["participant_generation"],
+                participant_state_revision=stopped["state_revision"],
+            )["context_path"]
+        )
+        assert old_context_path.exists()
+        deleted = client.destroy_participant(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            participant_id=RECEIVER_ID,
+            scenario_generation=opened["scenario_generation"],
+            scenario_state_revision=opened["state_revision"],
+            participant_generation=stopped["participant_generation"],
+            participant_state_revision=stopped["state_revision"],
+            request_id="delete-stopped-receiver",
+        )["deleted_participant"]
+        assert deleted["participant_generation"] == 1
+        assert deleted["next_participant_generation"] == 2
+        assert len(deleted["delivery_settlement_evidence_sha256"]) == 64
+        assert not old_context_path.exists()
+        assert [
+            value["participant_id"]
+            for value in client.list_participants(
+                project_instance_id=PROJECT_ID,
+                scenario_id=SCENARIO_ID,
+            )["participants"]
+        ] == [SENDER_ID]
+        remaining_contexts = [
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in (state_root / "participant-collaboration").glob(
+                "participant-*.json"
+            )
+        ]
+        assert len(remaining_contexts) == 1
+        assert remaining_contexts[0]["participant"]["participant_id"] == SENDER_ID
+        assert remaining_contexts[0]["peers"] == []
+
+        delivery_view = client.list_deliveries(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            limit=10,
+        )["delivery_collection"]
+        assert delivery_view["summary"] == {
+            "total": 1,
+            "states": {"recipient_deleted": 1},
+        }
+        assert delivery_view["deliveries"][0]["state"] == "recipient_deleted"
+        assert delivery_view["deliveries"][0]["degraded_reason"] == (
+            "delivery.recipient-deleted"
+        )
+        assert delivery_view["deliveries"][0]["retry_eligibility"] == {
+            "eligible": False,
+            "event_sequence": 0,
+            "reason": "delivery.recipient-deleted",
+        }
+
+        scenario = client.scenario_status(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+        )["scenario"]
+        readded = client.add_participant(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            participant_id=RECEIVER_ID,
+            scenario_generation=scenario["scenario_generation"],
+            scenario_state_revision=scenario["state_revision"],
+            launch_spec=_launch_spec(),
+            presentation_driver_id="presentation.iterm2",
+            request_id="readd-deleted-receiver",
+        )["participant"]
+        assert readded["participant_generation"] == 2
+        durable = json.loads(
+            (state_root / "host-state.json").read_text(encoding="utf-8")
+        )
+        history = durable["scenarios"][
+            f"{PROJECT_ID}\x00{SCENARIO_ID}"
+        ]["participant_history"][RECEIVER_ID]
+        assert [value["participant_generation"] for value in history] == [1]
+
+
+def test_participant_delete_restart_joins_recorded_delivery_settlement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_root = tmp_path / "state"
+    request_id = "delete-crash-before-finalize"
+    with running_host(state_root) as (host, client, _):
+        opened, _, receiver = _prepare(client)
+        stopped = client.stop_participant(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            participant_id=RECEIVER_ID,
+            scenario_generation=opened["scenario_generation"],
+            scenario_state_revision=opened["state_revision"],
+            participant_generation=receiver["participant_generation"],
+            participant_state_revision=receiver["state_revision"],
+            request_id="delete-crash-stop",
+        )["participant"]
+        original_finalize = host.store.finalize_participant_destroy
+
+        def crash_before_finalize(**_: Any) -> dict[str, Any]:
+            raise OSError("injected crash before participant finalize")
+
+        monkeypatch.setattr(
+            host.store, "finalize_participant_destroy", crash_before_finalize
+        )
+        with pytest.raises(HarnessClientError) as interrupted:
+            client.destroy_participant(
+                project_instance_id=PROJECT_ID,
+                scenario_id=SCENARIO_ID,
+                participant_id=RECEIVER_ID,
+                scenario_generation=opened["scenario_generation"],
+                scenario_state_revision=opened["state_revision"],
+                participant_generation=stopped["participant_generation"],
+                participant_state_revision=stopped["state_revision"],
+                request_id=request_id,
+            )
+        assert interrupted.value.code == "operation.external-failure"
+        assert interrupted.value.retryable is True
+        monkeypatch.setattr(
+            host.store, "finalize_participant_destroy", original_finalize
+        )
+
+    with running_host(state_root) as (_, client, _):
+        replay = client.destroy_participant(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            participant_id=RECEIVER_ID,
+            scenario_generation=opened["scenario_generation"],
+            scenario_state_revision=opened["state_revision"],
+            participant_generation=stopped["participant_generation"],
+            participant_state_revision=stopped["state_revision"],
+            request_id=request_id,
+        )["deleted_participant"]
+        assert replay["participant_generation"] == 1
+        assert [
+            value["participant_id"]
+            for value in client.list_participants(
+                project_instance_id=PROJECT_ID,
+                scenario_id=SCENARIO_ID,
+            )["participants"]
+        ] == [SENDER_ID]
+
+
+def test_participant_delete_stays_transitional_while_delivery_is_unavailable(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    with running_host(state_root) as (host, client, _):
+        opened, _, receiver = _prepare(client)
+        stopped = client.stop_participant(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            participant_id=RECEIVER_ID,
+            scenario_generation=opened["scenario_generation"],
+            scenario_state_revision=opened["state_revision"],
+            participant_generation=receiver["participant_generation"],
+            participant_state_revision=receiver["state_revision"],
+            request_id="delete-unavailable-stop",
+        )["participant"]
+        operation_id, replay, _ = host.store.begin_participant_destroy(
+            request_id="delete-unavailable",
+            request_digest="a" * 64,
+            host_generation=host.host_generation,
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            participant_id=RECEIVER_ID,
+            scenario_generation=opened["scenario_generation"],
+            scenario_state_revision=opened["state_revision"],
+            participant_generation=stopped["participant_generation"],
+            participant_state_revision=stopped["state_revision"],
+        )
+        assert replay is None
+
+    with tempfile.TemporaryDirectory(prefix="acd-") as runtime:
+        unavailable = HarnessHost(state_root, Path(runtime) / "host.sock")
+        unavailable.bind()
+        try:
+            pending = unavailable.store.pending_participant_destroy_operations()
+            assert [value["operation_id"] for value in pending] == [operation_id]
+            participant = next(
+                value
+                for value in unavailable.store.list_participants(
+                    PROJECT_ID, SCENARIO_ID
+                )["participants"]
+                if value["participant_id"] == RECEIVER_ID
+            )
+            assert participant["observed_state"] == "destroying"
+        finally:
+            assert unavailable._server is not None
+            unavailable._server.server_close()
+            unavailable._server = None
+            unavailable._remove_owned_socket()
+
+    with running_host(state_root) as (_, client, _):
+        assert [
+            value["participant_id"]
+            for value in client.list_participants(
+                project_instance_id=PROJECT_ID,
+                scenario_id=SCENARIO_ID,
+            )["participants"]
+        ] == [SENDER_ID]
+
+
+def test_participant_delete_cli_requires_explicit_confirmation(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    state_root = tmp_path / "state"
+    with running_host(state_root) as (host, client, _):
+        opened, _, receiver = _prepare(client)
+        stopped = client.stop_participant(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            participant_id=RECEIVER_ID,
+            scenario_generation=opened["scenario_generation"],
+            scenario_state_revision=opened["state_revision"],
+            participant_generation=receiver["participant_generation"],
+            participant_state_revision=receiver["state_revision"],
+            request_id="delete-cli-stop",
+        )["participant"]
+        arguments = [
+            "harness",
+            "participant",
+            "delete",
+            RECEIVER_ID,
+            "--scenario-id",
+            SCENARIO_ID,
+            "--project-instance-id",
+            PROJECT_ID,
+            "--scenario-generation",
+            str(opened["scenario_generation"]),
+            "--scenario-state-revision",
+            str(opened["state_revision"]),
+            "--participant-generation",
+            str(stopped["participant_generation"]),
+            "--participant-state-revision",
+            str(stopped["state_revision"]),
+            "--request-id",
+            "delete-cli-confirmed",
+            "--state-root",
+            str(state_root),
+            "--socket-path",
+            str(host.socket_path),
+        ]
+        assert cli_main.main(arguments) == 1
+        refused = json.loads(capsys.readouterr().out)
+        assert refused["code"] == "cli.confirmation-required"
+        assert cli_main.main([*arguments, "--confirm"]) == 0
+        completed = json.loads(capsys.readouterr().out)
+        assert completed["deleted_participant"]["participant_generation"] == 1
+
+
+@pytest.mark.parametrize("publication", ["before", "after"])
+def test_participant_delete_resolves_begin_publication_ambiguity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    publication: str,
+) -> None:
+    state_root = tmp_path / publication
+    with running_host(state_root) as (host, client, _):
+        opened, _, receiver = _prepare(client)
+        stopped = client.stop_participant(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            participant_id=RECEIVER_ID,
+            scenario_generation=opened["scenario_generation"],
+            scenario_state_revision=opened["state_revision"],
+            participant_generation=receiver["participant_generation"],
+            participant_state_revision=receiver["state_revision"],
+            request_id=f"delete-{publication}-stop",
+        )["participant"]
+        original_write = host.store._write_state
+        injected = False
+
+        def ambiguous_write(value: dict[str, Any]) -> None:
+            nonlocal injected
+            is_destroy_begin = any(
+                operation.get("operation_kind") == "participant.destroy"
+                and operation.get("state") == "executing_external"
+                for operation in value["operations"].values()
+            ) and any(
+                request.get("status") == "pending"
+                and "delivery_request_id" in request
+                and request.get("pending_external_result") is None
+                for request in value["requests"].values()
+            )
+            if not injected and is_destroy_begin:
+                injected = True
+                if publication == "after":
+                    original_write(value)
+                raise OSError(f"injected {publication}-publication failure")
+            original_write(value)
+
+        monkeypatch.setattr(host.store, "_write_state", ambiguous_write)
+        call = {
+            "project_instance_id": PROJECT_ID,
+            "scenario_id": SCENARIO_ID,
+            "participant_id": RECEIVER_ID,
+            "scenario_generation": opened["scenario_generation"],
+            "scenario_state_revision": opened["state_revision"],
+            "participant_generation": stopped["participant_generation"],
+            "participant_state_revision": stopped["state_revision"],
+            "request_id": f"delete-{publication}-begin",
+        }
+        if publication == "before":
+            with pytest.raises(HarnessClientError) as first:
+                client.destroy_participant(**call)
+            assert first.value.code == "operation.external-failure"
+            assert first.value.mutation_state == "not_started"
+            assert first.value.retryable is True
+            monkeypatch.setattr(host.store, "_write_state", original_write)
+            deleted = client.destroy_participant(**call)["deleted_participant"]
+        else:
+            deleted = client.destroy_participant(**call)["deleted_participant"]
+        assert deleted["participant_generation"] == 1
+
+
+def test_concurrent_send_cannot_land_after_recipient_deletion_settlement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_root = tmp_path / "state"
+    with running_host(state_root) as (host, client, _):
+        opened, sender, receiver = _prepare(client)
+        client.apply_policy(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=opened["scenario_generation"],
+            scenario_state_revision=opened["state_revision"],
+            policy_pack=_policy(sender, receiver),
+            request_id="delete-race-policy",
+        )
+        assert host.delivery is not None
+        host.delivery.stop_supervision()
+        original_snapshot = host.store.delivery_snapshot
+        snapshot_taken = threading.Event()
+        release_snapshot = threading.Event()
+        block_once = True
+
+        def blocking_snapshot(
+            project_instance_id: str, scenario_id: str
+        ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+            nonlocal block_once
+            value = original_snapshot(project_instance_id, scenario_id)
+            if block_once:
+                block_once = False
+                snapshot_taken.set()
+                assert release_snapshot.wait(timeout=3)
+            return value
+
+        monkeypatch.setattr(host.store, "delivery_snapshot", blocking_snapshot)
+        send_result: list[dict[str, Any]] = []
+        send_error: list[BaseException] = []
+
+        def send() -> None:
+            try:
+                send_result.append(
+                    _send(
+                        client,
+                        opened,
+                        sender,
+                        receiver,
+                        request_id="delete-race-send",
+                    )
+                )
+            except BaseException as exc:  # pragma: no cover - asserted below
+                send_error.append(exc)
+
+        send_thread = threading.Thread(target=send)
+        send_thread.start()
+        assert snapshot_taken.wait(timeout=3)
+        stopped = client.stop_participant(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            participant_id=RECEIVER_ID,
+            scenario_generation=opened["scenario_generation"],
+            scenario_state_revision=opened["state_revision"],
+            participant_generation=receiver["participant_generation"],
+            participant_state_revision=receiver["state_revision"],
+            request_id="delete-race-stop",
+        )["participant"]
+        delete_result: list[dict[str, Any]] = []
+        delete_error: list[BaseException] = []
+
+        def delete() -> None:
+            try:
+                delete_result.append(
+                    client.destroy_participant(
+                        project_instance_id=PROJECT_ID,
+                        scenario_id=SCENARIO_ID,
+                        participant_id=RECEIVER_ID,
+                        scenario_generation=opened["scenario_generation"],
+                        scenario_state_revision=opened["state_revision"],
+                        participant_generation=stopped[
+                            "participant_generation"
+                        ],
+                        participant_state_revision=stopped["state_revision"],
+                        request_id="delete-race-destroy",
+                    )
+                )
+            except BaseException as exc:  # pragma: no cover - asserted below
+                delete_error.append(exc)
+
+        delete_thread = threading.Thread(target=delete)
+        delete_thread.start()
+        release_snapshot.set()
+        send_thread.join(timeout=3)
+        delete_thread.join(timeout=3)
+        assert not send_thread.is_alive()
+        assert not delete_thread.is_alive()
+        assert send_error == []
+        assert delete_error == []
+        assert send_result[0]["acceptance"]["outcome"] == "accepted"
+        assert delete_result[0]["deleted_participant"][
+            "participant_generation"
+        ] == 1
+        collection = client.list_deliveries(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            limit=10,
+        )["delivery_collection"]
+        assert collection["summary"]["states"] == {
+            "recipient_deleted": 1
+        }
+
+
+def test_participant_delete_rejects_unreleased_exact_generation_resource(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    with running_host(state_root) as (host, client, _):
+        opened, _, receiver = _prepare(client)
+        host._stop_resource_supervisor()
+        state = host.store._read_state()
+        item = state["scenarios"][f"{PROJECT_ID}\x00{SCENARIO_ID}"]
+        record = item["participants"][RECEIVER_ID]
+        record.update(
+            {
+                "desired_state": "stopped",
+                "observed_state": "stopped",
+                "runtime_binding_id": None,
+                "presentation_binding_id": None,
+                "state_revision": record["state_revision"] + 1,
+            }
+        )
+        host.store._write_state(state)
+        with pytest.raises(HarnessClientError) as refused:
+            client.destroy_participant(
+                project_instance_id=PROJECT_ID,
+                scenario_id=SCENARIO_ID,
+                participant_id=RECEIVER_ID,
+                scenario_generation=opened["scenario_generation"],
+                scenario_state_revision=opened["state_revision"],
+                participant_generation=receiver["participant_generation"],
+                participant_state_revision=record["state_revision"],
+                request_id="delete-unreleased-resource",
+            )
+        assert refused.value.code == "operation.precondition-failed"
+        assert any(
+            value["participant_id"] == RECEIVER_ID
+            for value in client.list_participants(
+                project_instance_id=PROJECT_ID,
+                scenario_id=SCENARIO_ID,
+            )["participants"]
+        )
 
 
 def test_typed_policy_route_delivery_and_consumption(tmp_path: Path) -> None:

@@ -321,11 +321,18 @@ def add_harness_parser(subparsers: Any) -> None:
         ("stop", "Stop one exact participant generation"),
         ("recover", "Recover one degraded participant into a new stopped generation"),
         ("force-stop", "Confirm force-stop of one exact owned participant"),
+        ("delete", "Delete one exact stopped participant"),
     ):
         command = participant_commands.add_parser(command_name, help=help_text)
         _add_participant_identity_options(command, existing=True)
         if command_name != "status":
             command.add_argument("--request-id")
+        if command_name == "delete":
+            command.add_argument(
+                "--confirm",
+                action="store_true",
+                help="Confirm that this stopped participant identity will be deleted",
+            )
         _add_connection_options(command)
 
     policy = commands.add_parser("policy", help="Apply and inspect Scenario routing policy")
@@ -788,6 +795,15 @@ def run_harness_command(args: argparse.Namespace) -> int:
                     )
                 elif args.participant_command == "force-stop":
                     result = client.force_stop_participant(
+                        **common, request_id=args.request_id
+                    )
+                elif args.participant_command == "delete":
+                    if not args.confirm:
+                        raise HarnessClientError(
+                            "cli.confirmation-required",
+                            "participant deletion requires --confirm",
+                        )
+                    result = client.destroy_participant(
                         **common, request_id=args.request_id
                     )
                 else:

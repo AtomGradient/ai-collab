@@ -332,6 +332,21 @@ PARTICIPANT_EXISTING_REQUEST_SCHEMA = {
         "participant_state_revision": {"type": "positive_integer"},
     },
 }
+PARTICIPANT_DESTROY_REQUEST_SCHEMA = {
+    "type": "object",
+    "required": [
+        "scenario_generation",
+        "scenario_state_revision",
+        "participant_state_revision",
+        "confirmed",
+    ],
+    "properties": {
+        "scenario_generation": {"type": "positive_integer"},
+        "scenario_state_revision": {"type": "positive_integer"},
+        "participant_state_revision": {"type": "positive_integer"},
+        "confirmed": {"const": True},
+    },
+}
 PARTICIPANT_REPLACE_REQUEST_SCHEMA = {
     "type": "object",
     "required": [
@@ -353,6 +368,11 @@ PARTICIPANT_RESULT_SCHEMA = {
     "type": "object",
     "required": ["participant"],
     "properties": {"participant": {"type": "participant_record"}},
+}
+PARTICIPANT_DESTROY_RESULT_SCHEMA = {
+    "type": "object",
+    "required": ["deleted_participant"],
+    "properties": {"deleted_participant": {"type": "object"}},
 }
 PARTICIPANT_LIST_RESULT_SCHEMA = {
     "type": "object",
@@ -926,6 +946,19 @@ OPERATION_DESCRIPTORS = (
         confirmation_policy_ref="confirmation.destructive-once",
     ),
     _descriptor(
+        "participant.destroy",
+        capability="participant.manage",
+        target_scope="participant",
+        required_fences=[
+            "host_generation",
+            "operation_generation",
+            "participant_generation",
+        ],
+        mutation_class="durable_state",
+        request_schema=PARTICIPANT_DESTROY_REQUEST_SCHEMA,
+        result_schema=PARTICIPANT_DESTROY_RESULT_SCHEMA,
+    ),
+    _descriptor(
         "policy.template.list",
         capability="policy.read",
         target_scope="project",
@@ -1481,6 +1514,30 @@ def _validate_payload(operation: str, value: Any) -> None:
                 "ipc.operation-schema-mismatch",
                 "protocol",
                 "participant presentation does not match interaction mode",
+            )
+        return
+    if operation == "participant.destroy":
+        payload = _require_exact_fields(
+            value,
+            {
+                "scenario_generation",
+                "scenario_state_revision",
+                "participant_state_revision",
+                "confirmed",
+            },
+            label="participant destroy payload",
+        )
+        _validate_scenario_revision(payload)
+        if (
+            not isinstance(payload["participant_state_revision"], int)
+            or isinstance(payload["participant_state_revision"], bool)
+            or payload["participant_state_revision"] < 1
+            or payload["confirmed"] is not True
+        ):
+            raise ProtocolError(
+                "ipc.operation-schema-mismatch",
+                "protocol",
+                "participant deletion confirmation or revision is invalid",
             )
         return
     if operation.startswith("participant."):

@@ -112,7 +112,8 @@ PARTICIPANT_TRANSITIONS = (
     ("replace_to_stopped", ("replacing",), "stopped", "preserve"),
     ("replace_to_starting", ("replacing",), "starting", "preserve"),
     ("replace_failed_after_cas", ("replacing",), "degraded", "preserve"),
-    ("destroy", ("detached",), "absent", "record_absent"),
+    ("destroy", ("stopped",), "destroying", "destroyed"),
+    ("destroy_succeeded", ("destroying",), "absent", "record_absent"),
 )
 SCENARIO_OPERATION_DESIRED = {
     "scenario.create": {"closed"},
@@ -128,7 +129,7 @@ PARTICIPANT_OPERATION_DESIRED = {
     "participant.recover": {"stopped"},
     "participant.replace": {"stopped", "running"},
     "participant.detach": {"detached"},
-    "participant.destroy": {"detached"},
+    "participant.destroy": {"destroyed"},
 }
 EXPECTED_OPERATION_PROTOCOL = {
     "phases": [
@@ -192,6 +193,16 @@ EXPECTED_DETACH_PROTOCOL = {
     "cleanup_pending_is_degraded_not_deleted": True,
     "stop_detach_and_repair_remain_retryable": True,
     "history_retained_until_separate_gated_destroy": True,
+}
+EXPECTED_DESTROY_PROTOCOL = {
+    "source": "user_decision",
+    "decision_date": "2026-08-20",
+    "stopped_only": True,
+    "live_bindings_and_unreleased_resources_forbidden": True,
+    "inbound_nonconsumed_deliveries_become_recipient_deleted": True,
+    "destroyed_generation_history_is_retained": True,
+    "same_name_readd_uses_a_fresh_generation": True,
+    "workspace_and_canonical_source_are_untouched": True,
 }
 EXPECTED_INVARIANTS = {
     "participant_identity_is_scenario_and_participant_id",
@@ -530,6 +541,7 @@ def validate_contract(*, repo_root: Path) -> tuple[dict[str, Any], dict[str, Any
         "replace_protocol",
         "recover_protocol",
         "detach_protocol",
+        "destroy_protocol",
         "invariants",
         "deferred_surfaces",
     }
@@ -577,6 +589,8 @@ def validate_contract(*, repo_root: Path) -> tuple[dict[str, Any], dict[str, Any
         raise StateContractError("recover protocol is incompatible")
     if metadata["detach_protocol"] != EXPECTED_DETACH_PROTOCOL:
         raise StateContractError("detach protocol is incompatible")
+    if metadata["destroy_protocol"] != EXPECTED_DESTROY_PROTOCOL:
+        raise StateContractError("destroy protocol is incompatible")
     invariants = metadata["invariants"]
     if not isinstance(invariants, dict) or set(invariants) != EXPECTED_INVARIANTS:
         raise StateContractError("state invariant set does not match")
@@ -812,8 +826,15 @@ def validate_lifecycle_operation(
             raise StateContractError(
                 "participant rotation generation is not previous plus one"
             )
-    if kind == "participant.add" and resulting_participant not in {None, 1}:
-        raise StateContractError("participant add does not create generation one")
+    if kind == "participant.add" and (
+        resulting_participant is not None
+        and (
+            not isinstance(resulting_participant, int)
+            or isinstance(resulting_participant, bool)
+            or resulting_participant < 1
+        )
+    ):
+        raise StateContractError("participant add generation is invalid")
     if kind == "participant.destroy" and resulting_participant is not None:
         raise StateContractError("participant destroy reports a retained generation")
     if kind in set(PARTICIPANT_OPERATION_DESIRED) - {

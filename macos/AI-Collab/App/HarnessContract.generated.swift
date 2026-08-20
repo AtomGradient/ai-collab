@@ -8,7 +8,7 @@ import Foundation
 enum HarnessContract {
     static let version = 1
     static let maxMessageBytes = 1_048_576
-    static let operationRegistryDigest = "296bdd397cf60f7d19e6bf6bb36796a81c3b5844649414cf4914633d7ae0e1dd"
+    static let operationRegistryDigest = "e23f51798c6ae31f9f3c0cc593e18284aa49c63ce1b3efd98fee4656ec1f3c03"
 
     static let capabilities: [String: String] = [
         "host.status": "host.read",
@@ -45,6 +45,7 @@ enum HarnessContract {
         "participant.recover": "participant.manage",
         "participant.replace": "participant.manage",
         "participant.force-stop": "participant.force-stop",
+        "participant.destroy": "participant.manage",
         "resource.list": "resource.read",
         "resource.break": "resource.break",
         "policy.template.list": "policy.read",

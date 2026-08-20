@@ -299,7 +299,7 @@
         "target": {"$ref": "#/$defs/delivery_target"},
         "payload_digest": {"$ref": "#/$defs/sha256"},
         "retry_profile": {"$ref": "#/$defs/retry_profile_snapshot"},
-        "state": {"enum": ["queued", "delivery_attempted", "delivered", "consumed"]},
+        "state": {"enum": ["queued", "delivery_attempted", "delivered", "consumed", "recipient_deleted"]},
         "events": {
           "type": "array",
           "items": {"$ref": "#/$defs/delivery_event"}
@@ -368,12 +368,14 @@
       "queued",
       "delivery_attempted",
       "delivered",
-      "consumed"
+      "consumed",
+      "recipient_deleted"
     ],
     "delivery_transitions": [
       {"trigger": "attempt", "from": ["queued", "delivery_attempted"], "to": "delivery_attempted"},
       {"trigger": "matching_delivery_ack", "from": ["delivery_attempted"], "to": "delivered"},
-      {"trigger": "matching_consumption_ack", "from": ["delivered"], "to": "consumed"}
+      {"trigger": "matching_consumption_ack", "from": ["delivered"], "to": "consumed"},
+      {"trigger": "recipient_deleted", "from": ["queued", "delivery_attempted", "delivered"], "to": "recipient_deleted"}
     ],
     "routing_protocol": {
       "route_rules_are_ordered_first_match": true,
@@ -394,6 +396,7 @@
       "retry_is_bounded_and_backoff_nondecreasing": true,
       "restart_resumes_all_nonterminal_without_redelivering_delivered": true,
       "retry_exhaustion_degrades_only_exact_target": true,
+      "recipient_deletion_terminalizes_nonconsumed_exact_target": true,
       "no_role_recent_session_or_other_mailbox_fallback": true
     },
     "invariants": {

@@ -515,6 +515,69 @@ class DeliveryCoordinator:
             state = self._read_state()
             return self._previous_request(state, request_id, request_digest)
 
+    def settle_deleted_recipient(
+        self,
+        *,
+        request_id: str,
+        request_digest: str,
+        project_instance_id: str,
+        scenario_id: str,
+        participant_id: str,
+        participant_generation: int,
+    ) -> tuple[str, dict[str, Any]]:
+        """Terminalize every non-consumed delivery for one deleted identity."""
+
+        target = {
+            "project_instance_id": project_instance_id,
+            "scenario_id": scenario_id,
+            "participant_id": participant_id,
+            "participant_generation": participant_generation,
+        }
+        receiver = {
+            "scenario_id": scenario_id,
+            "participant_id": participant_id,
+            "participant_generation": participant_generation,
+        }
+        with self._lock:
+            state = self._read_state()
+            replay = self._previous_request(state, request_id, request_digest)
+            if replay is not None:
+                return replay
+            settled: list[str] = []
+            for delivery_id, item in state["deliveries"].items():
+                record = item["record"]
+                if (
+                    item["project_instance_id"] != project_instance_id
+                    or item["scenario_id"] != scenario_id
+                    or record["target"]["receiver"] != receiver
+                    or record["state"] == "consumed"
+                ):
+                    continue
+                record["state"] = "recipient_deleted"
+                record["delivery_degraded_reason"] = "delivery.recipient-deleted"
+                settled.append(delivery_id)
+            settled.sort()
+            evidence = {
+                "target": target,
+                "settled_delivery_ids": settled,
+                "terminal_reason": "delivery.recipient-deleted",
+            }
+            settlement = {
+                **evidence,
+                "evidence_digest": canonical_json_sha256(evidence),
+            }
+            operation_id = f"delivery-settle-{uuid.uuid4().hex}"
+            result = {"delivery_settlement": settlement}
+            state["requests"][request_id] = {
+                "request_digest": request_digest,
+                "operation_id": operation_id,
+                "delivery_ids": settled,
+                "result": result,
+            }
+            state["state_revision"] += 1
+            self._write_state(state)
+            return operation_id, result
+
     def send_message(
         self,
         *,
@@ -894,6 +957,11 @@ class DeliveryCoordinator:
             record = item["record"]
             if len(record["events"]) != event_sequence:
                 raise DeliveryError("delivery.stale-fence", "delivery event fence differs", True)
+            if record["delivery_degraded_reason"] is not None:
+                raise DeliveryError(
+                    "delivery.consume-ineligible",
+                    record["delivery_degraded_reason"],
+                )
             self._accept_consumption(record, dict(consumption_ack))
             state["state_revision"] += 1
             self._write_state(state)
@@ -1015,7 +1083,10 @@ class DeliveryCoordinator:
                 state = self._read_state()
                 item = state["deliveries"][delivery_id]
                 record = item["record"]
-                if record["state"] == "consumed":
+                if (
+                    record["state"] == "consumed"
+                    or record["delivery_degraded_reason"] is not None
+                ):
                     return
                 if record["state"] == "delivered":
                     delivered_record = copy.deepcopy(record)
@@ -1091,6 +1162,8 @@ class DeliveryCoordinator:
                 with self._lock:
                     state = self._read_state()
                     record = state["deliveries"][delivery_id]["record"]
+                    if record["delivery_degraded_reason"] is not None:
+                        return
                     ack_digest = self._accept_delivery(record, response["delivery_ack"])
                     consumption = response["consumption_ack"]
                     state["state_revision"] += 1
@@ -1110,6 +1183,8 @@ class DeliveryCoordinator:
                 with self._lock:
                     state = self._read_state()
                     record = state["deliveries"][delivery_id]["record"]
+                    if record["delivery_degraded_reason"] is not None:
+                        return
                     active = record["events"][-1]
                     if active["event"] == "attempt_started":
                         self._append_event(
@@ -1150,6 +1225,8 @@ class DeliveryCoordinator:
         with self._lock:
             state = self._read_state()
             record = state["deliveries"][delivery_id]["record"]
+            if record["delivery_degraded_reason"] is not None:
+                return
             try:
                 self._accept_consumption(record, dict(consumption))
             except DeliveryError:

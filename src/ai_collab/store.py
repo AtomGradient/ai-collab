@@ -212,13 +212,50 @@ class ScenarioStore:
                 ScenarioStore._validate_project_contract_snapshot(
                     item["project_contract_snapshot"]
                 )
+                ScenarioStore._participant_history(item)
         for request_id, request in value["requests"].items():
             ScenarioStore._validate_workspace_join_request_ledger(
                 request_id,
                 request,
                 value["operations"],
             )
+            ScenarioStore._validate_participant_destroy_request_ledger(
+                request_id,
+                request,
+                value["operations"],
+            )
         return value
+
+    @classmethod
+    def _validate_participant_destroy_request_ledger(
+        cls,
+        request_id: Any,
+        request: Any,
+        operations: dict[str, Any],
+    ) -> None:
+        fields = {"delivery_request_id", "delivery_request_digest"}
+        if not isinstance(request, dict):
+            raise StoreError("host.state-invalid", "request state schema differs")
+        present = fields.intersection(request)
+        if not present:
+            return
+        operation = operations.get(request.get("operation_id"))
+        if (
+            present != fields
+            or not isinstance(request_id, str)
+            or not isinstance(operation, dict)
+            or operation.get("request_id") != request_id
+            or operation.get("operation_kind") != "participant.destroy"
+            or not isinstance(request.get("delivery_request_id"), str)
+            or not request["delivery_request_id"].startswith(
+                "!participant-destroy:"
+            )
+            or not cls._sha256(request.get("delivery_request_digest"))
+        ):
+            raise StoreError(
+                "host.state-invalid",
+                "participant deletion settlement ledger differs",
+            )
 
     @classmethod
     def _validate_workspace_join_request_ledger(
@@ -549,6 +586,7 @@ class ScenarioStore:
         self,
         *,
         preserve_workspace_operation_ids: set[str] | None = None,
+        preserve_participant_destroy_operation_ids: set[str] | None = None,
     ) -> dict[str, Any]:
         with self._lock:
             state = self._read_state()
@@ -560,7 +598,12 @@ class ScenarioStore:
                 if preserve_workspace_operation_ids is not None
                 else set(),
             )
-            self._reconcile_transitional_participants(state)
+            self._reconcile_transitional_participants(
+                state,
+                preserve_participant_destroy_operation_ids
+                if preserve_participant_destroy_operation_ids is not None
+                else set(),
+            )
             self._reconcile_scenario_participant_faults(state)
             state["state_revision"] += 1
             self._write_state(state)
@@ -653,6 +696,50 @@ class ScenarioStore:
                     ],
                     recovery=external["recovery"],
                 )
+
+    def pending_participant_destroy_operations(self) -> list[dict[str, Any]]:
+        """Return exact pending deletions for Host-owned delivery settlement."""
+
+        with self._lock:
+            state = self._read_state()
+            values: list[dict[str, Any]] = []
+            for item in state["scenarios"].values():
+                scenario = item["record"]
+                participants, _ = self._participant_maps(item)
+                for participant_id, record in participants.items():
+                    operation_id = record.get("active_operation_id")
+                    if not isinstance(operation_id, str):
+                        continue
+                    operation = state["operations"].get(operation_id)
+                    if (
+                        not isinstance(operation, dict)
+                        or operation.get("operation_kind") != "participant.destroy"
+                    ):
+                        continue
+                    request_id = operation["request_id"]
+                    request = state["requests"].get(request_id)
+                    if not isinstance(request, dict) or request.get("status") != "pending":
+                        continue
+                    values.append(
+                        {
+                            "project_instance_id": item["project_instance_id"],
+                            "scenario_id": scenario["scenario_id"],
+                            "participant_id": participant_id,
+                            "participant_generation": record[
+                                "participant_generation"
+                            ],
+                            "request_id": request_id,
+                            "request_digest": request["request_digest"],
+                            "operation_id": operation_id,
+                            "delivery_request_id": request[
+                                "delivery_request_id"
+                            ],
+                            "delivery_request_digest": request[
+                                "delivery_request_digest"
+                            ],
+                        }
+                    )
+            return values
 
     def pending_workspace_operations(self) -> list[dict[str, Any]]:
         """Return private exact repair/destroy joins for Host startup recovery."""
@@ -1648,6 +1735,7 @@ class ScenarioStore:
                 "record": record,
                 "participants": {},
                 "participant_artifacts": {},
+                "participant_history": {},
                 "resource_leases": {},
                 "resource_break_history": [],
             }
@@ -4229,6 +4317,12 @@ class ScenarioStore:
                 raise StoreError(
                     "participant.already-exists", "participant already exists"
                 )
+            history = self._participant_history(item)
+            previous_generations = [
+                value["participant_generation"]
+                for value in history.get(participant_id, [])
+            ]
+            next_generation = max(previous_generations, default=0) + 1
             operation = self._new_participant_operation(
                 state,
                 request_id=request_id,
@@ -4243,12 +4337,12 @@ class ScenarioStore:
                 participant_state_revision=None,
                 desired_state_after="stopped",
                 requested_continuity_mode=None,
-                resulting_participant_generation=1,
+                resulting_participant_generation=next_generation,
             )
             record = {
                 "scenario_id": scenario_id,
                 "participant_id": participant_id,
-                "participant_generation": 1,
+                "participant_generation": next_generation,
                 "state_revision": 1,
                 "desired_state": "stopped",
                 "observed_state": "stopped",
@@ -4294,6 +4388,326 @@ class ScenarioStore:
             state["state_revision"] += 1
             self._write_state(state)
             return operation["operation_id"], result
+
+    def begin_participant_destroy(
+        self,
+        *,
+        request_id: str,
+        request_digest: str,
+        host_generation: int,
+        project_instance_id: str,
+        scenario_id: str,
+        participant_id: str,
+        scenario_generation: int,
+        scenario_state_revision: int,
+        participant_generation: int,
+        participant_state_revision: int,
+    ) -> tuple[str, dict[str, Any] | None, dict[str, Any] | None]:
+        """Fence a stopped identity before settling its inbound deliveries."""
+
+        key = self._scenario_key(project_instance_id, scenario_id)
+        with self._lock:
+            state = self._read_state()
+            previous = self._previous_request(state, request_id, request_digest)
+            if previous is not None:
+                return previous[0], previous[1], None
+            item, scenario, record, _ = self._participant_state(
+                state, key, participant_id
+            )
+            self._check_scenario_fence(
+                scenario, scenario_generation, scenario_state_revision
+            )
+            self._check_participant_fence(
+                record, participant_generation, participant_state_revision
+            )
+            if (
+                scenario["observed_state"] not in {"closed", "running"}
+                or scenario.get("active_operation_id") is not None
+                or record["desired_state"] != "stopped"
+                or record["observed_state"] != "stopped"
+                or record.get("active_operation_id") is not None
+                or record.get("runtime_binding_id") is not None
+                or record.get("presentation_binding_id") is not None
+            ):
+                raise StoreError(
+                    "participant.invalid-transition",
+                    "participant deletion requires an exact stopped participant",
+                )
+            for lease in self._resource_leases(item).values():
+                holder = lease["holder"]
+                if (
+                    holder["participant_id"] == participant_id
+                    and holder["participant_generation"]
+                    == participant_generation
+                    and lease["status"] != "released"
+                ):
+                    raise StoreError(
+                        "resource.release-pending",
+                        "participant resources are not released",
+                    )
+            operation = self._new_participant_operation(
+                state,
+                request_id=request_id,
+                request_digest=request_digest,
+                host_generation=host_generation,
+                operation_kind="participant.destroy",
+                scenario_id=scenario_id,
+                participant_id=participant_id,
+                scenario_generation=scenario_generation,
+                scenario_state_revision=scenario_state_revision,
+                participant_generation=participant_generation,
+                participant_state_revision=participant_state_revision,
+                desired_state_after="destroyed",
+                requested_continuity_mode=None,
+                resulting_participant_generation=None,
+            )
+            record.update(
+                {
+                    "desired_state": "destroyed",
+                    "observed_state": "destroying",
+                    "active_operation_id": operation["operation_id"],
+                    "degraded": None,
+                    "state_revision": participant_state_revision + 1,
+                }
+            )
+            self._append_operation_event(
+                state,
+                operation,
+                event="desired_state_committed",
+                before_revision=participant_state_revision,
+                after_revision=record["state_revision"],
+                mutation_state="committed",
+            )
+            self._append_operation_event(
+                state,
+                operation,
+                event="external_started",
+                before_revision=record["state_revision"],
+                after_revision=record["state_revision"],
+                mutation_state="committed",
+            )
+            record["journal_head_sequence"] = state["journal_head_sequence"]
+            operation["state"] = "executing_external"
+            operation["mutation_state"] = "committed"
+            delivery_identity = {
+                "operation": "participant.destroy.delivery-settlement",
+                "request_id": request_id,
+                "request_digest": request_digest,
+                "project_instance_id": project_instance_id,
+                "scenario_id": scenario_id,
+                "participant_id": participant_id,
+                "participant_generation": participant_generation,
+            }
+            delivery_request_digest = canonical_json_sha256(delivery_identity)
+            delivery_request_id = (
+                "!participant-destroy:"
+                + hashlib.sha256(
+                    f"{request_id}\0{request_digest}".encode("utf-8")
+                ).hexdigest()[:48]
+            )
+            state["requests"][request_id] = {
+                "request_digest": request_digest,
+                "operation_id": operation["operation_id"],
+                "status": "pending",
+                "result": None,
+                "error": None,
+                "delivery_request_id": delivery_request_id,
+                "delivery_request_digest": delivery_request_digest,
+            }
+            state["state_revision"] += 1
+            self._write_state(state)
+            return operation["operation_id"], None, {
+                **delivery_identity,
+                "delivery_request_id": delivery_request_id,
+                "delivery_request_digest": delivery_request_digest,
+            }
+
+    def record_participant_destroy_evidence(
+        self,
+        *,
+        project_instance_id: str,
+        scenario_id: str,
+        participant_id: str,
+        request_id: str,
+        operation_id: str,
+        delivery_settlement: dict[str, Any],
+    ) -> None:
+        key = self._scenario_key(project_instance_id, scenario_id)
+        with self._lock:
+            state = self._read_state()
+            _, _, record, _ = self._participant_state(
+                state, key, participant_id
+            )
+            request = state["requests"].get(request_id)
+            operation = state["operations"].get(operation_id)
+            target = delivery_settlement.get("target")
+            evidence_body = {
+                key: copy.deepcopy(value)
+                for key, value in delivery_settlement.items()
+                if key != "evidence_digest"
+            }
+            if (
+                request is None
+                or operation is None
+                or request.get("operation_id") != operation_id
+                or request.get("status") != "pending"
+                or operation.get("operation_kind") != "participant.destroy"
+                or record.get("active_operation_id") != operation_id
+                or record.get("observed_state") != "destroying"
+                or not isinstance(target, dict)
+                or target
+                != {
+                    "project_instance_id": project_instance_id,
+                    "scenario_id": scenario_id,
+                    "participant_id": participant_id,
+                    "participant_generation": record["participant_generation"],
+                }
+                or delivery_settlement.get("terminal_reason")
+                != "delivery.recipient-deleted"
+                or not isinstance(
+                    delivery_settlement.get("settled_delivery_ids"), list
+                )
+                or any(
+                    not isinstance(value, str)
+                    or not value.startswith("delivery-")
+                    for value in delivery_settlement.get(
+                        "settled_delivery_ids", []
+                    )
+                )
+                or delivery_settlement.get("settled_delivery_ids")
+                != sorted(set(delivery_settlement["settled_delivery_ids"]))
+                or canonical_json_sha256(evidence_body)
+                != delivery_settlement.get("evidence_digest")
+            ):
+                raise StoreError(
+                    "participant.stale-fence",
+                    "participant delivery settlement evidence differs",
+                )
+            pending = {
+                "outcome_kind": "participant.destroy",
+                "project_instance_id": project_instance_id,
+                "delivery_settlement": copy.deepcopy(delivery_settlement),
+            }
+            previous = request.get("pending_external_result")
+            if previous is not None and previous != pending:
+                raise StoreError(
+                    "participant.stale-fence",
+                    "participant deletion evidence changed",
+                )
+            request["pending_external_result"] = pending
+            state["state_revision"] += 1
+            self._write_state(state)
+
+    def finalize_participant_destroy(
+        self,
+        *,
+        project_instance_id: str,
+        scenario_id: str,
+        participant_id: str,
+        request_id: str,
+        operation_id: str,
+    ) -> dict[str, Any]:
+        key = self._scenario_key(project_instance_id, scenario_id)
+        with self._lock:
+            state = self._read_state()
+            item, _, record, artifact = self._participant_state(
+                state, key, participant_id
+            )
+            request = state["requests"].get(request_id)
+            operation = state["operations"].get(operation_id)
+            external = (
+                request.get("pending_external_result")
+                if isinstance(request, dict)
+                else None
+            )
+            if (
+                request is None
+                or operation is None
+                or request.get("operation_id") != operation_id
+                or request.get("status") != "pending"
+                or operation.get("operation_kind") != "participant.destroy"
+                or record.get("active_operation_id") != operation_id
+                or record.get("observed_state") != "destroying"
+                or not isinstance(external, dict)
+                or external.get("outcome_kind") != "participant.destroy"
+            ):
+                raise StoreError(
+                    "participant.stale-fence",
+                    "participant deletion callback fence differs",
+                )
+            settlement = external.get("delivery_settlement")
+            evidence_digest = (
+                settlement.get("evidence_digest")
+                if isinstance(settlement, dict)
+                else None
+            )
+            if not self._sha256(evidence_digest):
+                raise StoreError(
+                    "participant.stale-fence",
+                    "participant delivery settlement evidence differs",
+                )
+            revision = record["state_revision"]
+            self._append_operation_event(
+                state,
+                operation,
+                event="external_succeeded",
+                before_revision=revision,
+                after_revision=revision,
+                mutation_state="committed",
+            )
+            tombstone_record = copy.deepcopy(record)
+            tombstone_record.update(
+                {
+                    "active_operation_id": None,
+                    "state_revision": revision + 1,
+                    "degraded": None,
+                }
+            )
+            self._append_operation_event(
+                state,
+                operation,
+                event="finalize_committed",
+                before_revision=revision,
+                after_revision=tombstone_record["state_revision"],
+                mutation_state="committed",
+            )
+            tombstone_record["journal_head_sequence"] = state[
+                "journal_head_sequence"
+            ]
+            generation = record["participant_generation"]
+            history = self._participant_history(item)
+            entries = history.setdefault(participant_id, [])
+            entries.append(
+                {
+                    "participant_generation": generation,
+                    "destroy_operation_id": operation_id,
+                    "destroy_request_digest": request["request_digest"],
+                    "delivery_settlement_evidence_sha256": evidence_digest,
+                    "record": tombstone_record,
+                    "artifact": copy.deepcopy(artifact),
+                }
+            )
+            participants, artifacts = self._participant_maps(item)
+            del participants[participant_id]
+            del artifacts[participant_id]
+            item["record"]["participant_ids"] = sorted(participants)
+            operation["state"] = "succeeded"
+            operation["mutation_state"] = "committed"
+            result = {
+                "deleted_participant": {
+                    "scenario_id": scenario_id,
+                    "participant_id": participant_id,
+                    "participant_generation": generation,
+                    "next_participant_generation": generation + 1,
+                    "delivery_settlement_evidence_sha256": evidence_digest,
+                }
+            }
+            request.pop("pending_external_result", None)
+            request["status"] = "completed"
+            request["result"] = result
+            state["state_revision"] += 1
+            self._write_state(state)
+            return result
 
     def begin_participant_start(
         self,
@@ -6101,6 +6515,54 @@ class ScenarioStore:
             raise StoreError("host.state-invalid", "participant state schema differs")
         return participants, artifacts
 
+    @classmethod
+    def _participant_history(
+        cls, item: dict[str, Any]
+    ) -> dict[str, list[dict[str, Any]]]:
+        history = item.setdefault("participant_history", {})
+        if not isinstance(history, dict):
+            raise StoreError("host.state-invalid", "participant history differs")
+        for participant_id, entries in history.items():
+            if not isinstance(participant_id, str) or not isinstance(entries, list):
+                raise StoreError("host.state-invalid", "participant history differs")
+            previous_generation = 0
+            for entry in entries:
+                if (
+                    not isinstance(entry, dict)
+                    or set(entry)
+                    != {
+                        "participant_generation",
+                        "destroy_operation_id",
+                        "destroy_request_digest",
+                        "delivery_settlement_evidence_sha256",
+                        "record",
+                        "artifact",
+                    }
+                    or not cls._positive_int(entry["participant_generation"])
+                    or entry["participant_generation"] <= previous_generation
+                    or not isinstance(entry["destroy_operation_id"], str)
+                    or not entry["destroy_operation_id"].startswith("op-")
+                    or not cls._sha256(entry["destroy_request_digest"])
+                    or not cls._sha256(
+                        entry["delivery_settlement_evidence_sha256"]
+                    )
+                    or not isinstance(entry["record"], dict)
+                    or not isinstance(entry["artifact"], dict)
+                    or entry["record"].get("participant_id") != participant_id
+                    or entry["record"].get("participant_generation")
+                    != entry["participant_generation"]
+                    or entry["record"].get("desired_state") != "destroyed"
+                    or entry["record"].get("observed_state") != "destroying"
+                    or entry["record"].get("runtime_binding_id") is not None
+                    or entry["record"].get("presentation_binding_id") is not None
+                    or entry["record"].get("active_operation_id") is not None
+                ):
+                    raise StoreError(
+                        "host.state-invalid", "participant history differs"
+                    )
+                previous_generation = entry["participant_generation"]
+        return history
+
     def _participant_state(
         self, state: dict[str, Any], key: str, participant_id: str
     ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
@@ -6152,7 +6614,7 @@ class ScenarioStore:
         participant_state_revision: int | None,
         desired_state_after: str,
         requested_continuity_mode: str | None,
-        resulting_participant_generation: int,
+        resulting_participant_generation: int | None,
         replacement_launch_spec_digest: str | None = None,
     ) -> dict[str, Any]:
         operation_id = f"op-{uuid.uuid4().hex}"
@@ -6526,7 +6988,11 @@ class ScenarioStore:
                     workspace_path=workspace_path,
                 )
 
-    def _reconcile_transitional_participants(self, state: dict[str, Any]) -> None:
+    def _reconcile_transitional_participants(
+        self,
+        state: dict[str, Any],
+        preserve_destroy_operation_ids: set[str],
+    ) -> None:
         """Fail closed when a Host restart loses an external callback."""
 
         for item in state["scenarios"].values():
@@ -6538,10 +7004,16 @@ class ScenarioStore:
                     "stopping",
                     "recovering",
                     "replacing",
+                    "destroying",
                 }:
                     continue
                 operation_id = record.get("active_operation_id")
                 if not isinstance(operation_id, str):
+                    continue
+                if (
+                    record["observed_state"] == "destroying"
+                    and operation_id in preserve_destroy_operation_ids
+                ):
                     continue
                 operation = state["operations"][operation_id]
                 request = state["requests"][operation["request_id"]]
