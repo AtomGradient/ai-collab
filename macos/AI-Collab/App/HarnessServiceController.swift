@@ -26,6 +26,7 @@ enum HarnessServiceStatus: Equatable, Sendable {
 enum HarnessServiceError: LocalizedError {
     case approvalRequired
     case registrationFailed(underlying: Error)
+    case unregisterFailed(underlying: Error)
     case serviceUnresolved(status: HarnessServiceStatus)
     case buildIdentityMissing
     case registrationStateUnavailable
@@ -37,6 +38,11 @@ enum HarnessServiceError: LocalizedError {
         case let .registrationFailed(underlying):
             let value = underlying as NSError
             return "Harness Host registration failed (\(value.domain) \(value.code)): "
+                + value.localizedDescription
+        case let .unregisterFailed(underlying):
+            let value = underlying as NSError
+            return "Harness Host re-registration could not release the previous "
+                + "registration (\(value.domain) \(value.code)): "
                 + value.localizedDescription
         case let .serviceUnresolved(status):
             return "macOS Service Management could not resolve the Harness Host "
@@ -97,15 +103,21 @@ final class HarnessServiceController: @unchecked Sendable {
         }
 
         if status == .enabled, !registrationMatches(buildDigest: buildDigest) {
-            try await service.unregister()
+            do {
+                try await service.unregister()
+            } catch {
+                // Same rule as register(): keep the original NSError and a
+                // typed stage, so the header never sticks on "Connecting…".
+                throw HarnessServiceError.unregisterFailed(underlying: error)
+            }
         }
         switch status {
         case .enabled:
             break
         case .notRegistered, .notFound, .unknown:
-            // `.notFound` is also the clean pre-registration state on a
-            // machine whose Background Task Management store has never seen
-            // this agent (every fresh install). It must attempt a normal
+            // `.notFound` can be a clean pre-registration state on a
+            // machine whose Background Task Management store has not
+            // resolved this agent yet. It must attempt a normal
             // registration exactly like `.notRegistered` — the spike
             // contract validates both as "clean before registration". It
             // must never be translated into a missing-bundle claim.

@@ -7,16 +7,17 @@ import XCTest
 @testable import AICollab
 
 /// Registration state machine, driven through the injected service slice so
-/// no test touches launchd/BTM. The regression pinned here: a fresh machine
-/// (clean Background Task Management store) reports `.notFound` before the
-/// first registration, and v0.1.6 translated that into "the bundle is
-/// missing its service" without ever calling register().
+/// no test touches launchd/BTM. The regression pinned here: an affected
+/// fresh machine (clean Background Task Management store) can report
+/// `.notFound` before the first registration, and v0.1.6 translated that
+/// into "the bundle is missing its service" without ever calling register().
 @available(macOS 13.0, *)
 final class HarnessServiceControllerTests: XCTestCase {
     private final class FakeService: HarnessServiceManaging {
         var status: SMAppService.Status
         var statusAfterRegister: SMAppService.Status
         var registerError: Error?
+        var unregisterError: Error?
         private(set) var registerCalls = 0
         private(set) var unregisterCalls = 0
 
@@ -36,6 +37,7 @@ final class HarnessServiceControllerTests: XCTestCase {
 
         func unregister() async throws {
             unregisterCalls += 1
+            if let unregisterError { throw unregisterError }
             status = .notRegistered
         }
     }
@@ -122,6 +124,49 @@ final class HarnessServiceControllerTests: XCTestCase {
         } catch let HarnessServiceError.serviceUnresolved(status) {
             XCTAssertEqual(status, .notFound)
             XCTAssertEqual(service.registerCalls, 1)
+        }
+    }
+
+    /// Registration succeeds but lands in the user-approval gate: the
+    /// register() attempt must have happened, the typed approval error must
+    /// surface, and no receipt may claim a completed registration.
+    func test_transition_to_requires_approval_after_register_fails_closed() async throws {
+        let service = FakeService(
+            status: .notFound, statusAfterRegister: .requiresApproval
+        )
+        let (controller, stateRoot) = try makeController(service: service)
+
+        do {
+            _ = try await controller.ensureRegistered()
+            XCTFail("approval-required after register must throw")
+        } catch HarnessServiceError.approvalRequired {
+            XCTAssertEqual(service.registerCalls, 1)
+            let receipt = stateRoot
+                .appending(path: "installation/service-registration.json")
+            XCTAssertFalse(FileManager.default.fileExists(atPath: receipt.path))
+        }
+    }
+
+    /// Upgrade path: releasing a mismatched previous registration fails —
+    /// the original NSError must survive inside a typed stage error.
+    func test_unregister_failure_during_reregistration_preserves_the_error() async throws {
+        let service = FakeService(status: .enabled)
+        service.unregisterError = NSError(
+            domain: "SMAppServiceErrorDomain",
+            code: 22,
+            userInfo: [NSLocalizedDescriptionKey: "could not release"]
+        )
+        // No receipt on disk, so the enabled registration never matches.
+        let (controller, _) = try makeController(service: service)
+
+        do {
+            _ = try await controller.ensureRegistered()
+            XCTFail("unregister failure must throw")
+        } catch let HarnessServiceError.unregisterFailed(underlying) {
+            let value = underlying as NSError
+            XCTAssertEqual(value.domain, "SMAppServiceErrorDomain")
+            XCTAssertEqual(value.code, 22)
+            XCTAssertEqual(service.registerCalls, 0)
         }
     }
 
