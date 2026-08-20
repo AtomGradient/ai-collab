@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import tempfile
 import threading
@@ -20,7 +21,37 @@ from ai_collab.project import ProjectError, ProjectRegistry
 from ai_collab.protocol import canonical_json_sha256
 
 
-def _resolved_render(*, source_digest: str = "d" * 64) -> dict[str, Any]:
+def _collaboration_template() -> dict[str, Any]:
+    return {
+        "template_contract_version": 1,
+        "template_id": "team.peer-review",
+        "display_name": "Peer review",
+        "policy_id": "policy.peer-review",
+        "participant_ids": ["analyst", "reviewer"],
+        "assignments": [],
+        "retry_profiles": [
+            {"profile_id": "interactive", "max_attempts": 1, "backoff_ms": [0]}
+        ],
+        "route_rules": [
+            {
+                "rule_id": "review",
+                "sender": {"kind": "participant", "participant_id": "analyst"},
+                "receiver": {"kind": "participant", "participant_id": "reviewer"},
+                "message_kind": "collaboration.request",
+                "effect": "allow",
+                "retry_profile_id": "interactive",
+            }
+        ],
+    }
+
+
+def _resolved_render(
+    *,
+    source_digest: str = "d" * 64,
+    collaboration_templates: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    if collaboration_templates is None:
+        collaboration_templates = [_collaboration_template()]
     availability: dict[str, Any] = {
         "status": "ready",
         "observations": [],
@@ -49,6 +80,17 @@ def _resolved_render(*, source_digest: str = "d" * 64) -> dict[str, Any]:
         "collaboration": {"kind": "builtin", "profile_id": "builtin.standard-v1"},
         "availability": availability,
     }
+    registry = {
+        "schema_version": 1,
+        "templates": collaboration_templates,
+    }
+    value["collaboration"].update(  # type: ignore[union-attr]
+        {
+            "digest": "a" * 64,
+            "registry_snapshot": registry,
+            "registry_snapshot_digest": canonical_json_sha256(registry),
+        }
+    )
     value["render_digest"] = canonical_json_sha256(
         {key: item for key, item in value.items() if key != "availability"}
     )
@@ -64,9 +106,11 @@ class FakeProjectAdapter:
         *,
         project_digest: str | None = None,
         source_digest: str = "d" * 64,
+        collaboration_templates: list[dict[str, Any]] | None = None,
     ) -> None:
         self.project_digest = project_digest
         self.source_digest = source_digest
+        self.collaboration_templates = collaboration_templates
 
     def call(
         self,
@@ -94,7 +138,10 @@ class FakeProjectAdapter:
             }
         assert operation == "register"
         assert Path(payload["canonical_project_path"]).is_dir()
-        render = _resolved_render(source_digest=self.source_digest)
+        render = _resolved_render(
+            source_digest=self.source_digest,
+            collaboration_templates=copy.deepcopy(self.collaboration_templates),
+        )
         return {
             "project": {
                 "project_key": "test-project",
@@ -110,30 +157,6 @@ class FakeProjectAdapter:
             },
             "render": render,
         }
-
-
-def _collaboration_template() -> dict[str, Any]:
-    return {
-        "template_contract_version": 1,
-        "template_id": "team.peer-review",
-        "display_name": "Peer review",
-        "policy_id": "policy.peer-review",
-        "participant_ids": ["analyst", "reviewer"],
-        "assignments": [],
-        "retry_profiles": [
-            {"profile_id": "interactive", "max_attempts": 1, "backoff_ms": [0]}
-        ],
-        "route_rules": [
-            {
-                "rule_id": "review",
-                "sender": {"kind": "participant", "participant_id": "analyst"},
-                "receiver": {"kind": "participant", "participant_id": "reviewer"},
-                "message_kind": "collaboration.request",
-                "effect": "allow",
-                "retry_profile_id": "interactive",
-            }
-        ],
-    }
 
 
 @contextmanager
@@ -445,6 +468,67 @@ def test_registered_project_exposes_bounded_path_free_collaboration_templates(
         }
         encoded = json.dumps(host.projects.collaboration_templates(project_id))
         assert str(project_root) not in encoded
+
+
+def test_collaboration_catalog_refresh_does_not_rewrite_existing_scenario_snapshot(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    version_one = _collaboration_template()
+    version_two = copy.deepcopy(version_one)
+    version_two["display_name"] = "Peer review v2"
+
+    with running_host(state_root) as (host, client):
+        adapter = FakeProjectAdapter(
+            collaboration_templates=[copy.deepcopy(version_one)]
+        )
+        host.projects.adapter = adapter  # type: ignore[assignment]
+        registered = client.register_project(
+            canonical_project_path=str(project_root), request_id="register-v1"
+        )["project"]
+        project_id = registered["project_instance_id"]
+        client.create_scenario(
+            project_instance_id=project_id,
+            scenario_id="scenario-v1",
+            project_binding_digest=registered["project_binding_digest"],
+            request_id="create-v1",
+        )
+
+        adapter.collaboration_templates = [copy.deepcopy(version_two)]
+        refreshed = client.reconcile_project(
+            project_instance_id=project_id, request_id="refresh-v2"
+        )
+        assert refreshed["reconciliation"]["binding_changed"] is False
+        current = refreshed["project"]
+        assert current["project_binding_digest"] != registered[
+            "project_binding_digest"
+        ]
+        assert host.projects.collaboration_templates(project_id) == {
+            "templates": [version_two]
+        }
+        assert host._scenario_collaboration_templates(  # noqa: SLF001
+            project_id, "scenario-v1"
+        ) == {"templates": [version_one]}
+
+        client.create_scenario(
+            project_instance_id=project_id,
+            scenario_id="scenario-v2",
+            project_binding_digest=current["project_binding_digest"],
+            request_id="create-v2",
+        )
+        assert host._scenario_collaboration_templates(  # noqa: SLF001
+            project_id, "scenario-v2"
+        ) == {"templates": [version_two]}
+
+        project_root.rmdir()
+        assert host.projects.collaboration_templates(project_id) == {
+            "templates": [version_two]
+        }
+        assert host._scenario_collaboration_templates(  # noqa: SLF001
+            project_id, "scenario-v1"
+        ) == {"templates": [version_one]}
 
 
 def test_registration_is_idempotent_and_rejects_request_reuse(tmp_path: Path) -> None:

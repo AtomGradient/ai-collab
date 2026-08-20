@@ -316,6 +316,7 @@ def build(destination: Path, integration_root: Path | None) -> None:
                 "runtime/bin/python3",
                 project_adapter_config["script"],
             ],
+            "idempotent_join_operations": ["destroy", "recover", "repair"],
             "working_directory": ".",
         },
         "ai_collab_security_adapter.json": {

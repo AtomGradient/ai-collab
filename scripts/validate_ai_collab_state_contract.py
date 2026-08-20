@@ -80,6 +80,7 @@ SCENARIO_TRANSITIONS = (
     ("close_succeeded", ("closing",), "closed", "preserve"),
     ("close_failed", ("closing",), "degraded", "preserve"),
     ("destroy", ("closed",), "destroying", "destroyed"),
+    ("destroy_aborted_no_effect", ("destroying",), "closed", "closed"),
     ("destroy_failed", ("destroying",), "degraded", "preserve"),
     ("destroy_succeeded", ("destroying",), "absent", "record_absent"),
 )
@@ -141,7 +142,31 @@ EXPECTED_OPERATION_PROTOCOL = {
     "external_action_never_holds_state_lock": True,
     "callback_requires_exact_operation_resulting_generation_and_committed_revision": True,
     "stale_callback_is_journaled_and_rejected": True,
-    "unknown_external_outcome_requires_degraded_repair": True,
+    "proven_no_external_effect_destroy_may_abort_to_closed": True,
+    "external_outcome_unknown_policy": {
+        "source": "user_decision",
+        "decision_date": "2026-08-20",
+        "decision_summary": (
+            "Durably joinable unknown outcomes remain transitional for at most "
+            "three exact joins; missing proof or exhaustion requires degraded repair."
+        ),
+        "journal_intent_before_external_effect": True,
+        "durably_joinable_unknown_remains_transitional": True,
+        "join_requires": [
+            "exact_operation_identity",
+            "fence_verified_at_join",
+            "adapter_idempotent_join_declared",
+            "ownership_reproven_at_join",
+            "no_concurrent_conflicting_operation",
+        ],
+        "join_attempts": {
+            "max_attempts": 3,
+            "persisted_before_each_attempt": True,
+            "exhaustion_requires_degraded": True,
+        },
+        "unjoinable_unknown_requires_degraded": True,
+        "forbid_completion_claim_without_evidence": True,
+    },
 }
 EXPECTED_REPLACE_PROTOCOL = {
     "validate_new_launch_spec_before_old_binding_mutation": True,

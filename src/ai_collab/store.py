@@ -30,6 +30,30 @@ from .protocol import (
 STATE_SCHEMA_VERSION = 2
 LEGACY_STATE_SCHEMA_VERSION = 1
 RESOURCE_LEASE_SCHEMA_VERSION = 1
+MAX_AUTOMATIC_WORKSPACE_JOIN_ATTEMPTS = 3
+WORKSPACE_JOIN_CLAIM_VERSION = 1
+WORKSPACE_JOIN_CLAIM_FIELDS = frozenset(
+    {
+        "join_claim_version",
+        "workspace_operation_id",
+        "workspace_request_id",
+        "request_digest",
+        "operation_kind",
+        "project_instance_id",
+        "scenario_id",
+        "scenario_generation",
+        "workspace_id",
+        "plan_digest",
+        "receipt_digest",
+        "expected_wip_summary_digest",
+        "force",
+        "workspace_path_identity_digest",
+        "pending_fence_digest",
+        "adapter_capability_digest",
+        "recovery_source_digest",
+        "claim_digest",
+    }
+)
 RESOURCE_CLASSES = {
     "port",
     "device",
@@ -188,7 +212,204 @@ class ScenarioStore:
                 ScenarioStore._validate_project_contract_snapshot(
                     item["project_contract_snapshot"]
                 )
+        for request_id, request in value["requests"].items():
+            ScenarioStore._validate_workspace_join_request_ledger(
+                request_id,
+                request,
+                value["operations"],
+            )
         return value
+
+    @classmethod
+    def _validate_workspace_join_request_ledger(
+        cls,
+        request_id: Any,
+        request: Any,
+        operations: dict[str, Any],
+    ) -> None:
+        """Validate the private cross-ledger claim without exposing it publicly."""
+
+        if not isinstance(request, dict):
+            raise StoreError("host.state-invalid", "request state schema differs")
+        ledger_fields = {
+            "workspace_request_id",
+            "workspace_operation_kind",
+            "workspace_join_attempts",
+            "workspace_operation_id",
+            "workspace_join_claim_digest",
+            "workspace_adapter_capability_digest",
+        }
+        present = ledger_fields.intersection(request)
+        if not present:
+            # Legacy requests predate the owner-private Workspace join ledger.
+            return
+        if present != ledger_fields:
+            raise StoreError(
+                "host.state-invalid", "Workspace join ledger fields differ"
+            )
+        operation_id = request.get("operation_id")
+        operation = (
+            operations.get(operation_id)
+            if isinstance(operation_id, str)
+            else None
+        )
+        if (
+            not isinstance(request_id, str)
+            or not request_id
+            or not isinstance(operation, dict)
+            or operation.get("operation_id") != operation_id
+            or operation.get("request_id") != request_id
+            or operation.get("plan_digest") != request.get("request_digest")
+            or operation.get("operation_kind")
+            not in {
+                "scenario.repair",
+                "scenario.destroy",
+                "scenario.force-destroy",
+            }
+            or not cls._sha256(request.get("request_digest"))
+            or request.get("status") not in {"pending", "completed", "failed"}
+            or not isinstance(request.get("workspace_binding_id"), str)
+            or not request["workspace_binding_id"].startswith("workspace-")
+            or Path(request["workspace_binding_id"]).name
+            != request["workspace_binding_id"]
+            or request.get("workspace_request_id")
+            != cls.workspace_join_request_id(
+                operation["operation_kind"],
+                request_id,
+                request["request_digest"],
+            )
+            or request.get("workspace_operation_kind")
+            not in {"destroy", "recover", "repair"}
+            or (
+                operation["operation_kind"]
+                in {"scenario.destroy", "scenario.force-destroy"}
+                and request.get("workspace_operation_kind") != "destroy"
+            )
+            or (
+                operation["operation_kind"] == "scenario.repair"
+                and request.get("workspace_operation_kind")
+                not in {"repair", "recover"}
+            )
+        ):
+            raise StoreError(
+                "host.state-invalid", "Workspace join ledger identity differs"
+            )
+        attempts = request.get("workspace_join_attempts")
+        if (
+            not isinstance(attempts, dict)
+            or set(attempts) != {"operation_id", "count", "max_attempts"}
+            or attempts.get("operation_id") != operation_id
+            or not cls._nonnegative_int(attempts.get("count"))
+            or attempts["count"] > MAX_AUTOMATIC_WORKSPACE_JOIN_ATTEMPTS
+            or attempts.get("max_attempts")
+            != MAX_AUTOMATIC_WORKSPACE_JOIN_ATTEMPTS
+        ):
+            raise StoreError(
+                "host.state-invalid", "Workspace join attempt state differs"
+            )
+        bound = (
+            request.get("workspace_operation_id"),
+            request.get("workspace_join_claim_digest"),
+            request.get("workspace_adapter_capability_digest"),
+        )
+        if all(value is None for value in bound):
+            if attempts["count"] != 0:
+                raise StoreError(
+                    "host.state-invalid", "unbound Workspace join has attempts"
+                )
+        elif (
+            not isinstance(bound[0], str)
+            or not bound[0].startswith("wsop-")
+            or not cls._sha256(bound[1])
+            or not cls._sha256(bound[2])
+        ):
+            raise StoreError(
+                "host.state-invalid", "Workspace join binding differs"
+            )
+        if not cls._sha256(request.get("expected_wip_summary_digest")):
+            raise StoreError(
+                "host.state-invalid", "Workspace join WIP evidence differs"
+            )
+        if operation["operation_kind"] in {
+            "scenario.destroy",
+            "scenario.force-destroy",
+        } and request.get("expected_workspace_binding_state") not in {
+            "absent",
+            "planned",
+            "provision_failed",
+            "ready",
+        }:
+            raise StoreError(
+                "host.state-invalid", "Workspace destroy join evidence differs"
+            )
+        if request.get("workspace_operation_kind") == "recover" and (
+            not cls._sha256(request.get("expected_recovery_claim_digest"))
+            or not cls._sha256(
+                request.get("expected_recovery_inventory_digest")
+            )
+            or request.get("expected_recovery_prior_operation_kind")
+            not in {"destroy", "repair"}
+        ):
+            raise StoreError(
+                "host.state-invalid", "Workspace recovery evidence differs"
+            )
+
+    @classmethod
+    def _validated_workspace_execution_claim(
+        cls, value: Any
+    ) -> dict[str, Any]:
+        if not isinstance(value, dict) or set(value) != WORKSPACE_JOIN_CLAIM_FIELDS:
+            raise StoreError(
+                "scenario.stale-fence", "Workspace execution claim fields differ"
+            )
+        digest_fields = {
+            "request_digest",
+            "plan_digest",
+            "receipt_digest",
+            "expected_wip_summary_digest",
+            "workspace_path_identity_digest",
+            "pending_fence_digest",
+            "adapter_capability_digest",
+            "recovery_source_digest",
+            "claim_digest",
+        }
+        string_fields = {
+            "workspace_operation_id",
+            "workspace_request_id",
+            "project_instance_id",
+            "scenario_id",
+        }
+        if (
+            value["join_claim_version"] != WORKSPACE_JOIN_CLAIM_VERSION
+            or any(
+                not isinstance(value[field], str) or not value[field]
+                for field in string_fields
+            )
+            or value["operation_kind"] not in {"repair", "destroy", "recover"}
+            or not value["workspace_operation_id"].startswith("wsop-")
+            or not value["workspace_request_id"].startswith(
+                "!store-workspace:"
+            )
+            or not cls._positive_int(value["scenario_generation"])
+            or not isinstance(value["workspace_id"], str)
+            or not value["workspace_id"].startswith("workspace-")
+            or Path(value["workspace_id"]).name != value["workspace_id"]
+            or not isinstance(value["force"], bool)
+            or any(not cls._sha256(value[field]) for field in digest_fields)
+        ):
+            raise StoreError(
+                "scenario.stale-fence", "Workspace execution claim values differ"
+            )
+        body = {
+            field: copy.deepcopy(field_value)
+            for field, field_value in value.items()
+            if field != "claim_digest"
+        }
+        if canonical_json_sha256(body) != value["claim_digest"]:
+            raise StoreError(
+                "scenario.stale-fence", "Workspace execution claim digest differs"
+            )
+        return copy.deepcopy(value)
 
     def _migrate_legacy_state(self) -> None:
         """Atomically upgrade the v0.1.6.1 Host store and retain last-good."""
@@ -324,12 +545,21 @@ class ScenarioStore:
                 os.fsync(stream.fileno())
             return value
 
-    def start_host(self) -> dict[str, Any]:
+    def start_host(
+        self,
+        *,
+        preserve_workspace_operation_ids: set[str] | None = None,
+    ) -> dict[str, Any]:
         with self._lock:
             state = self._read_state()
             state["host_generation"] += 1
             self._mark_active_resources_stale_after_restart(state)
-            self._reconcile_transitional_scenarios(state)
+            self._reconcile_transitional_scenarios(
+                state,
+                preserve_workspace_operation_ids
+                if preserve_workspace_operation_ids is not None
+                else set(),
+            )
             self._reconcile_transitional_participants(state)
             self._reconcile_scenario_participant_faults(state)
             state["state_revision"] += 1
@@ -443,20 +673,609 @@ class ScenarioStore:
                 }:
                     continue
                 request_id = operation["request_id"]
+                request = state["requests"][request_id]
                 values.append(
                     {
                         "key": key,
                         "project_instance_id": item["project_instance_id"],
                         "scenario_id": record["scenario_id"],
                         "request_id": request_id,
-                        "request_digest": state["requests"][request_id][
-                            "request_digest"
-                        ],
+                        "workspace_request_id": request.get(
+                            "workspace_request_id", request_id
+                        ),
+                        "workspace_operation_kind": request.get(
+                            "workspace_operation_kind"
+                        ),
+                        "request_digest": request["request_digest"],
                         "operation_id": operation_id,
                         "operation_kind": operation["operation_kind"],
+                        "scenario_generation": record["scenario_generation"],
+                        "expected_workspace_binding_state": request.get(
+                            "expected_workspace_binding_state"
+                        ),
+                        "expected_wip_summary_digest": request.get(
+                            "expected_wip_summary_digest"
+                        ),
+                        "workspace_binding_id": request.get(
+                            "workspace_binding_id"
+                        ),
+                        "workspace_join_attempts": copy.deepcopy(
+                            request.get("workspace_join_attempts")
+                        ),
+                        "workspace_operation_id": request.get(
+                            "workspace_operation_id"
+                        ),
+                        "workspace_join_claim_digest": request.get(
+                            "workspace_join_claim_digest"
+                        ),
+                        "workspace_adapter_capability_digest": request.get(
+                            "workspace_adapter_capability_digest"
+                        ),
+                        "expected_recovery_claim_digest": request.get(
+                            "expected_recovery_claim_digest"
+                        ),
+                        "expected_recovery_inventory_digest": request.get(
+                            "expected_recovery_inventory_digest"
+                        ),
+                        "expected_recovery_prior_operation_kind": request.get(
+                            "expected_recovery_prior_operation_kind"
+                        ),
                     }
                 )
             return values
+
+    def scenario_workspace_recovery_authority(
+        self,
+        *,
+        project_instance_id: str,
+        scenario_id: str,
+        scenario_generation: int,
+        scenario_state_revision: int,
+    ) -> dict[str, Any]:
+        """Return the exact prior claim authorized for manual recovery."""
+
+        key = self._scenario_key(project_instance_id, scenario_id)
+        with self._lock:
+            state = self._read_state()
+            item = state["scenarios"].get(key)
+            if item is None:
+                raise StoreError("scenario.not-found", "scenario does not exist")
+            record = item["record"]
+            self._check_scenario_fence(
+                record, scenario_generation, scenario_state_revision
+            )
+            degraded = record.get("degraded")
+            if (
+                record.get("observed_state") != "degraded"
+                or not isinstance(degraded, dict)
+                or degraded.get("reason") != "operation_unknown"
+                or degraded.get("repair_action") != "scenario.repair"
+            ):
+                raise StoreError(
+                    "scenario.invalid-transition",
+                    "scenario has no recoverable Workspace outcome",
+                )
+            candidates: list[dict[str, Any]] = []
+            for operation in state["operations"].values():
+                capsule = operation.get("workspace_recovery_capsule")
+                request_id = operation.get("request_id")
+                request = (
+                    state["requests"].get(request_id)
+                    if isinstance(request_id, str)
+                    else None
+                )
+                if not isinstance(capsule, dict) or not isinstance(request, dict):
+                    continue
+                evidence = canonical_json_sha256(
+                    {
+                        "operation_id": operation.get("operation_id"),
+                        "reason": operation.get("failure_code"),
+                        "unjoinable": bool(
+                            operation.get("workspace_join_unjoinable", False)
+                        ),
+                        "workspace_join_attempts": copy.deepcopy(
+                            request.get("workspace_join_attempts")
+                        ),
+                        "workspace_operation_id": request.get(
+                            "workspace_operation_id"
+                        ),
+                        "workspace_join_claim_digest": request.get(
+                            "workspace_join_claim_digest"
+                        ),
+                        "workspace_adapter_capability_digest": request.get(
+                            "workspace_adapter_capability_digest"
+                        ),
+                    }
+                )
+                if (
+                    operation.get("state") == "repair_required"
+                    and request.get("status") == "failed"
+                    and evidence == degraded.get(
+                        "owned_resource_evidence_sha256"
+                    )
+                ):
+                    candidates.append(copy.deepcopy(capsule))
+            if len(candidates) != 1:
+                raise StoreError(
+                    "scenario.invalid-transition",
+                    "Workspace recovery authority is unavailable",
+                )
+            return candidates[0]
+
+    def _workspace_join_context(
+        self,
+        state: dict[str, Any],
+        *,
+        project_instance_id: str,
+        scenario_id: str,
+        request_id: str,
+        request_digest: str,
+        operation_id: str,
+        workspace_request_id: str,
+        operation_kind: str,
+        scenario_generation: int,
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+        if operation_kind not in {
+            "scenario.repair",
+            "scenario.destroy",
+            "scenario.force-destroy",
+        }:
+            raise StoreError(
+                "scenario.stale-fence", "Workspace join operation differs"
+            )
+        key = self._scenario_key(project_instance_id, scenario_id)
+        item = state["scenarios"].get(key)
+        operation = state["operations"].get(operation_id)
+        request = state["requests"].get(request_id)
+        record = item.get("record") if isinstance(item, dict) else None
+        operation_fence = (
+            operation.get("fence") if isinstance(operation, dict) else None
+        )
+        if (
+            not isinstance(record, dict)
+            or not isinstance(operation, dict)
+            or not isinstance(request, dict)
+            or item.get("project_instance_id") != project_instance_id
+            or record.get("scenario_id") != scenario_id
+            or record.get("scenario_generation") != scenario_generation
+            or record.get("active_operation_id") != operation_id
+            or record.get("observed_state")
+            != (
+                "repairing"
+                if operation_kind == "scenario.repair"
+                else "destroying"
+            )
+            or operation.get("operation_id") != operation_id
+            or operation.get("request_id") != request_id
+            or operation.get("operation_kind") != operation_kind
+            or operation.get("state") != "executing_external"
+            or operation.get("mutation_state") != "committed"
+            or not isinstance(operation_fence, dict)
+            or operation_fence.get("scenario_generation")
+            != scenario_generation
+            or not self._nonnegative_int(
+                operation_fence.get("scenario_state_revision")
+            )
+            or record.get("state_revision")
+            != operation_fence["scenario_state_revision"] + 1
+            or not isinstance(operation.get("target"), dict)
+            or operation["target"].get("scope") != "scenario"
+            or operation["target"].get("scenario_id") != scenario_id
+            or request.get("request_digest") != request_digest
+            or request.get("operation_id") != operation_id
+            or request.get("status") != "pending"
+            or request.get("workspace_request_id") != workspace_request_id
+            or request.get("workspace_binding_id")
+            != record.get("workspace_binding_id")
+        ):
+            raise StoreError(
+                "scenario.stale-fence", "Workspace join fence differs"
+            )
+        attempts = request.get("workspace_join_attempts")
+        if (
+            not isinstance(attempts, dict)
+            or set(attempts) != {"operation_id", "count", "max_attempts"}
+            or attempts.get("operation_id") != operation_id
+            or not self._nonnegative_int(attempts.get("count"))
+            or attempts["count"] > MAX_AUTOMATIC_WORKSPACE_JOIN_ATTEMPTS
+            or attempts.get("max_attempts")
+            != MAX_AUTOMATIC_WORKSPACE_JOIN_ATTEMPTS
+        ):
+            raise StoreError(
+                "host.state-invalid", "Workspace join attempt state differs"
+            )
+        return item, operation, request, attempts
+
+    @staticmethod
+    def _require_workspace_execution_claim_matches(
+        *,
+        claim: dict[str, Any],
+        request: dict[str, Any],
+        project_instance_id: str,
+        scenario_id: str,
+        request_digest: str,
+        workspace_request_id: str,
+        operation_kind: str,
+        scenario_generation: int,
+    ) -> None:
+        workspace_kind = request.get("workspace_operation_kind")
+        expected_force = (
+            operation_kind == "scenario.force-destroy"
+            if workspace_kind == "destroy"
+            else False
+        )
+        expected_wip = request.get("expected_wip_summary_digest")
+        if (
+            claim["project_instance_id"] != project_instance_id
+            or claim["scenario_id"] != scenario_id
+            or claim["scenario_generation"] != scenario_generation
+            or claim["workspace_id"] != request.get("workspace_binding_id")
+            or claim["workspace_request_id"] != workspace_request_id
+            or claim["request_digest"] != request_digest
+            or claim["operation_kind"] != workspace_kind
+            or claim["force"] != expected_force
+            or (
+                expected_wip is not None
+                and claim["expected_wip_summary_digest"] != expected_wip
+            )
+            or (
+                workspace_kind == "recover"
+                and claim["recovery_source_digest"]
+                != canonical_json_sha256(
+                    {
+                        "prior_claim_digest": request.get(
+                            "expected_recovery_claim_digest"
+                        ),
+                        "expected_inventory_digest": request.get(
+                            "expected_recovery_inventory_digest"
+                        ),
+                    }
+                )
+            )
+            or (
+                workspace_kind != "recover"
+                and claim["recovery_source_digest"]
+                != canonical_json_sha256(None)
+            )
+        ):
+            raise StoreError(
+                "scenario.stale-fence", "Workspace execution claim differs"
+            )
+
+    @staticmethod
+    def _require_bound_workspace_execution_claim(
+        request: dict[str, Any], claim: dict[str, Any]
+    ) -> None:
+        if (
+            request.get("workspace_operation_id")
+            != claim["workspace_operation_id"]
+            or request.get("workspace_join_claim_digest")
+            != claim["claim_digest"]
+            or request.get("workspace_adapter_capability_digest")
+            != claim["adapter_capability_digest"]
+        ):
+            raise StoreError(
+                "scenario.stale-fence", "bound Workspace execution claim differs"
+            )
+
+    def bind_workspace_execution_claim(
+        self,
+        *,
+        project_instance_id: str,
+        scenario_id: str,
+        request_id: str,
+        request_digest: str,
+        operation_id: str,
+        workspace_request_id: str,
+        operation_kind: str,
+        scenario_generation: int,
+        workspace_claim: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bind Workspace's stable claim before its first external mutation."""
+
+        claim = self._validated_workspace_execution_claim(workspace_claim)
+        with self._lock:
+            state = self._read_state()
+            _, _, request, _ = self._workspace_join_context(
+                state,
+                project_instance_id=project_instance_id,
+                scenario_id=scenario_id,
+                request_id=request_id,
+                request_digest=request_digest,
+                operation_id=operation_id,
+                workspace_request_id=workspace_request_id,
+                operation_kind=operation_kind,
+                scenario_generation=scenario_generation,
+            )
+            self._require_workspace_execution_claim_matches(
+                claim=claim,
+                request=request,
+                project_instance_id=project_instance_id,
+                scenario_id=scenario_id,
+                request_digest=request_digest,
+                workspace_request_id=workspace_request_id,
+                operation_kind=operation_kind,
+                scenario_generation=scenario_generation,
+            )
+            bound = (
+                request.get("workspace_operation_id"),
+                request.get("workspace_join_claim_digest"),
+                request.get("workspace_adapter_capability_digest"),
+            )
+            if all(value is None for value in bound):
+                request.update(
+                    {
+                        "workspace_operation_id": claim[
+                            "workspace_operation_id"
+                        ],
+                        "workspace_join_claim_digest": claim["claim_digest"],
+                        "workspace_adapter_capability_digest": claim[
+                            "adapter_capability_digest"
+                        ],
+                    }
+                )
+                state["state_revision"] += 1
+                self._write_state(state)
+            else:
+                self._require_bound_workspace_execution_claim(request, claim)
+            return {
+                "status": "bound",
+                "workspace_operation_id": claim["workspace_operation_id"],
+                "workspace_join_claim_digest": claim["claim_digest"],
+                "workspace_adapter_capability_digest": claim[
+                    "adapter_capability_digest"
+                ],
+            }
+
+    def claim_workspace_join(
+        self,
+        *,
+        project_instance_id: str,
+        scenario_id: str,
+        request_id: str,
+        request_digest: str,
+        operation_id: str,
+        workspace_request_id: str,
+        operation_kind: str,
+        scenario_generation: int,
+        workspace_claim: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Persist one exact automatic join intent before any adapter call."""
+
+        claim = self._validated_workspace_execution_claim(workspace_claim)
+        with self._lock:
+            state = self._read_state()
+            item, operation, request, attempt_state = self._workspace_join_context(
+                state,
+                project_instance_id=project_instance_id,
+                scenario_id=scenario_id,
+                request_id=request_id,
+                request_digest=request_digest,
+                operation_id=operation_id,
+                workspace_request_id=workspace_request_id,
+                operation_kind=operation_kind,
+                scenario_generation=scenario_generation,
+            )
+            self._require_workspace_execution_claim_matches(
+                claim=claim,
+                request=request,
+                project_instance_id=project_instance_id,
+                scenario_id=scenario_id,
+                request_digest=request_digest,
+                workspace_request_id=workspace_request_id,
+                operation_kind=operation_kind,
+                scenario_generation=scenario_generation,
+            )
+            self._require_bound_workspace_execution_claim(request, claim)
+            attempts = attempt_state["count"]
+            if attempts >= MAX_AUTOMATIC_WORKSPACE_JOIN_ATTEMPTS:
+                return {
+                    "status": "exhausted",
+                    "attempt": attempts,
+                    "max_attempts": MAX_AUTOMATIC_WORKSPACE_JOIN_ATTEMPTS,
+                    "workspace_operation_id": claim["workspace_operation_id"],
+                    "workspace_join_claim_digest": claim["claim_digest"],
+                }
+            attempt = attempts + 1
+            attempt_state["count"] = attempt
+            revision = item["record"]["state_revision"]
+            self._append_operation_event(
+                state,
+                operation,
+                event="external_started",
+                before_revision=revision,
+                after_revision=revision,
+                mutation_state="committed",
+            )
+            item["record"]["journal_head_sequence"] = state[
+                "journal_head_sequence"
+            ]
+            state["state_revision"] += 1
+            self._write_state(state)
+            return {
+                "status": "claimed",
+                "attempt": attempt,
+                "max_attempts": MAX_AUTOMATIC_WORKSPACE_JOIN_ATTEMPTS,
+                "workspace_operation_id": claim["workspace_operation_id"],
+                "workspace_join_claim_digest": claim["claim_digest"],
+                "workspace_adapter_capability_digest": claim[
+                    "adapter_capability_digest"
+                ],
+            }
+
+    def degrade_unknown_workspace_join(
+        self,
+        *,
+        project_instance_id: str,
+        scenario_id: str,
+        request_id: str,
+        request_digest: str,
+        operation_id: str,
+        workspace_request_id: str,
+        operation_kind: str,
+        scenario_generation: int,
+        workspace_claim: dict[str, Any] | None,
+        reason: str,
+        unjoinable: bool = False,
+    ) -> OperationFailed | None:
+        """End a bounded/unprovable join without claiming an external outcome."""
+
+        if not isinstance(reason, str) or not reason:
+            raise StoreError(
+                "scenario.stale-fence", "Workspace join degradation reason differs"
+            )
+        claim = (
+            self._validated_workspace_execution_claim(workspace_claim)
+            if workspace_claim is not None
+            else None
+        )
+        if claim is None and not unjoinable:
+            raise StoreError(
+                "scenario.stale-fence", "Workspace join claim is unavailable"
+            )
+        with self._lock:
+            state = self._read_state()
+            item, operation, request, attempt_state = self._workspace_join_context(
+                state,
+                project_instance_id=project_instance_id,
+                scenario_id=scenario_id,
+                request_id=request_id,
+                request_digest=request_digest,
+                operation_id=operation_id,
+                workspace_request_id=workspace_request_id,
+                operation_kind=operation_kind,
+                scenario_generation=scenario_generation,
+            )
+            if claim is not None:
+                self._require_workspace_execution_claim_matches(
+                    claim=claim,
+                    request=request,
+                    project_instance_id=project_instance_id,
+                    scenario_id=scenario_id,
+                    request_digest=request_digest,
+                    workspace_request_id=workspace_request_id,
+                    operation_kind=operation_kind,
+                    scenario_generation=scenario_generation,
+                )
+                self._require_bound_workspace_execution_claim(request, claim)
+            if (
+                not unjoinable
+                and attempt_state["count"]
+                != MAX_AUTOMATIC_WORKSPACE_JOIN_ATTEMPTS
+            ):
+                raise StoreError(
+                    "scenario.stale-fence", "Workspace join attempts are not exhausted"
+                )
+            record = item["record"]
+            before = record["state_revision"]
+            self._append_operation_event(
+                state,
+                operation,
+                event="repair_required",
+                before_revision=before,
+                after_revision=before,
+                mutation_state="unknown",
+                error_code=reason,
+            )
+            repair_action = "scenario.repair"
+            evidence = canonical_json_sha256(
+                {
+                    "operation_id": operation_id,
+                    "reason": reason,
+                    "unjoinable": unjoinable,
+                    "workspace_join_attempts": copy.deepcopy(attempt_state),
+                    "workspace_operation_id": request.get(
+                        "workspace_operation_id"
+                    ),
+                    "workspace_join_claim_digest": request.get(
+                        "workspace_join_claim_digest"
+                    ),
+                    "workspace_adapter_capability_digest": request.get(
+                        "workspace_adapter_capability_digest"
+                    ),
+                }
+            )
+            recovery_capsule = None
+            durable_claim_digest = request.get("workspace_join_claim_digest")
+            if (
+                request.get("workspace_operation_kind") == "recover"
+                or claim is not None
+                or self._sha256(durable_claim_digest)
+            ):
+                prior_kind = (
+                    request.get("expected_recovery_prior_operation_kind")
+                    if request.get("workspace_operation_kind") == "recover"
+                    else request.get("workspace_operation_kind")
+                )
+                prior_digest = (
+                    request.get("expected_recovery_claim_digest")
+                    if request.get("workspace_operation_kind") == "recover"
+                    else durable_claim_digest
+                )
+                if prior_kind in {"destroy", "repair"} and self._sha256(
+                    prior_digest
+                ):
+                    recovery_capsule = {
+                        "recovery_capsule_version": 1,
+                        "workspace_binding_id": request[
+                            "workspace_binding_id"
+                        ],
+                        "prior_operation_kind": prior_kind,
+                        "prior_operation_claim_digest": prior_digest,
+                        "source_scenario_operation_id": operation_id,
+                    }
+            record.update(
+                {
+                    "observed_state": "degraded",
+                    "active_operation_id": None,
+                    "state_revision": before + 1,
+                    "degraded": {
+                        "reason": "operation_unknown",
+                        "cleanup_pending": True,
+                        "owned_resource_evidence_sha256": evidence,
+                        "repair_action": repair_action,
+                    },
+                }
+            )
+            self._append_operation_event(
+                state,
+                operation,
+                event="finalize_committed",
+                before_revision=before,
+                after_revision=record["state_revision"],
+                mutation_state="committed",
+            )
+            record["journal_head_sequence"] = state["journal_head_sequence"]
+            operation.update(
+                {
+                    "state": "repair_required",
+                    "mutation_state": "unknown",
+                    "failure_code": reason,
+                    "workspace_recovery_capsule": recovery_capsule,
+                    "workspace_join_unjoinable": bool(unjoinable),
+                }
+            )
+            failure = OperationFailed(
+                operation_id,
+                "operation.internal-failure",
+                "Scenario Workspace outcome requires explicit recovery",
+                "unknown",
+                False,
+            )
+            request.update(
+                {
+                    "status": "failed",
+                    "error": {
+                        "code": failure.code,
+                        "message": failure.message,
+                        "mutation_state": failure.mutation_state,
+                        "retryable": failure.retryable,
+                    },
+                }
+            )
+            state["state_revision"] += 1
+            self._write_state(state)
+            return failure
 
     def record_scenario_close_reports(
         self,
@@ -682,11 +1501,20 @@ class ScenarioStore:
             return self._previous_request(state, request_id, request_digest)
 
     @staticmethod
-    def _validate_project_contract_snapshot(value: Any) -> None:
+    def _validate_project_contract_snapshot(
+        value: Any,
+        *,
+        require_collaboration_snapshot: bool = False,
+    ) -> None:
         # v0.1.6.1 Scenarios migrate with no render. Their already-frozen
         # Workspace plan/receipt remains authoritative; every new Scenario
         # carries the complete private render instead of a registry pointer.
         if value is None:
+            if require_collaboration_snapshot:
+                raise StoreError(
+                    "project.snapshot-incomplete",
+                    "new Scenario requires an embedded collaboration snapshot",
+                )
             return
         required = {
             "render_contract_version",
@@ -722,6 +1550,29 @@ class ScenarioStore:
             raise StoreError(
                 "host.state-invalid", "Scenario project snapshot digest differs"
             )
+        if require_collaboration_snapshot:
+            collaboration = value.get("collaboration")
+            registry = (
+                collaboration.get("registry_snapshot")
+                if isinstance(collaboration, dict)
+                else None
+            )
+            registry_digest = (
+                collaboration.get("registry_snapshot_digest")
+                if isinstance(collaboration, dict)
+                else None
+            )
+            if (
+                not isinstance(registry, dict)
+                or not isinstance(registry_digest, str)
+                or re.fullmatch(r"[0-9a-f]{64}", registry_digest) is None
+                or canonical_json_sha256(registry) != registry_digest
+                or len(canonical_json_bytes(registry)) > 512 * 1024
+            ):
+                raise StoreError(
+                    "project.snapshot-incomplete",
+                    "new Scenario requires an embedded collaboration snapshot",
+                )
 
     def create_scenario(
         self,
@@ -734,7 +1585,10 @@ class ScenarioStore:
         project_binding_digest: str,
         project_contract_snapshot: dict[str, Any] | None = None,
     ) -> tuple[str, dict[str, Any]]:
-        self._validate_project_contract_snapshot(project_contract_snapshot)
+        self._validate_project_contract_snapshot(
+            project_contract_snapshot,
+            require_collaboration_snapshot=True,
+        )
         if (
             project_contract_snapshot is not None
             and project_contract_snapshot["render_digest"] != project_binding_digest
@@ -1905,6 +2759,28 @@ class ScenarioStore:
             state = self._read_state()
             return self._previous_request(state, request_id, request_digest)
 
+    def inspect_request_status(
+        self, request_id: str, request_digest: str
+    ) -> tuple[str, str | None]:
+        """Classify one exact durable request without replay side effects."""
+
+        with self._lock:
+            state = self._read_state()
+            request = state["requests"].get(request_id)
+            if request is None:
+                return "absent", None
+            if request.get("request_digest") != request_digest:
+                raise StoreError("ipc.request-reused", "request id was reused")
+            status = request.get("status")
+            operation_id = request.get("operation_id")
+            if status not in {"pending", "completed", "failed"} or not isinstance(
+                operation_id, str
+            ):
+                raise StoreError(
+                    "host.state-invalid", "durable request status differs"
+                )
+            return status, operation_id
+
     def participant_security_context(
         self,
         *,
@@ -2343,7 +3219,38 @@ class ScenarioStore:
         scenario_id: str,
         scenario_generation: int,
         scenario_state_revision: int,
+        expected_wip_summary_digest: str,
+        workspace_operation_kind: str = "repair",
+        expected_recovery_claim_digest: str | None = None,
+        expected_recovery_inventory_digest: str | None = None,
+        expected_recovery_prior_operation_kind: str | None = None,
     ) -> tuple[str, dict[str, Any] | None, Path | None]:
+        if not self._sha256(expected_wip_summary_digest):
+            raise StoreError(
+                "scenario.repair-invalid", "repair WIP evidence differs"
+            )
+        if workspace_operation_kind not in {"repair", "recover"}:
+            raise StoreError(
+                "scenario.repair-invalid", "repair Workspace operation differs"
+            )
+        if workspace_operation_kind == "recover":
+            if (
+                not self._sha256(expected_recovery_claim_digest)
+                or not self._sha256(expected_recovery_inventory_digest)
+                or expected_recovery_prior_operation_kind
+                not in {"destroy", "repair"}
+            ):
+                raise StoreError(
+                    "scenario.repair-invalid", "recovery evidence differs"
+                )
+        elif (
+            expected_recovery_claim_digest is not None
+            or expected_recovery_inventory_digest is not None
+            or expected_recovery_prior_operation_kind is not None
+        ):
+            raise StoreError(
+                "scenario.repair-invalid", "unexpected recovery evidence"
+            )
         key = self._scenario_key(project_instance_id, scenario_id)
         with self._lock:
             state = self._read_state()
@@ -2399,11 +3306,39 @@ class ScenarioStore:
             record["journal_head_sequence"] = state["journal_head_sequence"]
             operation["state"] = "executing_external"
             operation["mutation_state"] = "committed"
+            workspace_request_id = self.workspace_join_request_id(
+                "scenario.repair", request_id, request_digest
+            )
             state["requests"][request_id] = {
                 "request_digest": request_digest,
                 "operation_id": operation["operation_id"],
                 "status": "pending",
                 "workspace_binding_id": record["workspace_binding_id"],
+                "expected_wip_summary_digest": expected_wip_summary_digest,
+                "workspace_request_id": workspace_request_id,
+                "workspace_operation_kind": workspace_operation_kind,
+                "expected_recovery_claim_digest": (
+                    expected_recovery_claim_digest
+                ),
+                "expected_recovery_inventory_digest": (
+                    expected_recovery_inventory_digest
+                ),
+                "expected_recovery_prior_operation_kind": (
+                    expected_recovery_prior_operation_kind
+                ),
+                "recovery_base_degraded": (
+                    copy.deepcopy(record.get("degraded"))
+                    if workspace_operation_kind == "recover"
+                    else None
+                ),
+                "workspace_join_attempts": {
+                    "operation_id": operation["operation_id"],
+                    "count": 0,
+                    "max_attempts": MAX_AUTOMATIC_WORKSPACE_JOIN_ATTEMPTS,
+                },
+                "workspace_operation_id": None,
+                "workspace_join_claim_digest": None,
+                "workspace_adapter_capability_digest": None,
                 "result": None,
                 "error": None,
             }
@@ -2414,6 +3349,104 @@ class ScenarioStore:
                 None,
                 self.workspace_path(record["workspace_binding_id"]),
             )
+
+    def abort_scenario_recovery_no_effect(
+        self,
+        *,
+        project_instance_id: str,
+        scenario_id: str,
+        request_id: str,
+        operation_id: str,
+        reason: str,
+    ) -> OperationFailed:
+        """Restore the exact degraded authority after a proven no-effect recovery."""
+
+        key = self._scenario_key(project_instance_id, scenario_id)
+        with self._lock:
+            state = self._read_state()
+            item = state["scenarios"].get(key)
+            operation = state["operations"].get(operation_id)
+            request = state["requests"].get(request_id)
+            record = item.get("record") if isinstance(item, dict) else None
+            base_degraded = (
+                request.get("recovery_base_degraded")
+                if isinstance(request, dict)
+                else None
+            )
+            if (
+                not isinstance(record, dict)
+                or not isinstance(operation, dict)
+                or not isinstance(request, dict)
+                or not isinstance(base_degraded, dict)
+                or request.get("workspace_operation_kind") != "recover"
+                or request.get("status") != "pending"
+                or request.get("operation_id") != operation_id
+                or operation.get("operation_kind") != "scenario.repair"
+                or operation.get("state") != "executing_external"
+                or record.get("active_operation_id") != operation_id
+                or record.get("observed_state") != "repairing"
+            ):
+                raise StoreError(
+                    "scenario.stale-fence", "recovery abort fence differs"
+                )
+            before = record["state_revision"]
+            self._append_operation_event(
+                state,
+                operation,
+                event="external_failed",
+                before_revision=before,
+                after_revision=before,
+                mutation_state="not_started",
+                error_code=reason,
+            )
+            record.update(
+                {
+                    "observed_state": "degraded",
+                    "active_operation_id": None,
+                    "degraded": copy.deepcopy(base_degraded),
+                    "state_revision": before + 1,
+                }
+            )
+            self._append_operation_event(
+                state,
+                operation,
+                event="finalize_committed",
+                before_revision=before,
+                after_revision=record["state_revision"],
+                mutation_state="committed",
+            )
+            record["journal_head_sequence"] = state["journal_head_sequence"]
+            operation.update(
+                {
+                    "state": "failed",
+                    # The adapter did not run, but begin_scenario_repair
+                    # already committed the Scenario transition.  Overall
+                    # lifecycle mutation is therefore committed.
+                    "mutation_state": "committed",
+                    "failure_code": reason,
+                }
+            )
+            failure = OperationFailed(
+                operation_id,
+                "operation.precondition-failed",
+                "Scenario recovery evidence changed; confirm a new request",
+                "committed",
+                True,
+            )
+            request.update(
+                {
+                    "status": "failed",
+                    "error": {
+                        "code": failure.code,
+                        "message": failure.message,
+                        "mutation_state": failure.mutation_state,
+                        "retryable": failure.retryable,
+                    },
+                }
+            )
+            state["state_revision"] += 1
+            self._write_state(state)
+            return failure
 
     def finalize_scenario_repair(
         self,
@@ -2482,16 +3515,16 @@ class ScenarioStore:
         request_id: str,
         operation_id: str,
         reason: str,
-    ) -> None:
+    ) -> OperationFailed | None:
         key = self._scenario_key(project_instance_id, scenario_id)
         with self._lock:
             state = self._read_state()
             item = state["scenarios"].get(key)
             if item is None:
-                return
+                return None
             record = item["record"]
             if record["active_operation_id"] != operation_id:
-                return
+                return None
             operation = state["operations"][operation_id]
             before = record["state_revision"]
             evidence = canonical_json_sha256(
@@ -2522,7 +3555,6 @@ class ScenarioStore:
                 before_revision=before,
                 after_revision=record["state_revision"],
                 mutation_state="committed",
-                error_code=reason,
             )
             record["journal_head_sequence"] = state["journal_head_sequence"]
             operation["state"] = "repair_required"
@@ -2541,6 +3573,13 @@ class ScenarioStore:
             )
             state["state_revision"] += 1
             self._write_state(state)
+            return OperationFailed(
+                operation_id,
+                "operation.external-failure",
+                "Scenario operation requires repair",
+                "committed",
+                False,
+            )
 
     def begin_scenario_destroy(
         self,
@@ -2552,11 +3591,25 @@ class ScenarioStore:
         scenario_id: str,
         scenario_generation: int,
         scenario_state_revision: int,
+        expected_workspace_binding_state: str,
+        expected_wip_summary_digest: str,
         operation_kind: str = "scenario.destroy",
     ) -> tuple[str, dict[str, Any] | None, Path | None]:
         if operation_kind not in {"scenario.destroy", "scenario.force-destroy"}:
             raise StoreError(
                 "scenario.invalid-transition", "scenario destroy operation differs"
+            )
+        if (
+            expected_workspace_binding_state
+            not in {"absent", "planned", "provision_failed", "ready"}
+            or not self._sha256(expected_wip_summary_digest)
+            or (
+                operation_kind == "scenario.force-destroy"
+                and expected_workspace_binding_state != "ready"
+            )
+        ):
+            raise StoreError(
+                "scenario.invalid-transition", "scenario destroy evidence differs"
             )
         key = self._scenario_key(project_instance_id, scenario_id)
         with self._lock:
@@ -2616,11 +3669,28 @@ class ScenarioStore:
             record["journal_head_sequence"] = state["journal_head_sequence"]
             operation["state"] = "executing_external"
             operation["mutation_state"] = "committed"
+            workspace_request_id = self.workspace_join_request_id(
+                operation_kind, request_id, request_digest
+            )
             state["requests"][request_id] = {
                 "request_digest": request_digest,
                 "operation_id": operation["operation_id"],
                 "status": "pending",
                 "workspace_binding_id": record["workspace_binding_id"],
+                "workspace_request_id": workspace_request_id,
+                "workspace_operation_kind": "destroy",
+                "workspace_join_attempts": {
+                    "operation_id": operation["operation_id"],
+                    "count": 0,
+                    "max_attempts": MAX_AUTOMATIC_WORKSPACE_JOIN_ATTEMPTS,
+                },
+                "workspace_operation_id": None,
+                "workspace_join_claim_digest": None,
+                "workspace_adapter_capability_digest": None,
+                "expected_workspace_binding_state": (
+                    expected_workspace_binding_state
+                ),
+                "expected_wip_summary_digest": expected_wip_summary_digest,
                 "result": None,
                 "error": None,
             }
@@ -2631,6 +3701,124 @@ class ScenarioStore:
                 None,
                 self.workspace_path(record["workspace_binding_id"]),
             )
+
+    @staticmethod
+    def workspace_join_request_id(
+        operation_kind: str,
+        request_id: str,
+        request_digest: str,
+    ) -> str:
+        """Derive an owner-private Workspace id outside the public IPC grammar.
+
+        Store and Workspace have separate durable idempotency ledgers. Using
+        the public request id in both allowed a concurrent Workspace request
+        to collide with (or overwrite) a Scenario repair/destroy join. A
+        leading ``!`` cannot be supplied by a validated IPC opaque_id, while
+        the digest makes the mapping deterministic across crash recovery.
+        """
+
+        if operation_kind not in {
+            "scenario.repair",
+            "scenario.destroy",
+            "scenario.force-destroy",
+        }:
+            raise StoreError(
+                "scenario.invalid-transition", "workspace join kind differs"
+            )
+        material = canonical_json_sha256(
+            {
+                "operation_kind": operation_kind,
+                "request_id": request_id,
+                "request_digest": request_digest,
+            }
+        )
+        return f"!store-workspace:{material}"
+
+    def abort_scenario_destroy_no_effect(
+        self,
+        *,
+        project_instance_id: str,
+        scenario_id: str,
+        request_id: str,
+        operation_id: str,
+        reason: str,
+    ) -> None:
+        """Restore a closed Scenario when Workspace proved no destroy effect."""
+
+        key = self._scenario_key(project_instance_id, scenario_id)
+        with self._lock:
+            state = self._read_state()
+            item = state["scenarios"].get(key)
+            if item is None:
+                return
+            record = item["record"]
+            operation = state["operations"].get(operation_id)
+            request = state["requests"].get(request_id)
+            if (
+                operation is None
+                or request is None
+                or record.get("active_operation_id") != operation_id
+                or record.get("observed_state") != "destroying"
+                or operation.get("operation_kind")
+                not in {"scenario.destroy", "scenario.force-destroy"}
+                or request.get("status") != "pending"
+                or request.get("expected_workspace_binding_state")
+                not in {"absent", "planned", "provision_failed", "ready"}
+            ):
+                raise StoreError(
+                    "scenario.stale-fence", "Scenario destroy abort fence differs"
+                )
+            before = record["state_revision"]
+            self._append_operation_event(
+                state,
+                operation,
+                event="external_failed",
+                before_revision=before,
+                after_revision=before,
+                mutation_state="committed",
+                error_code=reason,
+            )
+            record.update(
+                {
+                    "desired_state": "closed",
+                    "observed_state": "closed",
+                    "active_operation_id": None,
+                    "degraded": None,
+                    "state_revision": before + 1,
+                }
+            )
+            self._append_operation_event(
+                state,
+                operation,
+                event="finalize_committed",
+                before_revision=before,
+                after_revision=record["state_revision"],
+                mutation_state="committed",
+                error_code=reason,
+            )
+            record["journal_head_sequence"] = state["journal_head_sequence"]
+            operation.update(
+                {
+                    "state": "failed",
+                    "mutation_state": "committed",
+                    "failure_code": reason,
+                }
+            )
+            request.update(
+                {
+                    "status": "failed",
+                    "error": {
+                        "code": "operation.precondition-failed",
+                        "message": (
+                            "Scenario destroy evidence changed; confirm a new request"
+                        ),
+                        "mutation_state": "committed",
+                        "retryable": True,
+                    },
+                }
+            )
+            state["state_revision"] += 1
+            self._write_state(state)
 
     def finalize_scenario_destroy(
         self,
@@ -2691,12 +3879,30 @@ class ScenarioStore:
             state["requests"][request_id].update(
                 {"status": "completed", "result": result}
             )
+            expected_empty_husk_digest = (
+                state["requests"][request_id].get(
+                    "expected_wip_summary_digest"
+                )
+                if state["requests"][request_id].get(
+                    "expected_workspace_binding_state"
+                )
+                in {"absent", "planned", "provision_failed"}
+                else None
+            )
             state["state_revision"] += 1
             self._write_state(state)
-            self._remove_workspace_husk(record.get("workspace_binding_id"))
+            self._remove_workspace_husk(
+                record.get("workspace_binding_id"),
+                expected_empty_husk_digest=expected_empty_husk_digest,
+            )
             return result
 
-    def _remove_workspace_husk(self, binding_id: Any) -> bool:
+    def _remove_workspace_husk(
+        self,
+        binding_id: Any,
+        *,
+        expected_empty_husk_digest: str | None = None,
+    ) -> bool:
         """Remove a destroyed Scenario's now-empty workspace directory.
 
         The adapter has already proven the workspace bundle is absent; what
@@ -2725,9 +3931,30 @@ class ScenarioStore:
         ):
             return False
         try:
-            leftovers = [
-                entry for entry in path.iterdir() if entry.name != ".DS_Store"
-            ]
+            entries = list(path.iterdir())
+            if expected_empty_husk_digest is not None:
+                if (
+                    path.resolve(strict=True) != path
+                    or stat.S_IMODE(details.st_mode) != 0o700
+                ):
+                    return False
+                observed_digest = canonical_json_sha256(
+                    {
+                        "path_identity": {
+                            "workspace_id": binding_id,
+                            "device": details.st_dev,
+                            "inode": details.st_ino,
+                            "uid": details.st_uid,
+                            "mode": stat.S_IMODE(details.st_mode),
+                        },
+                        "entries": [],
+                    }
+                )
+                if entries or observed_digest != expected_empty_husk_digest:
+                    return False
+                path.rmdir()
+                return True
+            leftovers = [entry for entry in entries if entry.name != ".DS_Store"]
             if leftovers:
                 return False
             metadata = path / ".DS_Store"
@@ -2774,6 +4001,44 @@ class ScenarioStore:
                     "scenario.workspace-unavailable", "scenario workspace is unavailable"
                 )
             return record, workspace_path
+
+    def restore_missing_workspace_container(
+        self, project_instance_id: str, scenario_id: str
+    ) -> Path:
+        """Recreate only a missing Host-owned container, never its contents."""
+
+        with self._lock:
+            state = self._read_state()
+            item = state["scenarios"].get(
+                self._scenario_key(project_instance_id, scenario_id)
+            )
+            if item is None:
+                raise StoreError("scenario.not-found", "scenario does not exist")
+            binding_id = item["record"].get("workspace_binding_id")
+            if not isinstance(binding_id, str):
+                raise StoreError(
+                    "scenario.workspace-unavailable", "scenario has no workspace"
+                )
+            path = self.workspace_path(binding_id)
+            if path.exists() or path.is_symlink():
+                raise StoreError(
+                    "scenario.workspace-unavailable",
+                    "scenario workspace identity changed",
+                )
+            try:
+                path.mkdir(mode=0o700)
+                os.chmod(path, 0o700)
+                directory = os.open(path.parent, os.O_RDONLY)
+                try:
+                    os.fsync(directory)
+                finally:
+                    os.close(directory)
+            except OSError as exc:
+                raise StoreError(
+                    "scenario.workspace-unavailable",
+                    "scenario workspace could not be restored",
+                ) from exc
+            return path
 
     def scenario_project_contract(
         self, project_instance_id: str, scenario_id: str
@@ -5107,7 +6372,11 @@ class ScenarioStore:
         )
         operation["last_journal_sequence"] = sequence
 
-    def _reconcile_transitional_scenarios(self, state: dict[str, Any]) -> None:
+    def _reconcile_transitional_scenarios(
+        self,
+        state: dict[str, Any],
+        preserve_workspace_operation_ids: set[str],
+    ) -> None:
         for key, item in state["scenarios"].items():
             record = item["record"]
             operation_id = record.get("active_operation_id")
@@ -5165,6 +6434,8 @@ class ScenarioStore:
                 }
                 continue
             if record["observed_state"] in {"repairing", "destroying"}:
+                if operation_id in preserve_workspace_operation_ids:
+                    continue
                 operation = state["operations"][operation_id]
                 request = state["requests"][request_id]
                 revision = record["state_revision"]

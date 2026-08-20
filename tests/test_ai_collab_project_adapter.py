@@ -13,11 +13,14 @@ identity comes from the project's own declaration files.
 from __future__ import annotations
 
 import json
+import importlib
 import os
 import shutil
 import subprocess
 import sys
+import threading
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import pytest
@@ -82,6 +85,26 @@ def _git_output(repo: Path, *arguments: str) -> str:
     return subprocess.check_output(
         ["git", "-C", str(repo), *arguments], stderr=subprocess.DEVNULL
     ).decode().strip()
+
+
+def _stale_index_snapshot(repo: Path, tracked_file: Path) -> tuple[Path, bytes, int]:
+    """Make cached stat data stale, then capture the exact index publication."""
+
+    details = tracked_file.stat()
+    os.utime(
+        tracked_file,
+        ns=(details.st_atime_ns, max(1, details.st_mtime_ns - 10_000_000_000)),
+    )
+    index = Path(_git_output(repo, "rev-parse", "--git-path", "index"))
+    if not index.is_absolute():
+        index = repo / index
+    return index, index.read_bytes(), index.stat().st_mtime_ns
+
+
+def _assert_index_unchanged(snapshot: tuple[Path, bytes, int]) -> None:
+    index, contents, modified = snapshot
+    assert index.read_bytes() == contents
+    assert index.stat().st_mtime_ns == modified
 
 
 def _init_repo(path: Path, remote: str) -> None:
@@ -211,12 +234,1165 @@ def _assert_failed(
     return error
 
 
+def _load_adapter_module() -> ModuleType:
+    scripts = str(SCRIPTS)
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    return importlib.import_module("ai_collab_project_adapter")
+
+
+def _write_unit_binding_marker(
+    adapter: ModuleType,
+    bundle: Path,
+    *,
+    plan: dict[str, Any],
+    receipt: dict[str, Any],
+    journal: dict[str, Any],
+) -> dict[str, Any]:
+    snapshot = {
+        "snapshot_contract_version": 1,
+        "scenario": receipt["scenario"],
+        "plan_digest": adapter.canonical_json_sha256(plan),
+        "receipt_digest": adapter.canonical_json_sha256(receipt),
+        "components": [
+            {
+                "component_id": item["component_id"],
+                "revision_kind": item["revision_kind"],
+                "exact_revision": item["realized_revision"],
+                "target_ref": item["target_ref"],
+                "content_digest": item["content_digest"],
+            }
+            for item in receipt["components"]
+        ],
+    }
+    snapshot["snapshot_digest"] = adapter.canonical_json_sha256(snapshot)
+    value = {
+        "journal": journal,
+        "receipt": receipt,
+        "review_snapshot": snapshot,
+    }
+    marker = bundle / ".ai-collab-harness-binding.json"
+    marker.write_text(
+        json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    marker.chmod(0o600)
+    return value
+
+
+@pytest.fixture
+def adapter_unit_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> dict[str, Any]:
+    """Small valid private bundle for high-risk adapter fault injection."""
+
+    adapter = _load_adapter_module()
+    canonical = tmp_path / "canonical" / "unit-project"
+    canonical.mkdir(parents=True)
+    monkeypatch.setattr(adapter, "ROOT", canonical)
+
+    parent = tmp_path / "workspace-unit"
+    parent.mkdir(mode=0o700)
+    bundle = parent / "bundle"
+    bundle.mkdir(mode=0o700)
+    component = bundle / "component"
+    component.mkdir(mode=0o700)
+    environment = bundle / ".venv"
+    environment.mkdir(mode=0o700)
+
+    scenario = {"scenario_id": "scenario-unit", "scenario_generation": 1}
+    plan = {
+        "plan_contract_version": 1,
+        "plan_id": "plan:unit",
+        "operation_id": "wsop-plan-unit",
+        "scenario": scenario,
+        "components": [{"component_id": "component"}],
+        "environment": {"environment_id": "environment:unit"},
+    }
+    provision_journal = {
+        "journal_contract_version": 1,
+        "operation_id": "wsop-plan-unit",
+        "operation_kind": "provision",
+        "plan_digest": adapter.canonical_json_sha256(plan),
+        "scenario": scenario,
+        "operation_fence": None,
+        "events": [],
+    }
+    component_receipt = {
+        "component_id": "component",
+        "placement": "bundle_sibling",
+        "logical_path": "component",
+        "revision_kind": "commit",
+        "realized_revision": "1" * 40,
+        "target_ref": "main",
+        "content_digest": "2" * 64,
+    }
+    receipt = {
+        "receipt_contract_version": 1,
+        "receipt_id": "receipt:unit",
+        "plan_digest": adapter.canonical_json_sha256(plan),
+        "operation_id": "wsop-plan-unit",
+        "base_receipt_digest": None,
+        "scenario": scenario,
+        "workspace_id": "workspace-unit",
+        "workspace_binding_digest": "3" * 64,
+        "components": [component_receipt],
+        "environment": {
+            "environment_id": "environment:unit",
+            "environment_binding_digest": "4" * 64,
+        },
+        "journal_digest": adapter.canonical_json_sha256(provision_journal),
+        "source_wip_before_digest": "5" * 64,
+        "source_wip_after_digest": "5" * 64,
+        "finalization": {
+            "staging_binding_digest": "6" * 64,
+            "atomic_publish": True,
+            "expected_registry_revision": 0,
+            "committed_ready_revision": 1,
+        },
+        "state": "ready",
+    }
+    _write_unit_binding_marker(
+        adapter,
+        bundle,
+        plan=plan,
+        receipt=receipt,
+        journal=provision_journal,
+    )
+
+    observation_state = {"state": "aligned"}
+    wip_digest = "7" * 64
+
+    def fake_status(payload: dict[str, Any]) -> dict[str, Any]:
+        observed_receipt = payload["receipt"]
+        return {
+            "journal": {},
+            "observation": {
+                "state": observation_state["state"],
+                "drift_codes": (
+                    [] if observation_state["state"] == "aligned" else ["workspace.drift"]
+                ),
+                "wip_summary_digest": wip_digest,
+                "ownership_summary_digest": "8" * 64,
+                "receipt_digest": adapter.canonical_json_sha256(observed_receipt),
+            },
+        }
+
+    monkeypatch.setattr(adapter, "_status", fake_status)
+    return {
+        "adapter": adapter,
+        "parent": parent,
+        "bundle": bundle,
+        "component": component,
+        "plan": plan,
+        "receipt": receipt,
+        "wip_digest": wip_digest,
+        "observation_state": observation_state,
+    }
+
+
+def _repair_payload(fixture: dict[str, Any], operation_id: str) -> dict[str, Any]:
+    return {
+        "operation_id": operation_id,
+        "bundle_path": str(fixture["bundle"]),
+        "plan": fixture["plan"],
+        "receipt": fixture["receipt"],
+        "expected_wip_summary_digest": fixture["wip_digest"],
+    }
+
+
+def _destroy_payload(
+    fixture: dict[str, Any],
+    operation_id: str,
+    *,
+    receipt: dict[str, Any] | None = None,
+    force: bool = False,
+) -> dict[str, Any]:
+    return {
+        "operation_id": operation_id,
+        "bundle_path": str(fixture["bundle"]),
+        "plan": fixture["plan"],
+        "receipt": receipt or fixture["receipt"],
+        "expected_wip_summary_digest": fixture["wip_digest"],
+        "force": force,
+    }
+
+
+def _recover_payload(
+    fixture: dict[str, Any],
+    operation_id: str,
+    *,
+    prior_operation_id: str,
+    prior_operation_kind: str,
+    force: bool = False,
+) -> dict[str, Any]:
+    return {
+        "operation_id": operation_id,
+        "bundle_path": str(fixture["bundle"]),
+        "plan": fixture["plan"],
+        "receipt": fixture["receipt"],
+        "expected_wip_summary_digest": fixture["wip_digest"],
+        "prior_operation": {
+            "operation_id": prior_operation_id,
+            "operation_kind": prior_operation_kind,
+            "force": force,
+            "claim_digest": "9" * 64,
+        },
+    }
+
+
+def _assert_unknown_adapter_error(
+    adapter: ModuleType,
+    call: Any,
+    expected_code: str,
+) -> Any:
+    with pytest.raises(adapter.AdapterError) as raised:
+        call()
+    assert raised.value.code == expected_code
+    assert raised.value.mutation_state == "unknown"
+    assert raised.value.retryable is True
+    return raised.value
+
+
+def _assert_not_started_adapter_error(adapter: ModuleType, call: Any) -> Any:
+    with pytest.raises(adapter.AdapterError) as raised:
+        call()
+    assert raised.value.mutation_state == "not_started"
+    assert raised.value.retryable is False
+    return raised.value
+
+
+def test_descriptor_declares_manual_recover_operation() -> None:
+    adapter = _load_adapter_module()
+
+    assert all(
+        "recover" in descriptor["operations"]
+        for descriptor in adapter._descriptors()
+    )
+
+
+def test_recover_prior_repair_with_exact_base_is_read_only_and_idempotent(
+    adapter_unit_workspace: dict[str, Any]
+) -> None:
+    fixture = adapter_unit_workspace
+    adapter = fixture["adapter"]
+    payload = _recover_payload(
+        fixture,
+        "wsop-recover-repair-base",
+        prior_operation_id="wsop-prior-repair-base",
+        prior_operation_kind="repair",
+    )
+    marker_path = fixture["bundle"] / ".ai-collab-harness-binding.json"
+    marker_before = marker_path.read_bytes()
+
+    first = adapter._recover(payload)
+    second = adapter._recover(payload)
+
+    assert second == first
+    assert set(first) == {
+        "journal",
+        "receipt",
+        "observation",
+        "review_snapshot",
+        "recovery",
+    }
+    assert first["journal"]["operation_id"] == "wsop-recover-repair-base"
+    assert first["journal"]["operation_kind"] == "recover"
+    assert first["receipt"] == fixture["receipt"]
+    assert first["observation"]["state"] == "aligned"
+    assert first["observation"]["wip_summary_digest"] == fixture["wip_digest"]
+    assert first["recovery"] == {
+        "prior_operation_id": "wsop-prior-repair-base",
+        "prior_operation_kind": "repair",
+        "prior_claim_digest": "9" * 64,
+        "resolution": "ready",
+    }
+    assert marker_path.read_bytes() == marker_before
+
+
+def test_recover_prior_repair_adopts_only_its_exact_published_marker(
+    adapter_unit_workspace: dict[str, Any]
+) -> None:
+    fixture = adapter_unit_workspace
+    adapter = fixture["adapter"]
+    prior_operation_id = "wsop-prior-repair-adopt"
+    repaired = adapter._repair(_repair_payload(fixture, prior_operation_id))
+    payload = _recover_payload(
+        fixture,
+        "wsop-recover-repair-adopt",
+        prior_operation_id=prior_operation_id,
+        prior_operation_kind="repair",
+    )
+    marker_path = fixture["bundle"] / ".ai-collab-harness-binding.json"
+    marker_before = marker_path.read_bytes()
+
+    recovered = adapter._recover(payload)
+
+    assert recovered["receipt"] == repaired["receipt"]
+    assert recovered["review_snapshot"] == repaired["review_snapshot"]
+    assert recovered["recovery"]["resolution"] == "ready"
+    assert recovered["observation"]["receipt_digest"] == (
+        adapter.canonical_json_sha256(repaired["receipt"])
+    )
+    assert marker_path.read_bytes() == marker_before
+    assert adapter._recover(payload) == recovered
+
+
+def test_recover_prior_repair_rejects_invalid_marker_without_rewriting_it(
+    adapter_unit_workspace: dict[str, Any]
+) -> None:
+    fixture = adapter_unit_workspace
+    adapter = fixture["adapter"]
+    marker_path = fixture["bundle"] / ".ai-collab-harness-binding.json"
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    marker["review_snapshot"]["snapshot_digest"] = "f" * 64
+    marker_path.write_text(
+        json.dumps(marker, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    marker_before = marker_path.read_bytes()
+    payload = _recover_payload(
+        fixture,
+        "wsop-recover-repair-invalid",
+        prior_operation_id="wsop-prior-repair-invalid",
+        prior_operation_kind="repair",
+    )
+
+    _assert_not_started_adapter_error(adapter, lambda: adapter._recover(payload))
+
+    assert marker_path.read_bytes() == marker_before
+
+
+def test_recover_prior_repair_never_adopts_missing_resolution(
+    adapter_unit_workspace: dict[str, Any]
+) -> None:
+    fixture = adapter_unit_workspace
+    adapter = fixture["adapter"]
+    shutil.rmtree(fixture["bundle"])
+    payload = _recover_payload(
+        fixture,
+        "wsop-recover-repair-missing",
+        prior_operation_id="wsop-prior-repair-missing",
+        prior_operation_kind="repair",
+    )
+
+    _assert_not_started_adapter_error(adapter, lambda: adapter._recover(payload))
+
+    assert not fixture["bundle"].exists()
+
+
+def test_recover_prior_destroy_with_exact_bundle_is_read_only_and_idempotent(
+    adapter_unit_workspace: dict[str, Any]
+) -> None:
+    fixture = adapter_unit_workspace
+    adapter = fixture["adapter"]
+    payload = _recover_payload(
+        fixture,
+        "wsop-recover-destroy-bundle",
+        prior_operation_id="wsop-prior-destroy-bundle",
+        prior_operation_kind="destroy",
+    )
+    marker_path = fixture["bundle"] / ".ai-collab-harness-binding.json"
+    marker_before = marker_path.read_bytes()
+
+    first = adapter._recover(payload)
+    second = adapter._recover(payload)
+
+    assert second == first
+    assert first["receipt"] == fixture["receipt"]
+    assert first["recovery"]["resolution"] == "ready"
+    assert marker_path.read_bytes() == marker_before
+
+
+def test_recover_prior_destroy_rolls_exact_stage_back_and_replays_deterministically(
+    adapter_unit_workspace: dict[str, Any]
+) -> None:
+    fixture = adapter_unit_workspace
+    adapter = fixture["adapter"]
+    prior_operation_id = "wsop-prior-destroy-stage"
+    exact_stage = fixture["parent"] / f".destroying-{prior_operation_id}"
+    os.replace(fixture["bundle"], exact_stage)
+    payload = _recover_payload(
+        fixture,
+        "wsop-recover-destroy-stage",
+        prior_operation_id=prior_operation_id,
+        prior_operation_kind="destroy",
+    )
+
+    first = adapter._recover(payload)
+
+    assert first["recovery"]["resolution"] == "ready"
+    assert fixture["bundle"].is_dir()
+    assert not exact_stage.exists()
+    assert adapter._recover(payload) == first
+
+
+@pytest.mark.parametrize("concurrent_target_kind", ["empty-directory", "file"])
+def test_recover_no_replace_rename_preserves_concurrent_bundle_and_exact_stage(
+    adapter_unit_workspace: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    concurrent_target_kind: str,
+) -> None:
+    fixture = adapter_unit_workspace
+    adapter = fixture["adapter"]
+    prior_operation_id = f"wsop-prior-recover-race-{concurrent_target_kind}"
+    exact_stage = fixture["parent"] / f".destroying-{prior_operation_id}"
+    os.replace(fixture["bundle"], exact_stage)
+    stage_inode = exact_stage.stat(follow_symlinks=False).st_ino
+    stage_marker = exact_stage / ".ai-collab-harness-binding.json"
+    stage_marker_bytes = stage_marker.read_bytes()
+    payload = _recover_payload(
+        fixture,
+        f"wsop-recover-race-{concurrent_target_kind}",
+        prior_operation_id=prior_operation_id,
+        prior_operation_kind="destroy",
+    )
+    original_rename = adapter._rename_directory_no_replace
+    rename_entered = threading.Event()
+    release_rename = threading.Event()
+
+    def rename_after_concurrent_publish(source: Path, target: Path) -> None:
+        rename_entered.set()
+        assert release_rename.wait(timeout=3)
+        original_rename(source, target)
+
+    monkeypatch.setattr(
+        adapter, "_rename_directory_no_replace", rename_after_concurrent_publish
+    )
+    outcomes: list[tuple[str, Any]] = []
+
+    def execute() -> None:
+        try:
+            outcomes.append(("completed", adapter._recover(payload)))
+        except adapter.AdapterError as exc:
+            outcomes.append(("failed", exc))
+
+    thread = threading.Thread(target=execute)
+    thread.start()
+    assert rename_entered.wait(timeout=3)
+    concurrent_bytes = b"concurrent bundle must survive\n"
+    if concurrent_target_kind == "empty-directory":
+        fixture["bundle"].mkdir(mode=0o700)
+    else:
+        fixture["bundle"].write_bytes(concurrent_bytes)
+    concurrent_inode = fixture["bundle"].stat(follow_symlinks=False).st_ino
+    release_rename.set()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+
+    assert len(outcomes) == 1
+    kind, failure = outcomes[0]
+    assert kind == "failed"
+    assert failure.code == "workspace.recover-target-conflict"
+    assert failure.mutation_state == "not_started"
+    assert failure.retryable is False
+    assert fixture["bundle"].stat(follow_symlinks=False).st_ino == concurrent_inode
+    if concurrent_target_kind == "file":
+        assert fixture["bundle"].read_bytes() == concurrent_bytes
+    else:
+        assert fixture["bundle"].is_dir()
+        assert list(fixture["bundle"].iterdir()) == []
+    assert exact_stage.stat(follow_symlinks=False).st_ino == stage_inode
+    assert stage_marker.read_bytes() == stage_marker_bytes
+
+
+def test_concurrent_exact_recover_stage_has_one_result_and_one_safe_failure(
+    adapter_unit_workspace: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = adapter_unit_workspace
+    adapter = fixture["adapter"]
+    prior_operation_id = "wsop-prior-concurrent-recover"
+    exact_stage = fixture["parent"] / f".destroying-{prior_operation_id}"
+    os.replace(fixture["bundle"], exact_stage)
+    payload = _recover_payload(
+        fixture,
+        "wsop-recover-concurrent-stage",
+        prior_operation_id=prior_operation_id,
+        prior_operation_kind="destroy",
+    )
+    original_rename = adapter._rename_directory_no_replace
+    barrier = threading.Barrier(2)
+
+    def racing_rename(source: Path, target: Path) -> None:
+        if Path(source) == exact_stage:
+            barrier.wait(timeout=3)
+        original_rename(source, target)
+
+    monkeypatch.setattr(adapter, "_rename_directory_no_replace", racing_rename)
+    outcomes: list[tuple[str, Any]] = []
+
+    def execute() -> None:
+        try:
+            outcomes.append(("completed", adapter._recover(payload)))
+        except adapter.AdapterError as exc:
+            outcomes.append(("failed", exc))
+
+    threads = [threading.Thread(target=execute) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+
+    completed = [value for kind, value in outcomes if kind == "completed"]
+    failures = [value for kind, value in outcomes if kind == "failed"]
+    assert len(completed) == 1
+    assert len(failures) == 1
+    if failures[0].code == "workspace.recover-target-conflict":
+        assert failures[0].mutation_state == "not_started"
+        assert failures[0].retryable is False
+    else:
+        assert failures[0].code == "workspace.recover-outcome-unknown"
+        assert failures[0].mutation_state == "unknown"
+        assert failures[0].retryable is True
+    monkeypatch.setattr(adapter, "_rename_directory_no_replace", original_rename)
+    assert adapter._recover(payload) == completed[0]
+
+
+def test_recover_force_destroy_stage_restores_degraded_wip_without_requiring_alignment(
+    adapter_unit_workspace: dict[str, Any]
+) -> None:
+    fixture = adapter_unit_workspace
+    adapter = fixture["adapter"]
+    fixture["observation_state"]["state"] = "degraded"
+    prior_operation_id = "wsop-prior-force-destroy-stage"
+    exact_stage = fixture["parent"] / f".destroying-{prior_operation_id}"
+    os.replace(fixture["bundle"], exact_stage)
+    payload = _recover_payload(
+        fixture,
+        "wsop-recover-force-destroy-stage",
+        prior_operation_id=prior_operation_id,
+        prior_operation_kind="destroy",
+        force=True,
+    )
+
+    recovered = adapter._recover(payload)
+
+    assert recovered["recovery"]["resolution"] == "ready"
+    assert recovered["observation"]["state"] == "degraded"
+    assert recovered["observation"]["wip_summary_digest"] == fixture["wip_digest"]
+    assert fixture["bundle"].is_dir()
+    assert not exact_stage.exists()
+    assert adapter._recover(payload) == recovered
+
+
+def test_recover_nonforce_destroy_stage_keeps_degraded_wip_staged(
+    adapter_unit_workspace: dict[str, Any]
+) -> None:
+    fixture = adapter_unit_workspace
+    adapter = fixture["adapter"]
+    fixture["observation_state"]["state"] = "degraded"
+    prior_operation_id = "wsop-prior-nonforce-destroy-stage"
+    exact_stage = fixture["parent"] / f".destroying-{prior_operation_id}"
+    os.replace(fixture["bundle"], exact_stage)
+    payload = _recover_payload(
+        fixture,
+        "wsop-recover-nonforce-destroy-stage",
+        prior_operation_id=prior_operation_id,
+        prior_operation_kind="destroy",
+    )
+
+    _assert_not_started_adapter_error(adapter, lambda: adapter._recover(payload))
+
+    assert exact_stage.is_dir()
+    assert not fixture["bundle"].exists()
+
+
+def test_recover_prior_destroy_fsync_crash_is_unknown_then_exactly_replayable(
+    adapter_unit_workspace: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = adapter_unit_workspace
+    adapter = fixture["adapter"]
+    prior_operation_id = "wsop-prior-destroy-fsync"
+    exact_stage = fixture["parent"] / f".destroying-{prior_operation_id}"
+    os.replace(fixture["bundle"], exact_stage)
+    payload = _recover_payload(
+        fixture,
+        "wsop-recover-destroy-fsync",
+        prior_operation_id=prior_operation_id,
+        prior_operation_kind="destroy",
+    )
+    original_fsync = adapter._fsync_directory
+
+    def durable_then_fail(path: Path) -> None:
+        original_fsync(path)
+        raise OSError("injected post-rename fsync crash")
+
+    monkeypatch.setattr(adapter, "_fsync_directory", durable_then_fail)
+    _assert_unknown_adapter_error(
+        adapter,
+        lambda: adapter._recover(payload),
+        "workspace.recover-outcome-unknown",
+    )
+    assert fixture["bundle"].is_dir()
+    assert not exact_stage.exists()
+
+    monkeypatch.setattr(adapter, "_fsync_directory", original_fsync)
+    replay = adapter._recover(payload)
+    assert replay["recovery"]["resolution"] == "ready"
+    assert adapter._recover(payload) == replay
+
+
+def test_recover_prior_destroy_post_rename_error_is_unknown_then_replayable(
+    adapter_unit_workspace: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = adapter_unit_workspace
+    adapter = fixture["adapter"]
+    prior_operation_id = "wsop-prior-destroy-rename"
+    exact_stage = fixture["parent"] / f".destroying-{prior_operation_id}"
+    os.replace(fixture["bundle"], exact_stage)
+    payload = _recover_payload(
+        fixture,
+        "wsop-recover-destroy-rename",
+        prior_operation_id=prior_operation_id,
+        prior_operation_kind="destroy",
+    )
+    original_rename = adapter._rename_directory_no_replace
+
+    def rename_then_fail(source: Path, target: Path) -> None:
+        original_rename(source, target)
+        raise OSError("injected post-rename crash")
+
+    monkeypatch.setattr(adapter, "_rename_directory_no_replace", rename_then_fail)
+    _assert_unknown_adapter_error(
+        adapter,
+        lambda: adapter._recover(payload),
+        "workspace.recover-outcome-unknown",
+    )
+    assert fixture["bundle"].is_dir()
+    assert not exact_stage.exists()
+
+    monkeypatch.setattr(adapter, "_rename_directory_no_replace", original_rename)
+    replay = adapter._recover(payload)
+    assert replay["recovery"]["resolution"] == "ready"
+
+
+def test_recover_prior_destroy_missing_is_exact_and_idempotent(
+    adapter_unit_workspace: dict[str, Any]
+) -> None:
+    fixture = adapter_unit_workspace
+    adapter = fixture["adapter"]
+    shutil.rmtree(fixture["bundle"])
+    payload = _recover_payload(
+        fixture,
+        "wsop-recover-destroy-missing",
+        prior_operation_id="wsop-prior-destroy-missing",
+        prior_operation_kind="destroy",
+        force=True,
+    )
+
+    first = adapter._recover(payload)
+    second = adapter._recover(payload)
+
+    assert second == first
+    assert first["receipt"] is None
+    assert first["review_snapshot"] is None
+    assert first["observation"]["state"] == "missing"
+    assert first["observation"]["wip_summary_digest"] == fixture["wip_digest"]
+    assert first["recovery"]["resolution"] == "missing"
+
+
+@pytest.mark.parametrize("prior_kind", ["repair", "destroy"])
+def test_recover_rejects_foreign_destroy_stage_without_touching_it(
+    adapter_unit_workspace: dict[str, Any], prior_kind: str
+) -> None:
+    fixture = adapter_unit_workspace
+    adapter = fixture["adapter"]
+    foreign = fixture["parent"] / ".destroying-wsop-foreign-recover"
+    foreign.mkdir(mode=0o700)
+    sentinel = foreign / "foreign.txt"
+    sentinel.write_text("foreign\n", encoding="utf-8")
+    payload = _recover_payload(
+        fixture,
+        f"wsop-recover-{prior_kind}-foreign",
+        prior_operation_id=f"wsop-prior-{prior_kind}-foreign",
+        prior_operation_kind=prior_kind,
+    )
+
+    _assert_not_started_adapter_error(adapter, lambda: adapter._recover(payload))
+
+    assert fixture["bundle"].is_dir()
+    assert sentinel.read_text(encoding="utf-8") == "foreign\n"
+
+
+@pytest.mark.parametrize("prior_kind", ["repair", "destroy"])
+def test_recover_rejects_any_unowned_parent_inventory_entry(
+    adapter_unit_workspace: dict[str, Any], prior_kind: str
+) -> None:
+    fixture = adapter_unit_workspace
+    adapter = fixture["adapter"]
+    extra = fixture["parent"] / "opaque-owner-inventory"
+    extra.mkdir(mode=0o700)
+    sentinel = extra / "preserve.txt"
+    sentinel.write_text("preserve\n", encoding="utf-8")
+    payload = _recover_payload(
+        fixture,
+        f"wsop-recover-{prior_kind}-opaque-inventory",
+        prior_operation_id=f"wsop-prior-{prior_kind}-opaque-inventory",
+        prior_operation_kind=prior_kind,
+    )
+
+    _assert_not_started_adapter_error(adapter, lambda: adapter._recover(payload))
+
+    assert fixture["bundle"].is_dir()
+    assert sentinel.read_text(encoding="utf-8") == "preserve\n"
+
+
+def test_recover_prior_destroy_rejects_bundle_and_exact_stage_conflict(
+    adapter_unit_workspace: dict[str, Any]
+) -> None:
+    fixture = adapter_unit_workspace
+    adapter = fixture["adapter"]
+    prior_operation_id = "wsop-prior-destroy-conflict"
+    exact_stage = fixture["parent"] / f".destroying-{prior_operation_id}"
+    exact_stage.mkdir(mode=0o700)
+    exact_sentinel = exact_stage / "exact.txt"
+    exact_sentinel.write_text("exact\n", encoding="utf-8")
+    payload = _recover_payload(
+        fixture,
+        "wsop-recover-destroy-conflict",
+        prior_operation_id=prior_operation_id,
+        prior_operation_kind="destroy",
+    )
+
+    _assert_not_started_adapter_error(adapter, lambda: adapter._recover(payload))
+
+    assert fixture["bundle"].is_dir()
+    assert exact_sentinel.read_text(encoding="utf-8") == "exact\n"
+
+
+@pytest.mark.parametrize("target_kind", ["partial", "symlink"])
+def test_recover_prior_destroy_rejects_partial_or_symlink_stage_without_touching_it(
+    adapter_unit_workspace: dict[str, Any], target_kind: str
+) -> None:
+    fixture = adapter_unit_workspace
+    adapter = fixture["adapter"]
+    prior_operation_id = f"wsop-prior-destroy-{target_kind}"
+    exact_stage = fixture["parent"] / f".destroying-{prior_operation_id}"
+    shutil.rmtree(fixture["bundle"])
+    if target_kind == "partial":
+        exact_stage.mkdir(mode=0o700)
+        sentinel = exact_stage / "employee-wip.txt"
+    else:
+        outside = fixture["parent"].parent / "outside-recover"
+        outside.mkdir(mode=0o700)
+        exact_stage.symlink_to(outside, target_is_directory=True)
+        sentinel = outside / "employee-wip.txt"
+    sentinel.write_text("preserve\n", encoding="utf-8")
+    payload = _recover_payload(
+        fixture,
+        f"wsop-recover-destroy-{target_kind}",
+        prior_operation_id=prior_operation_id,
+        prior_operation_kind="destroy",
+    )
+
+    _assert_not_started_adapter_error(adapter, lambda: adapter._recover(payload))
+
+    assert sentinel.read_text(encoding="utf-8") == "preserve\n"
+    if target_kind == "symlink":
+        assert exact_stage.is_symlink()
+
+
+@pytest.mark.parametrize(
+    ("prior_kind", "force"),
+    [("repair", True), ("status", False)],
+)
+def test_recover_rejects_invalid_prior_identity_without_mutation(
+    adapter_unit_workspace: dict[str, Any], prior_kind: str, force: bool
+) -> None:
+    fixture = adapter_unit_workspace
+    adapter = fixture["adapter"]
+    payload = _recover_payload(
+        fixture,
+        "wsop-recover-invalid-prior",
+        prior_operation_id="wsop-prior-invalid",
+        prior_operation_kind=prior_kind,
+        force=force,
+    )
+    marker_path = fixture["bundle"] / ".ai-collab-harness-binding.json"
+    marker_before = marker_path.read_bytes()
+
+    _assert_not_started_adapter_error(adapter, lambda: adapter._recover(payload))
+
+    assert marker_path.read_bytes() == marker_before
+
+
+@pytest.mark.parametrize("prior_kind", ["repair", "destroy"])
+def test_recover_rejects_simulated_unowned_container_without_mutation(
+    adapter_unit_workspace: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    prior_kind: str,
+) -> None:
+    fixture = adapter_unit_workspace
+    adapter = fixture["adapter"]
+    payload = _recover_payload(
+        fixture,
+        f"wsop-recover-{prior_kind}-unowned",
+        prior_operation_id=f"wsop-prior-{prior_kind}-unowned",
+        prior_operation_kind=prior_kind,
+    )
+    marker_path = fixture["bundle"] / ".ai-collab-harness-binding.json"
+    marker_before = marker_path.read_bytes()
+    actual_uid = os.getuid()
+    monkeypatch.setattr(adapter.os, "getuid", lambda: actual_uid + 1)
+
+    _assert_not_started_adapter_error(adapter, lambda: adapter._recover(payload))
+
+    assert marker_path.read_bytes() == marker_before
+
+
+def test_repair_exact_double_execution_replays_the_published_marker(
+    adapter_unit_workspace: dict[str, Any],
+) -> None:
+    fixture = adapter_unit_workspace
+    adapter = fixture["adapter"]
+    payload = _repair_payload(fixture, "wsop-repair-double")
+
+    first = adapter._repair(payload)
+    second = adapter._repair(payload)
+
+    assert second == first
+    assert first["journal"]["operation_id"] == "wsop-repair-double"
+    marker = json.loads(
+        (fixture["bundle"] / ".ai-collab-harness-binding.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert marker["receipt"] == first["receipt"]
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_destroy_exact_double_execution_is_idempotent_and_preserves_force(
+    adapter_unit_workspace: dict[str, Any], force: bool
+) -> None:
+    fixture = adapter_unit_workspace
+    adapter = fixture["adapter"]
+    if force:
+        fixture["observation_state"]["state"] = "degraded"
+    payload = _destroy_payload(
+        fixture, "wsop-destroy-double", force=force
+    )
+
+    first = adapter._destroy(payload)
+    second = adapter._destroy(payload)
+
+    assert second == first
+    assert first["journal"]["operation_id"] == "wsop-destroy-double"
+    assert first["observation"]["state"] == "missing"
+    assert not fixture["bundle"].exists()
+    assert not (fixture["parent"] / ".destroying-wsop-destroy-double").exists()
+
+
+def test_concurrent_exact_destroy_never_reports_a_failed_execution_as_no_effect(
+    adapter_unit_workspace: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = adapter_unit_workspace
+    adapter = fixture["adapter"]
+    payload = _destroy_payload(fixture, "wsop-destroy-concurrent")
+    original_replace = adapter.os.replace
+    barrier = threading.Barrier(2)
+
+    def racing_replace(source: Path, target: Path) -> None:
+        if Path(source) == fixture["bundle"]:
+            barrier.wait(timeout=3)
+        original_replace(source, target)
+
+    monkeypatch.setattr(adapter.os, "replace", racing_replace)
+    outcomes: list[tuple[str, Any]] = []
+
+    def execute() -> None:
+        try:
+            outcomes.append(("completed", adapter._destroy(payload)))
+        except adapter.AdapterError as exc:
+            outcomes.append(("failed", exc))
+
+    threads = [threading.Thread(target=execute) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+
+    assert [kind for kind, _ in outcomes].count("completed") == 1
+    failures = [value for kind, value in outcomes if kind == "failed"]
+    assert len(failures) == 1
+    assert failures[0].mutation_state == "unknown"
+    assert failures[0].code == "workspace.destroy-outcome-unknown"
+    monkeypatch.setattr(adapter.os, "replace", original_replace)
+    assert adapter._destroy(payload)["observation"]["state"] == "missing"
+
+
+def test_repair_post_marker_fsync_failure_is_unknown_and_exactly_replayable(
+    adapter_unit_workspace: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = adapter_unit_workspace
+    adapter = fixture["adapter"]
+    payload = _repair_payload(fixture, "wsop-repair-post-marker")
+    original_write = adapter._write_binding_marker
+
+    def publish_then_fail(path: Path, value: dict[str, Any]) -> None:
+        original_write(path, value)
+        raise OSError("injected post-marker fsync failure")
+
+    monkeypatch.setattr(adapter, "_write_binding_marker", publish_then_fail)
+    _assert_unknown_adapter_error(
+        adapter,
+        lambda: adapter._repair(payload),
+        "workspace.repair-outcome-unknown",
+    )
+    marker = json.loads(
+        (fixture["bundle"] / ".ai-collab-harness-binding.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert marker["journal"]["operation_id"] == "wsop-repair-post-marker"
+
+    monkeypatch.setattr(adapter, "_write_binding_marker", original_write)
+    replay = adapter._repair(payload)
+    assert replay["journal"]["operation_id"] == "wsop-repair-post-marker"
+
+
+def test_repair_replay_rejects_a_marker_changed_during_status_revalidation(
+    adapter_unit_workspace: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = adapter_unit_workspace
+    adapter = fixture["adapter"]
+    payload = _repair_payload(fixture, "wsop-repair-replay-race")
+    adapter._repair(payload)
+    marker_path = fixture["bundle"] / ".ai-collab-harness-binding.json"
+    original_status = adapter._status
+
+    def status_then_change_marker(status_payload: dict[str, Any]) -> dict[str, Any]:
+        result = original_status(status_payload)
+        if status_payload["operation_id"].endswith("-replay-status"):
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+            marker["review_snapshot"]["snapshot_digest"] = "f" * 64
+            marker_path.write_text(
+                json.dumps(marker, sort_keys=True) + "\n", encoding="utf-8"
+            )
+        return result
+
+    monkeypatch.setattr(adapter, "_status", status_then_change_marker)
+    _assert_unknown_adapter_error(
+        adapter,
+        lambda: adapter._repair(payload),
+        "workspace.repair-outcome-unknown",
+    )
+
+
+def test_destroy_pre_rename_failure_is_not_started_only_after_exact_reproof(
+    adapter_unit_workspace: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = adapter_unit_workspace
+    adapter = fixture["adapter"]
+    payload = _destroy_payload(fixture, "wsop-destroy-pre-effect")
+
+    def refuse_replace(source: Path, target: Path) -> None:
+        raise PermissionError("injected pre-rename refusal")
+
+    monkeypatch.setattr(adapter.os, "replace", refuse_replace)
+    with pytest.raises(adapter.AdapterError) as raised:
+        adapter._destroy(payload)
+
+    assert raised.value.code == "workspace.destroy-outcome-unknown"
+    assert raised.value.mutation_state == "not_started"
+    assert raised.value.retryable is True
+    assert fixture["bundle"].is_dir()
+    assert not (fixture["parent"] / ".destroying-wsop-destroy-pre-effect").exists()
+
+
+@pytest.mark.parametrize("failure_point", ["rename", "cleanup"])
+def test_destroy_directory_fsync_failure_is_unknown_and_exactly_replayable(
+    adapter_unit_workspace: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    failure_point: str,
+) -> None:
+    fixture = adapter_unit_workspace
+    adapter = fixture["adapter"]
+    payload = _destroy_payload(fixture, f"wsop-destroy-fsync-{failure_point}")
+    original_fsync = adapter._fsync_directory
+    call_count = 0
+
+    def injected_fsync(path: Path) -> None:
+        nonlocal call_count
+        call_count += 1
+        if (failure_point == "rename" and call_count == 1) or (
+            failure_point == "cleanup" and call_count == 2
+        ):
+            raise OSError("injected directory fsync failure")
+        original_fsync(path)
+
+    monkeypatch.setattr(adapter, "_fsync_directory", injected_fsync)
+    _assert_unknown_adapter_error(
+        adapter,
+        lambda: adapter._destroy(payload),
+        "workspace.destroy-outcome-unknown",
+    )
+    monkeypatch.setattr(adapter, "_fsync_directory", original_fsync)
+    replay = adapter._destroy(payload)
+    assert replay["observation"]["state"] == "missing"
+
+
+@pytest.mark.parametrize("operation", ["repair", "destroy"])
+def test_high_risk_operations_reject_foreign_destroy_staging_without_touching_wip(
+    adapter_unit_workspace: dict[str, Any], operation: str
+) -> None:
+    fixture = adapter_unit_workspace
+    adapter = fixture["adapter"]
+    foreign = fixture["parent"] / ".destroying-wsop-foreign"
+    foreign.mkdir(mode=0o700)
+    payload_file = foreign / "employee-wip.txt"
+    payload_file.write_text("preserve\n", encoding="utf-8")
+
+    if operation == "repair":
+        call = lambda: adapter._repair(
+            _repair_payload(fixture, "wsop-repair-foreign")
+        )
+        code = "workspace.repair-outcome-unknown"
+    else:
+        call = lambda: adapter._destroy(
+            _destroy_payload(fixture, "wsop-destroy-foreign")
+        )
+        code = "workspace.destroy-outcome-unknown"
+    _assert_unknown_adapter_error(adapter, call, code)
+
+    assert fixture["bundle"].is_dir()
+    assert payload_file.read_text(encoding="utf-8") == "preserve\n"
+
+
+def test_destroy_exact_staging_and_bundle_conflict_is_unknown_and_preserved(
+    adapter_unit_workspace: dict[str, Any]
+) -> None:
+    fixture = adapter_unit_workspace
+    adapter = fixture["adapter"]
+    exact = fixture["parent"] / ".destroying-wsop-destroy-conflict"
+    exact.mkdir(mode=0o700)
+    sentinel = exact / "preserve.txt"
+    sentinel.write_text("preserve\n", encoding="utf-8")
+
+    _assert_unknown_adapter_error(
+        adapter,
+        lambda: adapter._destroy(
+            _destroy_payload(fixture, "wsop-destroy-conflict")
+        ),
+        "workspace.destroy-outcome-unknown",
+    )
+
+    assert fixture["bundle"].is_dir()
+    assert sentinel.read_text(encoding="utf-8") == "preserve\n"
+
+
+def test_force_destroy_does_not_bypass_binding_marker_provenance(
+    adapter_unit_workspace: dict[str, Any]
+) -> None:
+    fixture = adapter_unit_workspace
+    adapter = fixture["adapter"]
+    fixture["observation_state"]["state"] = "degraded"
+    marker_path = fixture["bundle"] / ".ai-collab-harness-binding.json"
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    marker["review_snapshot"]["snapshot_digest"] = "f" * 64
+    marker_path.write_text(
+        json.dumps(marker, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+    _assert_unknown_adapter_error(
+        adapter,
+        lambda: adapter._destroy(
+            _destroy_payload(
+                fixture, "wsop-force-destroy-marker-drift", force=True
+            )
+        ),
+        "workspace.destroy-outcome-unknown",
+    )
+
+    assert fixture["bundle"].is_dir()
+
+
+def test_destroy_rejects_an_exact_staging_symlink_as_unknown(
+    adapter_unit_workspace: dict[str, Any]
+) -> None:
+    fixture = adapter_unit_workspace
+    adapter = fixture["adapter"]
+    outside = fixture["parent"].parent / "outside-wip"
+    outside.mkdir(mode=0o700)
+    payload_file = outside / "preserve.txt"
+    payload_file.write_text("preserve\n", encoding="utf-8")
+    shutil.rmtree(fixture["bundle"])
+    exact = fixture["parent"] / ".destroying-wsop-destroy-symlink"
+    exact.symlink_to(outside, target_is_directory=True)
+
+    _assert_unknown_adapter_error(
+        adapter,
+        lambda: adapter._destroy(
+            _destroy_payload(fixture, "wsop-destroy-symlink")
+        ),
+        "workspace.destroy-outcome-unknown",
+    )
+
+    assert exact.is_symlink()
+    assert payload_file.read_text(encoding="utf-8") == "preserve\n"
+
+
+@pytest.mark.parametrize("operation", ["repair", "destroy"])
+def test_high_risk_operations_reject_component_symlink_ownership(
+    adapter_unit_workspace: dict[str, Any], operation: str
+) -> None:
+    fixture = adapter_unit_workspace
+    adapter = fixture["adapter"]
+    outside = fixture["parent"].parent / "outside-component"
+    outside.mkdir(mode=0o700)
+    shutil.rmtree(fixture["component"])
+    fixture["component"].symlink_to(outside, target_is_directory=True)
+
+    if operation == "repair":
+        call = lambda: adapter._repair(
+            _repair_payload(fixture, "wsop-repair-link")
+        )
+        expected_code = "workspace.repair-outcome-unknown"
+    else:
+        call = lambda: adapter._destroy(
+            _destroy_payload(fixture, "wsop-destroy-link")
+        )
+        expected_code = "workspace.destroy-outcome-unknown"
+    _assert_unknown_adapter_error(adapter, call, expected_code)
+    assert fixture["component"].is_symlink()
+    assert outside.is_dir()
+
+
+@pytest.mark.parametrize("operation", ["repair", "destroy"])
+def test_high_risk_operations_reject_simulated_uid_mismatch(
+    adapter_unit_workspace: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    fixture = adapter_unit_workspace
+    adapter = fixture["adapter"]
+    actual_uid = os.getuid()
+    monkeypatch.setattr(adapter.os, "getuid", lambda: actual_uid + 1)
+    if operation == "repair":
+        call = lambda: adapter._repair(
+            _repair_payload(fixture, "wsop-repair-owner")
+        )
+        code = "workspace.repair-outcome-unknown"
+    else:
+        call = lambda: adapter._destroy(
+            _destroy_payload(fixture, "wsop-destroy-owner")
+        )
+        code = "workspace.destroy-outcome-unknown"
+    _assert_unknown_adapter_error(adapter, call, code)
+    assert fixture["bundle"].is_dir()
+
+
 def test_register_returns_declared_project_identity(tmp_path: Path) -> None:
     project = _build_project(tmp_path)
+    index_snapshot = _stale_index_snapshot(project, project / "requirements.lock")
     code, reply, stderr = _call(
-        project, "register", {"canonical_project_path": str(project)}
+        project,
+        "register",
+        {"canonical_project_path": str(project)},
+        extra_environment={"GIT_OPTIONAL_LOCKS": "1"},
     )
     assert code == 0, stderr
+    _assert_index_unchanged(index_snapshot)
     assert reply is not None and reply["adapter_id"] == ADAPTER_ID
     observed = reply["result"]["project"]
     assert observed["project_key"] == "sampleproject"
@@ -294,9 +1470,26 @@ def test_adapter_rejects_a_request_for_another_adapter_id(tmp_path: Path) -> Non
     )
 
 
-def test_collaboration_templates_come_from_the_project_root(tmp_path: Path) -> None:
+def test_collaboration_templates_come_from_the_frozen_project_render(
+    tmp_path: Path,
+) -> None:
     project = _build_project(tmp_path)
-    code, reply, stderr = _call(project, "collaboration_templates", {})
+    code, registered, stderr = _call(
+        project, "register", {"canonical_project_path": str(project)}
+    )
+    assert code == 0, stderr
+    assert registered is not None
+    frozen_render = registered["result"]["render"]
+    (project / "ai_collab_team_policies.json").unlink()
+
+    code, reply, stderr = _call(
+        project,
+        "collaboration_templates",
+        {},
+        extra_environment={
+            "AI_COLLAB_PROJECT_RENDER": json.dumps(frozen_render)
+        },
+    )
     assert code == 0, stderr
     assert reply is not None
     assert reply["result"]["templates"] == [{"template_id": "team.solo"}]
@@ -384,6 +1577,31 @@ def test_missing_repo_auth_failure_is_typed_and_actionable(tmp_path: Path) -> No
     assert "Sign in" in error["message"]
 
 
+def test_plan_does_not_refresh_canonical_git_index(tmp_path: Path) -> None:
+    project = _build_project(tmp_path)
+    index_snapshot = _stale_index_snapshot(project, project / "requirements.lock")
+
+    code, reply, stderr = _call(
+        project,
+        "plan",
+        {
+            "operation_id": "wsop-index-readonly-1",
+            "scenario": {"scenario_id": "scenario-index-readonly"},
+            "scenario_state_revision": 1,
+            "workspace_id": "workspace:index-readonly",
+            "requested_component_ids": [],
+            "project_payload": {},
+        },
+        # Prove the adapter overrides, rather than mutates or trusts, ambient Git
+        # configuration when it observes the employee's canonical checkout.
+        extra_environment={"GIT_OPTIONAL_LOCKS": "1"},
+    )
+
+    assert code == 0, stderr
+    assert reply is not None and reply["outcome"] == "completed"
+    _assert_index_unchanged(index_snapshot)
+
+
 def test_scan_era_wrong_branch_fails_typed_without_mutating_canonical_source(
     tmp_path: Path,
 ) -> None:
@@ -464,6 +1682,7 @@ def test_shallow_checkout_failure_is_typed_and_actionable(tmp_path: Path) -> Non
     if not shallow.is_absolute():
         shallow = project / shallow
     shallow.write_text(_git_output(project, "rev-parse", "HEAD") + "\n", encoding="utf-8")
+    index_snapshot = _stale_index_snapshot(project, project / "requirements.lock")
 
     error = _assert_failed(
         _call(
@@ -477,9 +1696,11 @@ def test_shallow_checkout_failure_is_typed_and_actionable(tmp_path: Path) -> Non
                 "requested_component_ids": [],
                 "project_payload": {},
             },
+            extra_environment={"GIT_OPTIONAL_LOCKS": "1"},
         ),
         "workspace.shallow-source",
     )
+    _assert_index_unchanged(index_snapshot)
     assert error["retryable"] is False
     assert "git fetch --unshallow" in error["message"]
 
@@ -620,6 +1841,49 @@ def test_plan_provision_status_destroy_full_cycle(tmp_path: Path) -> None:
     observation = status_reply["result"]["observation"]
     assert observation["state"] == "aligned", observation["drift_codes"]
     assert all(not item["dirty"] for item in observation["components"])
+
+    recover_payload = {
+        "operation_id": "recover-e2e-repair-base",
+        "bundle_path": str(staging),
+        "plan": plan,
+        "receipt": receipt,
+        "expected_wip_summary_digest": observation["wip_summary_digest"],
+        "prior_operation": {
+            "operation_id": "repair-e2e-prior",
+            "operation_kind": "repair",
+            "force": False,
+            "claim_digest": "a" * 64,
+        },
+    }
+    code, recover_reply, stderr = _call(project, "recover", recover_payload)
+    assert code == 0, stderr
+    assert recover_reply is not None
+    assert recover_reply["result"]["recovery"]["resolution"] == "ready"
+    code, replay_reply, stderr = _call(project, "recover", recover_payload)
+    assert code == 0, stderr
+    assert replay_reply == recover_reply
+
+    prior_destroy_id = "destroy-e2e-prior-stage"
+    destroy_stage = scenario_root / f".destroying-{prior_destroy_id}"
+    os.replace(staging, destroy_stage)
+    destroy_recover_payload = {
+        **recover_payload,
+        "operation_id": "recover-e2e-destroy-stage",
+        "prior_operation": {
+            "operation_id": prior_destroy_id,
+            "operation_kind": "destroy",
+            "force": False,
+            "claim_digest": "b" * 64,
+        },
+    }
+    code, recover_reply, stderr = _call(
+        project, "recover", destroy_recover_payload
+    )
+    assert code == 0, stderr
+    assert recover_reply is not None
+    assert recover_reply["result"]["recovery"]["resolution"] == "ready"
+    assert staging.is_dir()
+    assert not destroy_stage.exists()
 
     # Scenario-local edits surface as WIP, and the WIP fence then blocks a
     # destroy that presents the stale digest.

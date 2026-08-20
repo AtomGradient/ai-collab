@@ -1222,7 +1222,7 @@ private struct StateBadge: View {
         case "stopped", "detached", "not_requested":
             .gray
         case "starting", "stopping", "recovering", "repairing", "replacing",
-             "queued", "pending":
+             "destroying", "queued", "pending":
             .blue
         case "degraded", "re-plan required", "blocked", "not_determined":
             .orange
@@ -1256,6 +1256,8 @@ private struct ScenarioRoomCard: View {
             .orange
         case "provision_failed", "failed":
             .red
+        case "repairing", "destroying":
+            .blue
         default:
             .gray
         }

@@ -162,9 +162,9 @@ final class HarnessViewModel: ObservableObject {
         case "starting": "Starting"
         case "stopping": "Stopping"
         case "recovering": "Recovering"
-        case "repairing": "Repairing"
+        case "repairing": "Resuming repair"
         case "replacing": "Replacing"
-        case "destroying": "Deleting"
+        case "destroying": "Resuming deletion"
         default: state.replacingOccurrences(of: "_", with: " ").capitalized
         }
     }

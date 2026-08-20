@@ -964,8 +964,22 @@ class ProjectRegistry:
             return operation_id, result
 
     def collaboration_templates(self, project_instance_id: str) -> dict[str, Any]:
-        """Load project-provided team/policy data without exposing its root."""
+        """Return the current project catalog, preferring its frozen render."""
 
+        render = self.resolved_render(project_instance_id)
+        collaboration = (
+            render.get("collaboration") if isinstance(render, dict) else None
+        )
+        if isinstance(collaboration, dict) and (
+            "registry_snapshot" in collaboration
+            or "registry_snapshot_digest" in collaboration
+        ):
+            return self.collaboration_templates_from_render(render)
+
+        # v0.1.6.1 registrations, plus prerelease v0.1.7 state created before
+        # embedded catalogs existed, have only a source pointer. Keep that
+        # compatibility path until a successful reconciliation refreshes the
+        # current render. Every newly resolved render is self-contained.
         if self.adapter is None:
             raise ProjectError(
                 "project.adapter-unavailable",
@@ -991,6 +1005,39 @@ class ProjectRegistry:
                 exc.retryable,
             ) from exc
         templates = observed.get("templates") if isinstance(observed, dict) else None
+        return self._validated_collaboration_templates(templates)
+
+    @classmethod
+    def collaboration_templates_from_render(
+        cls, render: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Read a bounded path-free catalog from one immutable project render."""
+
+        cls._validate_render(render)
+        collaboration = render.get("collaboration")
+        if not isinstance(collaboration, dict):
+            raise ProjectError(
+                "project.state-invalid", "collaboration snapshot differs"
+            )
+        registry = collaboration.get("registry_snapshot")
+        registry_digest = collaboration.get("registry_snapshot_digest")
+        if (
+            not isinstance(registry, dict)
+            or set(registry) != {"schema_version", "templates"}
+            or registry.get("schema_version") != 1
+            or not cls._is_sha256(registry_digest)
+            or canonical_json_sha256(registry) != registry_digest
+            or len(canonical_json_bytes(registry)) > 512 * 1024
+        ):
+            raise ProjectError(
+                "project.state-invalid", "collaboration snapshot differs"
+            )
+        return cls._validated_collaboration_templates(registry.get("templates"))
+
+    @classmethod
+    def _validated_collaboration_templates(
+        cls, templates: Any
+    ) -> dict[str, Any]:
         if (
             not isinstance(templates, list)
             or not templates
@@ -1002,7 +1049,7 @@ class ProjectRegistry:
         validated: list[dict[str, Any]] = []
         template_ids: set[str] = set()
         for value in templates:
-            template = self._validate_collaboration_template(value)
+            template = cls._validate_collaboration_template(value)
             if template["template_id"] in template_ids:
                 raise ProjectError(
                     "project.adapter-invalid", "collaboration template identity differs"

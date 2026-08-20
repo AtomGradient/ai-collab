@@ -12,7 +12,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Callable, Iterator, Mapping
 
 import pytest
 
@@ -20,10 +20,17 @@ from ai_collab import cli as cli_main
 from ai_collab.client import HarnessClient, HarnessClientError
 from ai_collab.host import HarnessHost
 from ai_collab.protocol import canonical_json_sha256
+from ai_collab.security import SecurityCoordinator
+from ai_collab.workspace import WorkspaceCoordinator
 
 
 PROJECT_ID = "edgestudio-local"
 SCENARIO_ID = "m1-happy-path"
+_BUILTIN_COLLABORATION_REGISTRY = json.loads(
+    (Path(__file__).resolve().parents[1] / "ai_collab_team_policies.json").read_text(
+        encoding="utf-8"
+    )
+)
 PROJECT_RENDER = {
     "render_contract_version": 1,
     "source": {"kind": "fileless", "intent_schema_version": None, "source_digest": "1" * 64},
@@ -38,7 +45,14 @@ PROJECT_RENDER = {
     "repo_manifest": {"schema_version": 1, "project_key": PROJECT_ID, "repos": []},
     "repo_manifest_digest": "2" * 64,
     "gate": {"kind": "builtin", "profile_id": "builtin.standard-v1"},
-    "collaboration": {"kind": "builtin", "profile_id": "builtin.standard-v1"},
+    "collaboration": {
+        "kind": "builtin",
+        "profile_id": "builtin.standard-v1",
+        "registry_snapshot": _BUILTIN_COLLABORATION_REGISTRY,
+        "registry_snapshot_digest": canonical_json_sha256(
+            _BUILTIN_COLLABORATION_REGISTRY
+        ),
+    },
     "availability": {"status": "ready", "observations": [], "changes": [], "warnings": []},
 }
 PROJECT_RENDER["availability"]["fingerprint"] = canonical_json_sha256(  # type: ignore[index]
@@ -51,7 +65,11 @@ PROJECT_DIGEST = PROJECT_RENDER["render_digest"]
 
 
 @contextmanager
-def running_host(state_root: Path) -> Iterator[tuple[HarnessHost, HarnessClient]]:
+def running_host(
+    state_root: Path,
+    *,
+    configure: Callable[[HarnessHost], None] | None = None,
+) -> Iterator[tuple[HarnessHost, HarnessClient]]:
     with tempfile.TemporaryDirectory(prefix="ai-collab-m1-") as runtime_directory:
         socket_path = Path(runtime_directory) / "host.sock"
         host = HarnessHost(state_root, socket_path)
@@ -61,6 +79,8 @@ def running_host(state_root: Path) -> Iterator[tuple[HarnessHost, HarnessClient]
             if digest in {None, PROJECT_DIGEST}
             else None
         )
+        if configure is not None:
+            configure(host)
         errors: list[BaseException] = []
 
         def run() -> None:
@@ -218,6 +238,7 @@ def test_registry_concurrent_scenario_creates_preserve_all_declared_records(
                 project_instance_id=PROJECT_ID,
                 scenario_id=scenario_id,
                 project_binding_digest=PROJECT_DIGEST,
+                project_contract_snapshot=PROJECT_RENDER,
             )
             return result["scenario"]
 
@@ -356,6 +377,129 @@ def test_reused_request_with_different_payload_fails_without_mutation(tmp_path: 
             )
         assert exc.value.code == "operation.precondition-failed"
         assert (state_root / "host-state.json").read_bytes() == before
+
+
+def test_scenario_destroy_namespaces_its_workspace_join_request(
+    tmp_path: Path,
+) -> None:
+    class PlanOnlyWorkspaceAdapter:
+        def call(
+            self, operation: str, payload: Mapping[str, Any]
+        ) -> dict[str, Any]:
+            assert operation == "plan"
+            plan = {
+                "plan_id": f"plan:{payload['operation_id']}",
+                "operation_id": payload["operation_id"],
+                "scenario": payload["scenario"],
+                "project_descriptor_digest": PROJECT_DIGEST,
+                "components": [],
+            }
+            return {"descriptors": [], "plan": plan}
+
+    class ApprovingSecurityAdapter:
+        def call(
+            self,
+            operation: str,
+            payload: Mapping[str, Any],
+            *,
+            timeout_seconds: float = 300,
+        ) -> dict[str, Any]:
+            del timeout_seconds
+            if operation == "observe":
+                return {
+                    "observations": [
+                        {
+                            "permission_id": permission_id,
+                            "subject_digest": "a" * 64,
+                            "status": "granted",
+                            "observed_at_epoch_ms": payload[
+                                "captured_at_epoch_ms"
+                            ],
+                            "valid_until_epoch_ms": payload[
+                                "captured_at_epoch_ms"
+                            ]
+                            + 2_000,
+                            "evidence_digest": "b" * 64,
+                            "provider_error_code": None,
+                            "remediation_ref": None,
+                        }
+                        for permission_id in payload["permission_ids"]
+                    ]
+                }
+            assert operation == "present"
+            challenge = payload["challenge"]
+            return {
+                "challenge_digest": canonical_json_sha256(challenge),
+                "outcome": "approved",
+                "decided_at_epoch_ms": challenge["issued_at_epoch_ms"],
+                "presenter_instance_digest": "c" * 64,
+                "decision_evidence_digest": "d" * 64,
+                "reason_code": None,
+            }
+
+    state_root = tmp_path / "state"
+
+    def configure(host: HarnessHost) -> None:
+        host.workspace = WorkspaceCoordinator(  # type: ignore[arg-type]
+            state_root, PlanOnlyWorkspaceAdapter()
+        )
+        host.security = SecurityCoordinator(  # type: ignore[arg-type]
+            state_root, ApprovingSecurityAdapter()
+        )
+
+    public_request_id = "shared-public-request"
+    with running_host(state_root, configure=configure) as (first_host, client):
+        created = client.create_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            project_binding_digest=PROJECT_DIGEST,
+            request_id="namespace-create",
+        )["scenario"]
+        planned = client.plan_workspace(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=created["scenario_generation"],
+            scenario_state_revision=created["state_revision"],
+            requested_component_ids=[],
+            project_payload={},
+            request_id=public_request_id,
+        )["workspace"]
+        assert planned["state"] == "planned"
+
+        destroyed = client.destroy_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=created["scenario_generation"],
+            scenario_state_revision=created["state_revision"],
+            request_id=public_request_id,
+        )
+        assert destroyed["unregistered"] is True
+
+        workspace_state = json.loads(
+            (state_root / "workspace-execution.json").read_text(encoding="utf-8")
+        )
+        request_ids = set(workspace_state["requests"])
+        workspace_join_ids = {
+            request_id
+            for request_id in request_ids
+            if request_id.startswith("!store-workspace:")
+        }
+        assert public_request_id in request_ids
+        assert len(workspace_join_ids) == 1
+        assert public_request_id not in workspace_join_ids
+        assert workspace_state["requests"][public_request_id]["status"] == (
+            "completed"
+        )
+        assert workspace_state["requests"][workspace_join_ids.pop()][
+            "status"
+        ] == "completed"
+
+    with running_host(state_root, configure=configure) as (second_host, client):
+        assert second_host.host_generation == first_host.host_generation + 1
+        assert client.host_status()["scenario_count"] == 0
+        assert client.list_scenarios(project_instance_id=PROJECT_ID) == {
+            "scenarios": []
+        }
 
 
 def test_wrong_capability_is_rejected_without_state_mutation(tmp_path: Path) -> None:

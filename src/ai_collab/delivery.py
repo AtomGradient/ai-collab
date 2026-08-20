@@ -477,6 +477,9 @@ class DeliveryCoordinator:
         template: Mapping[str, Any],
         plan_digest: str,
     ) -> tuple[str, dict[str, Any]]:
+        replay = self.replay_request(request_id, request_digest)
+        if replay is not None:
+            return replay
         _, planned = self.plan_policy(
             project_instance_id=project_instance_id,
             scenario_id=scenario_id,
@@ -502,6 +505,15 @@ class DeliveryCoordinator:
             scenario_state_revision=scenario_state_revision,
             policy_pack=plan["policy_pack"],
         )
+
+    def replay_request(
+        self, request_id: str, request_digest: str
+    ) -> tuple[str, dict[str, Any]] | None:
+        """Replay a durable delivery mutation before mutable plan inputs."""
+
+        with self._lock:
+            state = self._read_state()
+            return self._previous_request(state, request_id, request_digest)
 
     def send_message(
         self,

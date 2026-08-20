@@ -32,6 +32,11 @@ from ai_collab.store import ScenarioStore
 PROJECT_ID = "project-one"
 SCENARIO_ID = "scenario-one"
 PARTICIPANT_ID = "participant-one"
+_BUILTIN_COLLABORATION_REGISTRY = json.loads(
+    (Path(__file__).resolve().parents[1] / "ai_collab_team_policies.json").read_text(
+        encoding="utf-8"
+    )
+)
 PROJECT_RENDER: dict[str, Any] = {
     "render_contract_version": 1,
     "source": {
@@ -50,7 +55,14 @@ PROJECT_RENDER: dict[str, Any] = {
     "repo_manifest": {"schema_version": 1, "project_key": PROJECT_ID, "repos": []},
     "repo_manifest_digest": "2" * 64,
     "gate": {"kind": "builtin", "profile_id": "builtin.standard-v1"},
-    "collaboration": {"kind": "builtin", "profile_id": "builtin.standard-v1"},
+    "collaboration": {
+        "kind": "builtin",
+        "profile_id": "builtin.standard-v1",
+        "registry_snapshot": _BUILTIN_COLLABORATION_REGISTRY,
+        "registry_snapshot_digest": canonical_json_sha256(
+            _BUILTIN_COLLABORATION_REGISTRY
+        ),
+    },
     "availability": {
         "status": "ready",
         "observations": [],

@@ -4,7 +4,13 @@
 
 from __future__ import annotations
 
+import importlib
 import json
+import os
+import stat
+import subprocess
+import sys
+import time
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -23,6 +29,10 @@ from ai_collab.security import (
     SecurityCoordinator,
     SecurityError,
 )
+
+
+ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_SECURITY_ADAPTER = ROOT / "scripts" / "ai_collab_default_security_adapter.py"
 
 
 class FakeSecurityAdapter:
@@ -135,6 +145,108 @@ def _authorize(
     return value
 
 
+def _call_default_security_adapter(
+    subject: Mapping[str, Any],
+) -> subprocess.CompletedProcess[bytes]:
+    request = {
+        "security_adapter_protocol_version": 1,
+        "adapter_id": "ai-collab-security-adapter",
+        "operation": "observe",
+        "payload": {
+            "permission_ids": ["permission.project-storage"],
+            "private_subject": dict(subject),
+            "captured_at_epoch_ms": int(time.time() * 1000),
+        },
+    }
+    return subprocess.run(
+        [sys.executable, str(DEFAULT_SECURITY_ADAPTER)],
+        input=json.dumps(request).encode("utf-8"),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=dict(os.environ),
+        check=False,
+    )
+
+
+def _observe_with_default_adapter(subject: Mapping[str, Any]) -> dict[str, Any]:
+    completed = _call_default_security_adapter(subject)
+    assert completed.returncode == 0, completed.stderr.decode("utf-8")
+    reply = json.loads(completed.stdout)
+    assert reply["outcome"] == "completed"
+    return reply["result"]["observations"][0]
+
+
+def _recovery_inventory_subject(
+    workspace: Path,
+    *,
+    prior_operation_kind: str = "destroy",
+) -> dict[str, Any]:
+    root = workspace.lstat()
+    observed: list[dict[str, Any]] = []
+    for entry in sorted(workspace.iterdir(), key=lambda item: item.name):
+        details = entry.lstat()
+        observed.append(
+            {
+                "name": entry.name,
+                "device": details.st_dev,
+                "inode": details.st_ino,
+                "uid": details.st_uid,
+                "mode": stat.S_IMODE(details.st_mode),
+                "kind": (
+                    "directory"
+                    if stat.S_ISDIR(details.st_mode)
+                    else "regular"
+                    if stat.S_ISREG(details.st_mode)
+                    else "other"
+                ),
+            }
+        )
+    path_identity_digest = canonical_json_sha256(
+        {
+            "workspace_id": workspace.name,
+            "device": root.st_dev,
+            "inode": root.st_ino,
+            "uid": root.st_uid,
+            "mode": stat.S_IMODE(root.st_mode),
+        }
+    )
+    return {
+        "subject_kind": "project-storage-recovery",
+        "workspace_path": str(workspace),
+        "workspace_id": workspace.name,
+        "expected_inventory_digest": canonical_json_sha256(
+            {
+                "workspace_id": workspace.name,
+                "workspace_path_identity_digest": path_identity_digest,
+                "entries": observed,
+            }
+        ),
+        "allowed_entry_names": [item["name"] for item in observed],
+        "prior_operation_kind": prior_operation_kind,
+        "prior_operation_claim_digest": "c" * 64,
+    }
+
+
+def _recovery_workspace(tmp_path: Path) -> tuple[Path, Path]:
+    workspace = tmp_path / "workspace-recovery-proof"
+    workspace.mkdir(mode=0o700)
+    bundle = workspace / "bundle"
+    bundle.mkdir(mode=0o700)
+    return workspace, bundle
+
+
+def _assert_default_adapter_fails_closed(subject: Mapping[str, Any]) -> None:
+    completed = _call_default_security_adapter(subject)
+    if completed.returncode != 0:
+        assert completed.stdout == b""
+        assert completed.stderr == b""
+        return
+    reply = json.loads(completed.stdout)
+    observation = reply["result"]["observations"][0]
+    assert observation["status"] == "denied"
+    assert observation["provider_error_code"] == "project-storage.subject-not-proven"
+
+
 def test_runtime_matrix_exactly_covers_registry_and_high_risk_bindings(
     tmp_path: Path,
 ) -> None:
@@ -155,6 +267,246 @@ def test_runtime_matrix_exactly_covers_registry_and_high_risk_bindings(
             assert value["risk_class"] == "high"
             assert value["required_permission_ids"]
             assert value["effect_preview_schema_digest"] is not None
+
+
+def test_default_security_adapter_proves_only_an_exact_empty_workspace_husk(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace-empty-proof"
+    workspace.mkdir(mode=0o700)
+    details = workspace.lstat()
+    husk_digest = canonical_json_sha256(
+        {
+            "path_identity": {
+                "workspace_id": workspace.name,
+                "device": details.st_dev,
+                "inode": details.st_ino,
+                "uid": details.st_uid,
+                "mode": stat.S_IMODE(details.st_mode),
+            },
+            "entries": [],
+        }
+    )
+    subject = {
+        "subject_kind": "empty-project-storage",
+        "workspace_path": str(workspace),
+        "expected_binding_state": "absent",
+        "expected_husk_digest": husk_digest,
+    }
+
+    granted = _observe_with_default_adapter(subject)
+    assert granted["status"] == "granted"
+    assert granted["provider_error_code"] is None
+
+    unexpected = workspace / "never-delete.txt"
+    unexpected.write_text("preserve\n", encoding="utf-8")
+    denied = _observe_with_default_adapter(subject)
+    assert denied["status"] == "denied"
+    assert denied["provider_error_code"] == "project-storage.subject-not-proven"
+    assert unexpected.read_text(encoding="utf-8") == "preserve\n"
+
+    original = tmp_path / "workspace-original-proof"
+    workspace.rename(original)
+    workspace.mkdir(mode=0o700)
+    replaced = _observe_with_default_adapter(subject)
+    assert replaced["status"] == "denied"
+    assert replaced["provider_error_code"] == "project-storage.subject-not-proven"
+    assert (original / unexpected.name).read_text(encoding="utf-8") == "preserve\n"
+
+
+@pytest.mark.parametrize("prior_operation_kind", ["destroy", "repair"])
+def test_default_security_adapter_allows_two_exact_recovery_inventory_observations(
+    tmp_path: Path,
+    prior_operation_kind: str,
+) -> None:
+    workspace, bundle = _recovery_workspace(tmp_path)
+    sentinel = bundle / "employee-wip.txt"
+    sentinel.write_text("preserve\n", encoding="utf-8")
+    subject = _recovery_inventory_subject(
+        workspace, prior_operation_kind=prior_operation_kind
+    )
+
+    first = _observe_with_default_adapter(subject)
+    second = _observe_with_default_adapter(subject)
+
+    assert first["status"] == second["status"] == "granted"
+    assert first["provider_error_code"] is None
+    assert second["provider_error_code"] is None
+    assert first["subject_digest"] == second["subject_digest"]
+    assert first["evidence_digest"] == second["evidence_digest"]
+    assert sentinel.read_text(encoding="utf-8") == "preserve\n"
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "path",
+        "inventory",
+        "root-inode",
+        "entry-inode",
+        "root-mode",
+        "entry-mode",
+        "type",
+        "symlink",
+    ],
+)
+def test_default_security_adapter_recovery_inventory_drift_fails_closed(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    workspace, bundle = _recovery_workspace(tmp_path)
+    sentinel = bundle / "employee-wip.txt"
+    sentinel.write_text("preserve\n", encoding="utf-8")
+    subject = _recovery_inventory_subject(workspace)
+    assert _observe_with_default_adapter(subject)["status"] == "granted"
+
+    preserved = bundle
+    if mutation == "path":
+        preserved = tmp_path / "workspace-recovery-moved"
+        workspace.rename(preserved)
+    elif mutation == "inventory":
+        extra = workspace / "opaque-owner-entry"
+        extra.mkdir(mode=0o700)
+    elif mutation == "root-inode":
+        original_root = tmp_path / "original-workspace-inode"
+        workspace.rename(original_root)
+        workspace.mkdir(mode=0o700)
+        (original_root / bundle.name).rename(bundle)
+    elif mutation == "entry-inode":
+        preserved = tmp_path / "original-bundle-inode"
+        bundle.rename(preserved)
+        bundle.mkdir(mode=0o700)
+    elif mutation == "root-mode":
+        workspace.chmod(0o755)
+    elif mutation == "entry-mode":
+        bundle.chmod(0o755)
+    elif mutation == "type":
+        preserved = tmp_path / "original-bundle-type"
+        bundle.rename(preserved)
+        bundle.write_text("replacement\n", encoding="utf-8")
+        bundle.chmod(0o600)
+    else:
+        preserved = tmp_path / "original-bundle-symlink"
+        bundle.rename(preserved)
+        bundle.symlink_to(preserved, target_is_directory=True)
+
+    _assert_default_adapter_fails_closed(subject)
+
+    if mutation == "path":
+        assert (preserved / "bundle" / sentinel.name).read_text(
+            encoding="utf-8"
+        ) == "preserve\n"
+    elif mutation in {"entry-inode", "type", "symlink"}:
+        assert (preserved / sentinel.name).read_text(encoding="utf-8") == "preserve\n"
+    else:
+        assert sentinel.read_text(encoding="utf-8") == "preserve\n"
+
+
+@pytest.mark.parametrize("ownership_scope", ["root", "entry"])
+def test_default_security_adapter_recovery_uid_mismatch_or_unowned_entry_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ownership_scope: str,
+) -> None:
+    workspace, bundle = _recovery_workspace(tmp_path)
+    sentinel = bundle / "employee-wip.txt"
+    sentinel.write_text("preserve\n", encoding="utf-8")
+    subject = _recovery_inventory_subject(workspace)
+    monkeypatch.syspath_prepend(str(ROOT / "scripts"))
+    adapter = importlib.import_module("ai_collab_default_security_adapter")
+    assert adapter._project_recovery_subject(subject)[2] is None
+    actual_uid = os.getuid()
+    if ownership_scope == "root":
+        monkeypatch.setattr(adapter.os, "getuid", lambda: actual_uid + 1)
+    else:
+        original_lstat = adapter.Path.lstat
+
+        def lstat_with_unowned_entry(path: Path) -> os.stat_result:
+            details = original_lstat(path)
+            if path == bundle:
+                values = list(details)
+                values[4] = actual_uid + 1
+                return os.stat_result(values)
+            return details
+
+        monkeypatch.setattr(adapter.Path, "lstat", lstat_with_unowned_entry)
+
+    with pytest.raises(adapter.AdapterError):
+        adapter._project_recovery_subject(subject)
+
+    assert sentinel.read_text(encoding="utf-8") == "preserve\n"
+
+
+@pytest.mark.parametrize(
+    "field_drift",
+    [
+        "extra-field",
+        "missing-field",
+        "subject-kind",
+        "workspace-id",
+        "inventory-digest",
+        "allowed-names",
+        "duplicate-names",
+        "prior-kind",
+        "claim-digest",
+    ],
+)
+def test_default_security_adapter_recovery_subject_field_drift_fails_closed(
+    tmp_path: Path,
+    field_drift: str,
+) -> None:
+    workspace, _bundle = _recovery_workspace(tmp_path)
+    subject = _recovery_inventory_subject(workspace)
+    assert _observe_with_default_adapter(subject)["status"] == "granted"
+    drifted = dict(subject)
+    if field_drift == "extra-field":
+        drifted["unexpected"] = "reject"
+    elif field_drift == "missing-field":
+        drifted.pop("prior_operation_claim_digest")
+    elif field_drift == "subject-kind":
+        drifted["subject_kind"] = "project-storage"
+    elif field_drift == "workspace-id":
+        drifted["workspace_id"] = "workspace-other"
+    elif field_drift == "inventory-digest":
+        drifted["expected_inventory_digest"] = "d" * 64
+    elif field_drift == "allowed-names":
+        drifted["allowed_entry_names"] = []
+    elif field_drift == "duplicate-names":
+        drifted["allowed_entry_names"] = ["bundle", "bundle"]
+    elif field_drift == "prior-kind":
+        drifted["prior_operation_kind"] = "status"
+    else:
+        drifted["prior_operation_claim_digest"] = "not-a-digest"
+
+    _assert_default_adapter_fails_closed(drifted)
+
+
+@pytest.mark.parametrize("field_drift", ["path", "prior-kind", "claim-digest"])
+def test_default_security_adapter_recovery_valid_field_drift_changes_subject_digest(
+    tmp_path: Path,
+    field_drift: str,
+) -> None:
+    parent = tmp_path / "first-parent"
+    parent.mkdir(mode=0o700)
+    workspace, _bundle = _recovery_workspace(parent)
+    subject = _recovery_inventory_subject(workspace)
+    first = _observe_with_default_adapter(subject)
+    drifted = dict(subject)
+    if field_drift == "path":
+        second_parent = tmp_path / "second-parent"
+        second_parent.mkdir(mode=0o700)
+        relocated = second_parent / workspace.name
+        workspace.rename(relocated)
+        drifted["workspace_path"] = str(relocated)
+    elif field_drift == "prior-kind":
+        drifted["prior_operation_kind"] = "repair"
+    else:
+        drifted["prior_operation_claim_digest"] = "d" * 64
+
+    second = _observe_with_default_adapter(drifted)
+
+    assert first["status"] == second["status"] == "granted"
+    assert first["subject_digest"] != second["subject_digest"]
 
 
 @pytest.mark.parametrize("operation", sorted(HIGH_RISK_OPERATIONS))
@@ -271,3 +623,189 @@ def test_consumption_replay_fails_and_restart_marks_unknown_outcome(
         "operation_id": None,
         "result_digest": None,
     }
+
+
+@pytest.mark.parametrize("restart_before_reconcile", [False, True])
+def test_unknown_outcome_reconcile_is_exact_idempotent_and_durable(
+    tmp_path: Path,
+    restart_before_reconcile: bool,
+) -> None:
+    coordinator = SecurityCoordinator(tmp_path, FakeSecurityAdapter())
+    consumption = _authorize(
+        coordinator,
+        _request(
+            "scenario.destroy",
+            request_id=(
+                "reconcile-unknown-existing"
+                if restart_before_reconcile
+                else "reconcile-unknown-none"
+            ),
+        ),
+    )
+    request_digest = consumption["operation_request_digest"]
+    if restart_before_reconcile:
+        coordinator.start_host()
+
+    coordinator.reconcile_unknown_outcome(request_digest)
+    first = json.loads(coordinator.state_path.read_text(encoding="utf-8"))
+    coordinator.reconcile_unknown_outcome(request_digest)
+    second = json.loads(coordinator.state_path.read_text(encoding="utf-8"))
+
+    expected = {
+        "outcome": "unknown",
+        "operation_id": None,
+        "result_digest": None,
+    }
+    assert next(iter(first["chains"].values()))["operation_outcome"] == expected
+    assert second == first
+
+    recovered = SecurityCoordinator(tmp_path, FakeSecurityAdapter())
+    recovered.start_host()
+    assert json.loads(recovered.state_path.read_text(encoding="utf-8")) == second
+
+
+@pytest.mark.parametrize("restart_before_reconcile", [False, True])
+def test_completed_outcome_reconcile_is_exact_idempotent_and_durable(
+    tmp_path: Path,
+    restart_before_reconcile: bool,
+) -> None:
+    coordinator = SecurityCoordinator(tmp_path, FakeSecurityAdapter())
+    consumption = _authorize(
+        coordinator,
+        _request(
+            "scenario.destroy",
+            request_id=(
+                "reconcile-completed-unknown"
+                if restart_before_reconcile
+                else "reconcile-completed-none"
+            ),
+        ),
+    )
+    request_digest = consumption["operation_request_digest"]
+    if restart_before_reconcile:
+        coordinator.start_host()
+
+    result = {"scenario": {"observed_state": "destroyed"}, "unregistered": True}
+    coordinator.reconcile_completed_outcome(
+        request_digest,
+        operation_id="operation-completed",
+        result=result,
+    )
+    first = json.loads(coordinator.state_path.read_text(encoding="utf-8"))
+    coordinator.reconcile_completed_outcome(
+        request_digest,
+        operation_id="operation-completed",
+        result=result,
+    )
+    second = json.loads(coordinator.state_path.read_text(encoding="utf-8"))
+
+    expected = {
+        "outcome": "completed",
+        "operation_id": "operation-completed",
+        "result_digest": canonical_json_sha256(result),
+    }
+    assert next(iter(first["chains"].values()))["operation_outcome"] == expected
+    assert second == first
+
+    recovered = SecurityCoordinator(tmp_path, FakeSecurityAdapter())
+    recovered.start_host()
+    assert json.loads(recovered.state_path.read_text(encoding="utf-8")) == second
+
+
+@pytest.mark.parametrize("restart_before_reconcile", [False, True])
+def test_failed_outcome_reconcile_is_exact_idempotent_and_durable(
+    tmp_path: Path,
+    restart_before_reconcile: bool,
+) -> None:
+    coordinator = SecurityCoordinator(tmp_path, FakeSecurityAdapter())
+    consumption = _authorize(
+        coordinator,
+        _request(
+            "scenario.destroy",
+            request_id=(
+                "reconcile-failed-unknown"
+                if restart_before_reconcile
+                else "reconcile-failed-none"
+            ),
+        ),
+    )
+    request_digest = consumption["operation_request_digest"]
+    if restart_before_reconcile:
+        coordinator.start_host()
+
+    coordinator.reconcile_failed_outcome(request_digest)
+    first = json.loads(coordinator.state_path.read_text(encoding="utf-8"))
+    coordinator.reconcile_failed_outcome(request_digest)
+    second = json.loads(coordinator.state_path.read_text(encoding="utf-8"))
+
+    expected = {
+        "outcome": "failed",
+        "operation_id": None,
+        "result_digest": None,
+    }
+    assert next(iter(first["chains"].values()))["operation_outcome"] == expected
+    assert second == first
+
+    recovered = SecurityCoordinator(tmp_path, FakeSecurityAdapter())
+    recovered.start_host()
+    assert json.loads(recovered.state_path.read_text(encoding="utf-8")) == second
+
+
+@pytest.mark.parametrize("terminal_outcome", ["completed", "failed"])
+def test_unknown_outcome_cannot_overwrite_a_terminal_reconcile(
+    tmp_path: Path,
+    terminal_outcome: str,
+) -> None:
+    coordinator = SecurityCoordinator(tmp_path, FakeSecurityAdapter())
+    consumption = _authorize(
+        coordinator,
+        _request(
+            "scenario.destroy",
+            request_id=f"reconcile-{terminal_outcome}-is-terminal",
+        ),
+    )
+    request_digest = consumption["operation_request_digest"]
+    if terminal_outcome == "completed":
+        coordinator.reconcile_completed_outcome(
+            request_digest,
+            operation_id="operation-terminal",
+            result={"unregistered": True},
+        )
+    else:
+        coordinator.reconcile_failed_outcome(request_digest)
+    before = json.loads(coordinator.state_path.read_text(encoding="utf-8"))
+
+    with pytest.raises(SecurityError, match="outcome fence differs") as caught:
+        coordinator.reconcile_unknown_outcome(request_digest)
+    assert caught.value.code == "security.outcome-invalid"
+    assert json.loads(coordinator.state_path.read_text(encoding="utf-8")) == before
+
+    recovered = SecurityCoordinator(tmp_path, FakeSecurityAdapter())
+    recovered.start_host()
+    assert json.loads(recovered.state_path.read_text(encoding="utf-8")) == before
+
+
+def test_failed_outcome_cannot_be_overwritten_by_completed_reconcile(
+    tmp_path: Path,
+) -> None:
+    coordinator = SecurityCoordinator(tmp_path, FakeSecurityAdapter())
+    consumption = _authorize(
+        coordinator,
+        _request("scenario.destroy", request_id="reconcile-failed-is-terminal"),
+    )
+    request_digest = consumption["operation_request_digest"]
+    coordinator.reconcile_failed_outcome(request_digest)
+    before = json.loads(coordinator.state_path.read_text(encoding="utf-8"))
+
+    with pytest.raises(SecurityError, match="outcome fence differs") as caught:
+        coordinator.reconcile_completed_outcome(
+            request_digest,
+            operation_id="operation-must-not-replace-failure",
+            result={"unregistered": True},
+        )
+    assert caught.value.code == "security.outcome-invalid"
+    assert json.loads(coordinator.state_path.read_text(encoding="utf-8")) == before
+
+    recovered = SecurityCoordinator(tmp_path, FakeSecurityAdapter())
+    recovered.start_host()
+    assert json.loads(recovered.state_path.read_text(encoding="utf-8")) == before

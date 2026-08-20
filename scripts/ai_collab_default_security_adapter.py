@@ -249,6 +249,199 @@ def _project_subject(subject: Mapping[str, Any]) -> tuple[str, str, str | None]:
     )
 
 
+def _empty_project_subject(
+    subject: Mapping[str, Any],
+) -> tuple[str, str, str | None]:
+    """Prove an unprovisioned Scenario owns an exact empty storage husk."""
+
+    expected_fields = {
+        "subject_kind",
+        "workspace_path",
+        "expected_binding_state",
+        "expected_husk_digest",
+    }
+    binding_state = subject.get("expected_binding_state")
+    if (
+        set(subject) != expected_fields
+        or subject.get("subject_kind") != "empty-project-storage"
+        or binding_state not in {"absent", "planned", "provision_failed"}
+        or not _sha256(subject.get("expected_husk_digest"))
+    ):
+        raise AdapterError("private empty project subject differs")
+    raw_workspace = subject["workspace_path"]
+    if not isinstance(raw_workspace, str):
+        raise AdapterError("private empty project subject differs")
+    supplied = Path(raw_workspace)
+    if not supplied.is_absolute() or not supplied.name.startswith("workspace-"):
+        raise AdapterError("private empty project binding is invalid")
+    try:
+        details = supplied.lstat()
+        workspace = supplied.resolve(strict=True)
+        entries = list(supplied.iterdir())
+    except OSError as exc:
+        raise AdapterError("private empty project binding is invalid") from exc
+    if (
+        stat.S_ISLNK(details.st_mode)
+        or not stat.S_ISDIR(details.st_mode)
+        or workspace != supplied
+        or details.st_uid != os.getuid()
+        or stat.S_IMODE(details.st_mode) != 0o700
+    ):
+        raise AdapterError("private empty project binding is invalid")
+    observed_husk_digest = digest(
+        {
+            "path_identity": {
+                "workspace_id": workspace.name,
+                "device": details.st_dev,
+                "inode": details.st_ino,
+                "uid": details.st_uid,
+                "mode": stat.S_IMODE(details.st_mode),
+            },
+            "entries": [],
+        }
+    )
+    exact_empty = (
+        not entries
+        and observed_husk_digest == subject["expected_husk_digest"]
+    )
+    redacted_subject = {
+        "subject_kind": "empty-project-storage",
+        "workspace_path_digest": digest({"workspace_path": str(workspace)}),
+        "expected_binding_state": binding_state,
+        "husk_digest": observed_husk_digest,
+    }
+    evidence = {
+        "subject_digest": digest(redacted_subject),
+        "workspace_state": "unprovisioned",
+        "binding_state": binding_state,
+        "entry_count": len(entries),
+        "husk_digest": observed_husk_digest,
+    }
+    return (
+        digest(redacted_subject),
+        digest(evidence),
+        None if exact_empty else "project-storage.subject-not-proven",
+    )
+
+
+def _project_recovery_subject(
+    subject: Mapping[str, Any],
+) -> tuple[str, str, str | None]:
+    """Bind confirmation to one exact owned recovery inventory."""
+
+    expected_fields = {
+        "subject_kind",
+        "workspace_path",
+        "workspace_id",
+        "expected_inventory_digest",
+        "allowed_entry_names",
+        "prior_operation_kind",
+        "prior_operation_claim_digest",
+    }
+    allowed_names = subject.get("allowed_entry_names")
+    prior_kind = subject.get("prior_operation_kind")
+    workspace_id = subject.get("workspace_id")
+    if (
+        set(subject) != expected_fields
+        or subject.get("subject_kind") != "project-storage-recovery"
+        or prior_kind not in {"destroy", "repair"}
+        or not isinstance(workspace_id, str)
+        or not workspace_id.startswith("workspace-")
+        or Path(workspace_id).name != workspace_id
+        or not _sha256(subject.get("expected_inventory_digest"))
+        or not _sha256(subject.get("prior_operation_claim_digest"))
+        or not isinstance(allowed_names, list)
+        or allowed_names != sorted(set(allowed_names))
+        or any(not isinstance(name, str) or Path(name).name != name for name in allowed_names)
+    ):
+        raise AdapterError("private project recovery subject differs")
+    raw_workspace = subject["workspace_path"]
+    if not isinstance(raw_workspace, str):
+        raise AdapterError("private project recovery subject differs")
+    supplied = Path(raw_workspace)
+    if not supplied.is_absolute() or supplied.name != workspace_id:
+        raise AdapterError("private project recovery binding is invalid")
+    try:
+        root_details = supplied.lstat()
+        workspace = supplied.resolve(strict=True)
+        entries = sorted(supplied.iterdir(), key=lambda item: item.name)
+        observed: list[dict[str, Any]] = []
+        for entry in entries:
+            details = entry.lstat()
+            if (
+                stat.S_ISLNK(details.st_mode)
+                or details.st_uid != os.getuid()
+                or (
+                    stat.S_ISDIR(details.st_mode)
+                    and stat.S_IMODE(details.st_mode) != 0o700
+                )
+            ):
+                raise AdapterError("private project recovery inventory differs")
+            observed.append(
+                {
+                    "name": entry.name,
+                    "device": details.st_dev,
+                    "inode": details.st_ino,
+                    "uid": details.st_uid,
+                    "mode": stat.S_IMODE(details.st_mode),
+                    "kind": (
+                        "directory"
+                        if stat.S_ISDIR(details.st_mode)
+                        else "regular"
+                        if stat.S_ISREG(details.st_mode)
+                        else "other"
+                    ),
+                }
+            )
+    except OSError as exc:
+        raise AdapterError("private project recovery binding is invalid") from exc
+    if (
+        stat.S_ISLNK(root_details.st_mode)
+        or not stat.S_ISDIR(root_details.st_mode)
+        or workspace != supplied
+        or root_details.st_uid != os.getuid()
+        or stat.S_IMODE(root_details.st_mode) != 0o700
+    ):
+        raise AdapterError("private project recovery binding is invalid")
+    inventory_digest = digest(
+        {
+            "workspace_id": workspace_id,
+            "workspace_path_identity_digest": digest(
+                {
+                    "workspace_id": workspace_id,
+                    "device": root_details.st_dev,
+                    "inode": root_details.st_ino,
+                    "uid": root_details.st_uid,
+                    "mode": stat.S_IMODE(root_details.st_mode),
+                }
+            ),
+            "entries": observed,
+        }
+    )
+    exact = (
+        [item["name"] for item in observed] == allowed_names
+        and inventory_digest == subject["expected_inventory_digest"]
+    )
+    redacted = {
+        "subject_kind": "project-storage-recovery",
+        "workspace_path_digest": digest({"workspace_path": str(workspace)}),
+        "workspace_id": workspace_id,
+        "prior_operation_kind": prior_kind,
+        "prior_operation_claim_digest": subject[
+            "prior_operation_claim_digest"
+        ],
+        "inventory_digest": inventory_digest,
+    }
+    evidence = {
+        **redacted,
+        "entry_count": len(observed),
+        "entry_names_digest": digest([item["name"] for item in observed]),
+    }
+    return (
+        digest(redacted),
+        digest(evidence),
+        None if exact else "project-storage.subject-not-proven",
+    )
 def observe(payload: Mapping[str, Any]) -> dict[str, Any]:
     if set(payload) != {
         "permission_ids",
@@ -276,7 +469,16 @@ def observe(payload: Mapping[str, Any]) -> dict[str, Any]:
     }:
         raise AdapterError("permission is unsupported")
     if permission_id == "permission.project-storage":
-        subject_digest, evidence_digest, failure = _project_subject(subject)
+        if subject.get("subject_kind") == "empty-project-storage":
+            subject_digest, evidence_digest, failure = _empty_project_subject(
+                subject
+            )
+        elif subject.get("subject_kind") == "project-storage-recovery":
+            subject_digest, evidence_digest, failure = _project_recovery_subject(
+                subject
+            )
+        else:
+            subject_digest, evidence_digest, failure = _project_subject(subject)
     else:
         expected = (
             "present"

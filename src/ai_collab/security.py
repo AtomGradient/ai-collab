@@ -429,16 +429,13 @@ class SecurityCoordinator:
     def start_host(self) -> None:
         """A consumed chain without a recorded outcome remains spent/unknown."""
 
+        unknown = self._unknown_operation_outcome()
         with self._lock:
             state = self._read_state()
             changed = False
             for chain in state["chains"].values():
                 if chain["status"] == "consumed" and chain["operation_outcome"] is None:
-                    chain["operation_outcome"] = {
-                        "outcome": "unknown",
-                        "operation_id": None,
-                        "result_digest": None,
-                    }
+                    chain["operation_outcome"] = copy.deepcopy(unknown)
                     changed = True
             if changed:
                 state["state_revision"] += 1
@@ -701,6 +698,114 @@ class SecurityCoordinator:
                     canonical_json_sha256(result) if result is not None else None
                 ),
             }
+            state["state_revision"] += 1
+            self._write_state(state)
+
+    @staticmethod
+    def _unknown_operation_outcome() -> dict[str, Any]:
+        return {
+            "outcome": "unknown",
+            "operation_id": None,
+            "result_digest": None,
+        }
+
+    def reconcile_unknown_outcome(
+        self,
+        request_digest: str,
+        *,
+        allow_missing: bool = False,
+    ) -> None:
+        """Persist an exact unresolved outcome without replacing a terminal one."""
+
+        unknown = self._unknown_operation_outcome()
+        with self._lock:
+            state = self._read_state()
+            chain = state["chains"].get(request_digest)
+            if chain is None and allow_missing:
+                return
+            if chain is None or chain.get("status") != "consumed":
+                raise SecurityError(
+                    "security.outcome-invalid", "security outcome fence differs"
+                )
+            previous = chain.get("operation_outcome")
+            if previous == unknown:
+                return
+            if previous is not None and (
+                not isinstance(previous, dict)
+                or previous.get("outcome") != "unknown"
+            ):
+                raise SecurityError(
+                    "security.outcome-invalid", "security outcome fence differs"
+                )
+            chain["operation_outcome"] = unknown
+            state["state_revision"] += 1
+            self._write_state(state)
+
+    def reconcile_completed_outcome(
+        self,
+        request_digest: str,
+        *,
+        operation_id: str,
+        result: Mapping[str, Any],
+        allow_missing: bool = False,
+    ) -> None:
+        """Join an exact durable success after an unknown process outcome."""
+
+        completed = {
+            "outcome": "completed",
+            "operation_id": operation_id,
+            "result_digest": canonical_json_sha256(result),
+        }
+        with self._lock:
+            state = self._read_state()
+            chain = state["chains"].get(request_digest)
+            if chain is None and allow_missing:
+                return
+            if chain is None or chain.get("status") != "consumed":
+                raise SecurityError(
+                    "security.outcome-invalid", "security outcome fence differs"
+                )
+            previous = chain.get("operation_outcome")
+            if previous == completed:
+                return
+            if previous is not None and previous.get("outcome") != "unknown":
+                raise SecurityError(
+                    "security.outcome-invalid", "security outcome fence differs"
+                )
+            chain["operation_outcome"] = completed
+            state["state_revision"] += 1
+            self._write_state(state)
+
+    def reconcile_failed_outcome(
+        self,
+        request_digest: str,
+        *,
+        allow_missing: bool = False,
+    ) -> None:
+        """Close an unknown consumed chain after a proven no-effect abort."""
+
+        failed = {
+            "outcome": "failed",
+            "operation_id": None,
+            "result_digest": None,
+        }
+        with self._lock:
+            state = self._read_state()
+            chain = state["chains"].get(request_digest)
+            if chain is None and allow_missing:
+                return
+            if chain is None or chain.get("status") != "consumed":
+                raise SecurityError(
+                    "security.outcome-invalid", "security outcome fence differs"
+                )
+            previous = chain.get("operation_outcome")
+            if previous == failed:
+                return
+            if previous is not None and previous.get("outcome") != "unknown":
+                raise SecurityError(
+                    "security.outcome-invalid", "security outcome fence differs"
+                )
+            chain["operation_outcome"] = failed
             state["state_revision"] += 1
             self._write_state(state)
 

@@ -299,6 +299,20 @@ final class HarnessViewModelRefusalTests: XCTestCase {
         }
     }
 
+    func testPendingScenarioRecoveryIsExplicitlyVisible() {
+        let model = HarnessViewModel()
+        model.selectedScenarioID = "room-1"
+
+        for (state, label) in [
+            ("repairing", "Resuming repair"),
+            ("destroying", "Resuming deletion"),
+        ] {
+            model.scenarios = [scenario("room-1", observed: state)]
+            XCTAssertEqual(HarnessViewModel.humanState(state), label)
+            XCTAssertEqual(model.scenarioHeadline, "\(label) · no participants yet")
+        }
+    }
+
     func testScenarioHeadlineReplacesTheDesiredObservedPair() {
         let model = HarnessViewModel()
         XCTAssertEqual(model.scenarioHeadline, "No Scenario selected")

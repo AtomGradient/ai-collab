@@ -12,6 +12,9 @@ adapter.  Tool-version pins live in this render, never in team intent.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 import re
 import subprocess
 import tempfile
@@ -29,6 +32,7 @@ INTENT_RELATIVE_PATH = ".aicollab/project.yaml"
 INTENT_SCHEMA_VERSION = 1
 READER_VERSION = "0.1.7"
 MAX_INTENT_BYTES = 256 * 1024
+MAX_COLLABORATION_REGISTRY_BYTES = 512 * 1024
 BUILTIN_GATE_PROFILE = "builtin.standard-v1"
 BUILTIN_POLICY_PROFILE = "builtin.standard-v1"
 PRODUCT_ROOT = Path(__file__).resolve().parents[1]
@@ -155,10 +159,13 @@ def _load_manifest(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
 
 def _git(root: Path, *arguments: str) -> tuple[int, str]:
     try:
+        environment = dict(os.environ)
+        environment["GIT_OPTIONAL_LOCKS"] = "0"
         completed = subprocess.run(
             ["git", "-C", str(root), *arguments],
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
+            env=environment,
             check=False,
         )
     except OSError:
@@ -290,6 +297,70 @@ def _profile_or_registry(
             "digest": sha256_file(path),
         }
     raise IntentError("project.intent-invalid", f"{field} source is unsupported")
+
+
+def _snapshot_collaboration_registry(
+    root: Path, source: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Freeze path-free collaboration semantics into the resolved render."""
+
+    path = (
+        BUILTIN_POLICY_PATH
+        if source.get("kind") == "builtin"
+        else root / str(source.get("relative_path", ""))
+    )
+    if path.is_symlink() or not path.is_file():
+        raise IntentError(
+            "project.collaboration-invalid",
+            "collaboration template registry is unavailable",
+        )
+    try:
+        details = path.stat()
+        if details.st_size > MAX_COLLABORATION_REGISTRY_BYTES:
+            raise IntentError(
+                "project.collaboration-invalid",
+                "collaboration template registry is too large",
+            )
+        raw = path.read_bytes()
+        if len(raw) > MAX_COLLABORATION_REGISTRY_BYTES:
+            raise IntentError(
+                "project.collaboration-invalid",
+                "collaboration template registry is too large",
+            )
+        value = json.loads(raw)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise IntentError(
+            "project.collaboration-invalid",
+            "collaboration template registry is invalid",
+        ) from exc
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"schema_version", "templates"}
+        or value["schema_version"] != 1
+        or not isinstance(value["templates"], list)
+        or not value["templates"]
+        or len(value["templates"]) > 64
+        or any(not isinstance(item, dict) for item in value["templates"])
+    ):
+        raise IntentError(
+            "project.collaboration-invalid",
+            "collaboration template registry differs",
+        )
+    raw_digest = hashlib.sha256(raw).hexdigest()
+    if source.get("digest") != raw_digest:
+        raise IntentError(
+            "project.collaboration-invalid",
+            "collaboration template registry changed while resolving",
+        )
+    registry = {
+        "schema_version": 1,
+        "templates": value["templates"],
+    }
+    return {
+        **dict(source),
+        "registry_snapshot": registry,
+        "registry_snapshot_digest": canonical_json_sha256(registry),
+    }
 
 
 def _load_intent(root: Path, path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -529,6 +600,7 @@ def resolve_project(root: Path) -> dict[str, Any]:
             field="collaboration", profile=BUILTIN_POLICY_PROFILE
         )
 
+    collaboration = _snapshot_collaboration_registry(root, collaboration)
     observations, changes = _observe_against_manifest(root, manifest)
     availability = {
         "status": "attention" if changes or warnings else "ready",

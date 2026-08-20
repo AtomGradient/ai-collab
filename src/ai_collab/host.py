@@ -235,6 +235,11 @@ class HarnessHost:
         self.capability = self.store.ensure_capability()
         self._active_operation_lock = threading.Lock()
         self._active_operations: dict[str, _ActiveOperation] = {}
+        # Store intent, Workspace claim binding, and adapter execution form one
+        # Host-owned critical section.  Workspace also serializes internally,
+        # but this lock covers the cross-coordinator handoff.
+        self._workspace_operation_lock = threading.RLock()
+        self._workspace_join_attempted_this_host: set[str] = set()
         self.host_generation = 0
         self.host_instance_fingerprint = "0" * 64
         self.participant_auth = ParticipantAuthStore(
@@ -304,6 +309,28 @@ class HarnessHost:
             project_instance_id, project_binding_digest
         )
 
+    def _scenario_collaboration_templates(
+        self, project_instance_id: str, scenario_id: str
+    ) -> dict[str, Any]:
+        """Resolve policy templates from the Scenario's immutable contract."""
+
+        snapshot = self.store.scenario_project_contract(
+            project_instance_id, scenario_id
+        )
+        collaboration = (
+            snapshot.get("collaboration") if isinstance(snapshot, dict) else None
+        )
+        if isinstance(collaboration, dict) and (
+            "registry_snapshot" in collaboration
+            or "registry_snapshot_digest" in collaboration
+        ):
+            return self.projects.collaboration_templates_from_render(snapshot)
+        # Migrated v0.1.6.1 Scenarios have no project snapshot. Prerelease
+        # v0.1.7 snapshots may predate the embedded template catalog. Their
+        # accepted current registry remains the only available compatibility
+        # source; new Scenarios never take this branch.
+        return self.projects.collaboration_templates(project_instance_id)
+
     def bind(self) -> None:
         if self._server is not None:
             return
@@ -317,8 +344,44 @@ class HarnessHost:
             if self.workspace is not None:
                 self.workspace.start_host(self.store.workspace_path)
                 self._reconcile_workspace_operations()
+            else:
+                for pending in self.store.pending_workspace_operations():
+                    durable_claim_bound = all(
+                        isinstance(pending.get(field), str)
+                        for field in {
+                            "workspace_operation_id",
+                            "workspace_join_claim_digest",
+                            "workspace_adapter_capability_digest",
+                        }
+                    )
+                    if (
+                        pending.get("workspace_operation_kind") != "recover"
+                        and durable_claim_bound
+                    ):
+                        try:
+                            self._degrade_workspace_join(
+                                pending,
+                                workspace_claim=None,
+                                reason="workspace.adapter-unavailable",
+                                unjoinable=True,
+                            )
+                        except (StoreError, OSError):
+                            self._mark_workspace_join_unknown(
+                                pending["request_digest"]
+                            )
+                        continue
+                    # Without a fully bound claim there is no exact capsule
+                    # from which manual recovery can proceed.  Preserve the
+                    # transitional intent until the coordinator returns.
+                    self._mark_workspace_join_unknown(pending["request_digest"])
             self.store.reconcile_recorded_outcomes()
-            started = self.store.start_host()
+            preserved_workspace_operations = {
+                pending["operation_id"]
+                for pending in self.store.pending_workspace_operations()
+            }
+            started = self.store.start_host(
+                preserve_workspace_operation_ids=preserved_workspace_operations
+            )
         except BaseException:
             server.server_close()
             self._remove_owned_socket()
@@ -1310,8 +1373,38 @@ class HarnessHost:
         security_effect_preview: dict[str, Any] | None = None
         if descriptor["confirmation_policy_ref"] is not None:
             self._validate_high_risk_preflight(request)
-            previous = self.store.replay_request(request["request_id"], request_digest)
+            if (
+                operation
+                in {
+                    "scenario.repair",
+                    "scenario.destroy",
+                    "scenario.force-destroy",
+                }
+                and self.workspace is not None
+            ):
+                # An exact retry first joins any Workspace result that was
+                # durably published before Store finalization became unknown.
+                # This happens before request replay and never re-prompts.
+                self._reconcile_workspace_operations()
+            try:
+                previous = self.store.replay_request(
+                    request["request_id"], request_digest
+                )
+            except OperationFailed as failure:
+                if failure.mutation_state == "unknown":
+                    self._mark_workspace_join_unknown(request_digest)
+                elif self.security is not None:
+                    self.security.reconcile_failed_outcome(
+                        request_digest, allow_missing=True
+                    )
+                raise
             if previous is not None:
+                if self.security is not None:
+                    self.security.reconcile_completed_outcome(
+                        request_digest,
+                        operation_id=previous[0],
+                        result=previous[1],
+                    )
                 return self._completed_reply(
                     request=request,
                     descriptor=descriptor,
@@ -1692,6 +1785,12 @@ class HarnessHost:
                         "project.reconciliation-required",
                         "project upgrade must finish before creating a new Scenario",
                     )
+                # New Scenarios must be self-contained. Compatibility lookup
+                # of a mutable project registry is reserved for already
+                # migrated Scenarios whose historical state lacks a snapshot.
+                self.projects.collaboration_templates_from_render(
+                    project_contract_snapshot
+                )
                 operation_id, result = self.store.create_scenario(
                     request_id=request["request_id"],
                     request_digest=request_digest,
@@ -1749,7 +1848,11 @@ class HarnessHost:
                     effect_preview=security_effect_preview,
                 )
             except BaseException as exc:
-                self._mark_security_failure(security_consumption)
+                if not (
+                    isinstance(exc, OperationFailed)
+                    and exc.mutation_state == "unknown"
+                ):
+                    self._mark_security_failure(security_consumption)
                 if isinstance(exc, (StoreError, ProtocolError, OperationFailed)):
                     raise
                 raise OperationFailed(
@@ -1789,27 +1892,127 @@ class HarnessHost:
                 "scenario_generation": payload["scenario_generation"],
                 "scenario_state_revision": payload["scenario_state_revision"],
             }
+            workspace_request_id = self.store.workspace_join_request_id(
+                operation,
+                request["request_id"],
+                request_digest,
+            )
+            expected_binding_state = security_effect_preview["workspace"].get(
+                "binding_state"
+            )
+            expected_wip_summary_digest = security_effect_preview["workspace"][
+                "wip_summary_digest"
+            ]
+            recovery_preview = security_effect_preview["workspace"].get(
+                "recovery"
+            )
+            workspace_operation_kind = (
+                "recover"
+                if operation == "scenario.repair"
+                and isinstance(recovery_preview, dict)
+                else "repair"
+            )
             operation_id: str | None = None
+            preserve_workspace_recovery = False
             try:
                 if operation == "scenario.repair":
                     operation_id, replay, workspace_path = (
-                        self.store.begin_scenario_repair(**common)
+                        self.store.begin_scenario_repair(
+                            expected_wip_summary_digest=(
+                                expected_wip_summary_digest
+                            ),
+                            workspace_operation_kind=workspace_operation_kind,
+                            expected_recovery_claim_digest=(
+                                recovery_preview.get(
+                                    "prior_operation_claim_digest"
+                                )
+                                if isinstance(recovery_preview, dict)
+                                else None
+                            ),
+                            expected_recovery_inventory_digest=(
+                                recovery_preview.get("inventory_digest")
+                                if isinstance(recovery_preview, dict)
+                                else None
+                            ),
+                            expected_recovery_prior_operation_kind=(
+                                recovery_preview.get(
+                                    "prior_operation_kind"
+                                )
+                                if isinstance(recovery_preview, dict)
+                                else None
+                            ),
+                            **common,
+                        )
                     )
                     if replay is not None:
                         result = replay
                     else:
                         assert workspace_path is not None
-                        _, workspace_result = self.workspace.repair(
-                            request_id=request["request_id"],
-                            request_digest=request_digest,
-                            project_instance_id=target["project_instance_id"],
-                            scenario_id=target["scenario_id"],
-                            scenario_generation=payload["scenario_generation"],
-                            workspace_path=workspace_path,
-                            expected_wip_summary_digest=security_effect_preview[
-                                "workspace"
-                            ]["wip_summary_digest"],
+                        bind_claim = lambda claim: (
+                            self.store.bind_workspace_execution_claim(
+                                project_instance_id=target[
+                                    "project_instance_id"
+                                ],
+                                scenario_id=target["scenario_id"],
+                                request_id=request["request_id"],
+                                request_digest=request_digest,
+                                operation_id=operation_id,
+                                workspace_request_id=workspace_request_id,
+                                operation_kind="scenario.repair",
+                                scenario_generation=payload[
+                                    "scenario_generation"
+                                ],
+                                workspace_claim=dict(claim),
+                            )
                         )
+                        with self._workspace_operation_lock:
+                            if workspace_operation_kind == "recover":
+                                assert isinstance(recovery_preview, dict)
+                                _, workspace_result = self.workspace.recover(
+                                    request_id=workspace_request_id,
+                                    request_digest=request_digest,
+                                    project_instance_id=target[
+                                        "project_instance_id"
+                                    ],
+                                    scenario_id=target["scenario_id"],
+                                    scenario_generation=payload[
+                                        "scenario_generation"
+                                    ],
+                                    workspace_path=workspace_path,
+                                    expected_wip_summary_digest=(
+                                        expected_wip_summary_digest
+                                    ),
+                                    expected_prior_claim_digest=(
+                                        recovery_preview[
+                                            "prior_operation_claim_digest"
+                                        ]
+                                    ),
+                                    expected_inventory_digest=(
+                                        recovery_preview["inventory_digest"]
+                                    ),
+                                    before_external=bind_claim,
+                                )
+                            else:
+                                _, workspace_result = self.workspace.repair(
+                                    request_id=workspace_request_id,
+                                    request_digest=request_digest,
+                                    project_instance_id=target[
+                                        "project_instance_id"
+                                    ],
+                                    scenario_id=target["scenario_id"],
+                                    scenario_generation=payload[
+                                        "scenario_generation"
+                                    ],
+                                    workspace_path=workspace_path,
+                                    expected_wip_summary_digest=(
+                                        expected_wip_summary_digest
+                                    ),
+                                    before_external=bind_claim,
+                                )
+                        # Workspace has a durable external outcome from here.
+                        # A Store publication error is therefore unknown and
+                        # must be joined, never converted to a repair failure.
+                        preserve_workspace_recovery = True
                         result = self.store.finalize_scenario_repair(
                             project_instance_id=target["project_instance_id"],
                             scenario_id=target["scenario_id"],
@@ -1821,23 +2024,103 @@ class HarnessHost:
                         )
                 else:
                     operation_id, replay, workspace_path = (
-                        self.store.begin_scenario_destroy(**common)
+                        self.store.begin_scenario_destroy(
+                            expected_workspace_binding_state=(
+                                expected_binding_state
+                            ),
+                            expected_wip_summary_digest=(
+                                expected_wip_summary_digest
+                            ),
+                            **common,
+                        )
                     )
                     if replay is not None:
                         result = replay
                     else:
                         assert workspace_path is not None
-                        _, workspace_result = self.workspace.destroy(
-                            request_id=request["request_id"],
-                            request_digest=request_digest,
-                            project_instance_id=target["project_instance_id"],
-                            scenario_id=target["scenario_id"],
-                            scenario_generation=payload["scenario_generation"],
-                            workspace_path=workspace_path,
-                            expected_wip_summary_digest=security_effect_preview[
-                                "workspace"
-                            ]["wip_summary_digest"],
-                        )
+                        try:
+                            with self._workspace_operation_lock:
+                                _, workspace_result = self.workspace.destroy(
+                                    request_id=workspace_request_id,
+                                    request_digest=request_digest,
+                                    project_instance_id=target[
+                                        "project_instance_id"
+                                    ],
+                                    scenario_id=target["scenario_id"],
+                                    scenario_generation=payload[
+                                        "scenario_generation"
+                                    ],
+                                    workspace_path=workspace_path,
+                                    expected_wip_summary_digest=(
+                                        expected_wip_summary_digest
+                                    ),
+                                    expected_binding_state=(
+                                        expected_binding_state
+                                    ),
+                                    before_external=lambda claim: (
+                                        self.store.bind_workspace_execution_claim(
+                                            project_instance_id=target[
+                                                "project_instance_id"
+                                            ],
+                                            scenario_id=target["scenario_id"],
+                                            request_id=request["request_id"],
+                                            request_digest=request_digest,
+                                            operation_id=operation_id,
+                                            workspace_request_id=(
+                                                workspace_request_id
+                                            ),
+                                            operation_kind="scenario.destroy",
+                                            scenario_generation=payload[
+                                                "scenario_generation"
+                                            ],
+                                            workspace_claim=dict(claim),
+                                        )
+                                    ),
+                                )
+                        except BaseException as destroy_error:
+                            preserve_workspace_recovery = True
+                            completed = self.workspace.completed_request(
+                                workspace_request_id, request_digest
+                            )
+                            if completed is not None:
+                                _, workspace_result = completed
+                            elif (
+                                expected_binding_state
+                                in {"absent", "planned", "provision_failed"}
+                                or (
+                                    isinstance(destroy_error, WorkspaceError)
+                                    and destroy_error.mutation_state
+                                    == "not_started"
+                                )
+                            ):
+                                self.store.abort_scenario_destroy_no_effect(
+                                    project_instance_id=target[
+                                        "project_instance_id"
+                                    ],
+                                    scenario_id=target["scenario_id"],
+                                    request_id=request["request_id"],
+                                    operation_id=operation_id,
+                                    reason=(
+                                        destroy_error.code
+                                        if isinstance(
+                                            destroy_error, WorkspaceError
+                                        )
+                                        else "workspace.destroy-failed"
+                                    ),
+                                )
+                                raise OperationFailed(
+                                    operation_id,
+                                    "operation.precondition-failed",
+                                    (
+                                        "Scenario destroy evidence changed; "
+                                        "confirm a new request"
+                                    ),
+                                    "committed",
+                                    True,
+                                ) from destroy_error
+                            else:
+                                raise
+                        preserve_workspace_recovery = True
                         result = self.store.finalize_scenario_destroy(
                             project_instance_id=target["project_instance_id"],
                             scenario_id=target["scenario_id"],
@@ -1848,8 +2131,214 @@ class HarnessHost:
                             ),
                         )
             except BaseException as exc:
+                if operation_id is None and isinstance(exc, OSError):
+                    # Resolve the atomic-write ambiguity against the durable
+                    # Store ledger.  A published pending intent must be joined;
+                    # exact absence proves the adapter can never have run and
+                    # requires a newly confirmed request.
+                    try:
+                        durable_status, durable_operation_id = (
+                            self.store.inspect_request_status(
+                                request["request_id"], request_digest
+                            )
+                        )
+                    except (StoreError, OSError):
+                        durable_status, durable_operation_id = "unknown", None
+                    if durable_status == "completed":
+                        replayed = self.store.replay_request(
+                            request["request_id"], request_digest
+                        )
+                        assert replayed is not None
+                        if self.security is not None:
+                            self.security.reconcile_completed_outcome(
+                                request_digest,
+                                operation_id=replayed[0],
+                                result=replayed[1],
+                                allow_missing=True,
+                            )
+                        return self._completed_reply(
+                            request=request,
+                            descriptor=descriptor,
+                            operation_id=replayed[0],
+                            result=replayed[1],
+                        )
+                    if durable_status == "failed":
+                        try:
+                            self.store.replay_request(
+                                request["request_id"], request_digest
+                            )
+                        except OperationFailed as persisted_failure:
+                            if persisted_failure.mutation_state == "unknown":
+                                self._mark_workspace_join_unknown(request_digest)
+                            elif self.security is not None:
+                                self.security.reconcile_failed_outcome(
+                                    request_digest, allow_missing=True
+                                )
+                            raise
+                        raise StoreError(
+                            "host.state-invalid",
+                            "failed request replay did not fail",
+                        )
+                    if durable_status == "pending":
+                        stable_status, stable_operation_id = (
+                            self._stabilize_store_begin_pending(
+                                request["request_id"], request_digest
+                            )
+                        )
+                        if stable_status == "completed":
+                            replayed = self.store.replay_request(
+                                request["request_id"], request_digest
+                            )
+                            assert replayed is not None
+                            if self.security is not None:
+                                self.security.reconcile_completed_outcome(
+                                    request_digest,
+                                    operation_id=replayed[0],
+                                    result=replayed[1],
+                                    allow_missing=True,
+                                )
+                            return self._completed_reply(
+                                request=request,
+                                descriptor=descriptor,
+                                operation_id=replayed[0],
+                                result=replayed[1],
+                            )
+                        if stable_status == "failed":
+                            self.store.replay_request(
+                                request["request_id"], request_digest
+                            )
+                        raise OperationFailed(
+                            stable_operation_id
+                            or durable_operation_id
+                            or f"op-{request['request_id']}",
+                            "operation.internal-failure",
+                            "Scenario operation intent is pending reconciliation",
+                            "unknown",
+                            True,
+                        ) from exc
+                    if durable_status == "unknown":
+                        self._mark_workspace_join_unknown(request_digest)
+                        raise OperationFailed(
+                            f"op-{request['request_id']}",
+                            "operation.internal-failure",
+                            "Scenario operation intent outcome is unknown",
+                            "unknown",
+                            True,
+                        ) from exc
+                    self._mark_security_failure(security_consumption)
+                    raise OperationFailed(
+                        f"op-{request['request_id']}",
+                        "operation.precondition-failed",
+                        "Scenario operation intent was not committed; confirm a new request",
+                        "not_started",
+                        True,
+                    ) from exc
+                if (
+                    operation == "scenario.repair"
+                    and workspace_operation_kind == "recover"
+                    and operation_id is not None
+                    and isinstance(exc, WorkspaceError)
+                    and exc.mutation_state == "not_started"
+                ):
+                    try:
+                        persisted_abort = (
+                            self.store.abort_scenario_recovery_no_effect(
+                                project_instance_id=target[
+                                    "project_instance_id"
+                                ],
+                                scenario_id=target["scenario_id"],
+                                request_id=request["request_id"],
+                                operation_id=operation_id,
+                                reason=exc.code,
+                            )
+                        )
+                    except (StoreError, OSError) as abort_error:
+                        try:
+                            replayed = self.store.replay_request(
+                                request["request_id"], request_digest
+                            )
+                        except OperationFailed as persisted_failure:
+                            if not self._is_recovery_no_effect_failure(
+                                persisted_failure,
+                                operation_id=operation_id,
+                            ):
+                                self._mark_workspace_join_unknown(
+                                    request_digest
+                                )
+                                raise OperationFailed(
+                                    operation_id,
+                                    "operation.internal-failure",
+                                    (
+                                        "Scenario recovery abort outcome "
+                                        "is unknown"
+                                    ),
+                                    "unknown",
+                                    True,
+                                ) from persisted_failure
+                            self._mark_security_failure(security_consumption)
+                            raise persisted_failure from exc
+                        except StoreError:
+                            self._mark_workspace_join_unknown(request_digest)
+                            raise OperationFailed(
+                                operation_id,
+                                "operation.internal-failure",
+                                (
+                                    "Scenario recovery abort is pending "
+                                    "reconciliation"
+                                ),
+                                "unknown",
+                                True,
+                            ) from abort_error
+                        if replayed is not None:
+                            if self.security is not None:
+                                self.security.reconcile_completed_outcome(
+                                    request_digest,
+                                    operation_id=replayed[0],
+                                    result=replayed[1],
+                                    allow_missing=True,
+                                )
+                            return self._completed_reply(
+                                request=request,
+                                descriptor=descriptor,
+                                operation_id=replayed[0],
+                                result=replayed[1],
+                            )
+                        self._mark_workspace_join_unknown(request_digest)
+                        raise OperationFailed(
+                            operation_id,
+                            "operation.internal-failure",
+                            "Scenario recovery abort outcome is unknown",
+                            "unknown",
+                            True,
+                        ) from abort_error
+                    self._mark_security_failure(security_consumption)
+                    raise persisted_abort from exc
+                if (
+                    operation in {"scenario.repair", "scenario.destroy"}
+                    and (
+                        preserve_workspace_recovery
+                        or (
+                            isinstance(exc, WorkspaceError)
+                            and exc.mutation_state == "unknown"
+                        )
+                    )
+                ):
+                    if isinstance(exc, OperationFailed):
+                        if exc.mutation_state != "unknown":
+                            self._mark_security_failure(security_consumption)
+                        else:
+                            self._mark_workspace_join_unknown(request_digest)
+                        raise
+                    self._mark_workspace_join_unknown(request_digest)
+                    raise OperationFailed(
+                        operation_id or f"op-{request['request_id']}",
+                        "operation.internal-failure",
+                        "Scenario Workspace outcome is pending reconciliation",
+                        "unknown",
+                        True,
+                    ) from exc
                 if operation_id is not None:
-                    self.store.fail_scenario_repair_or_destroy(
+                    persisted_failure = self.store.fail_scenario_repair_or_destroy(
                         project_instance_id=target["project_instance_id"],
                         scenario_id=target["scenario_id"],
                         request_id=request["request_id"],
@@ -1860,7 +2349,11 @@ class HarnessHost:
                             else "lifecycle.destroy-failed"
                         ),
                     )
+                else:
+                    persisted_failure = None
                 self._mark_security_failure(security_consumption)
+                if persisted_failure is not None:
+                    raise persisted_failure from exc
                 if isinstance(exc, (StoreError, ProtocolError, OperationFailed)):
                     raise
                 raise OperationFailed(
@@ -2087,7 +2580,16 @@ class HarnessHost:
             if operation == "policy.show":
                 operation_id, result = self.delivery.show_policy(**common)
             elif operation in {"policy.plan", "policy.apply-plan"}:
-                if request["fence"]["operation_generation"] != payload[
+                replayed = (
+                    self.delivery.replay_request(
+                        request["request_id"], request_digest
+                    )
+                    if operation == "policy.apply-plan"
+                    else None
+                )
+                if replayed is not None:
+                    operation_id, result = replayed
+                elif request["fence"]["operation_generation"] != payload[
                     "scenario_state_revision"
                 ]:
                     raise ProtocolError(
@@ -2096,44 +2598,45 @@ class HarnessHost:
                         "policy plan generation differs from Scenario revision",
                         retryable=True,
                     )
-                templates = self.projects.collaboration_templates(
-                    target["project_instance_id"]
-                )["templates"]
-                template = next(
-                    (
-                        value
-                        for value in templates
-                        if value["template_id"] == payload["template_id"]
-                    ),
-                    None,
-                )
-                if template is None:
-                    raise ProtocolError(
-                        "operation.precondition-failed",
-                        "operation",
-                        "collaboration template is unavailable",
-                    )
-                if operation == "policy.plan":
-                    operation_id, result = self.delivery.plan_policy(
-                        scenario_generation=payload["scenario_generation"],
-                        scenario_state_revision=payload[
-                            "scenario_state_revision"
-                        ],
-                        template=template,
-                        **common,
-                    )
                 else:
-                    operation_id, result = self.delivery.apply_policy_plan(
-                        request_id=request["request_id"],
-                        request_digest=request_digest,
-                        scenario_generation=payload["scenario_generation"],
-                        scenario_state_revision=payload[
-                            "scenario_state_revision"
-                        ],
-                        template=template,
-                        plan_digest=payload["plan_digest"],
-                        **common,
+                    templates = self._scenario_collaboration_templates(
+                        target["project_instance_id"], target["scenario_id"]
+                    )["templates"]
+                    template = next(
+                        (
+                            value
+                            for value in templates
+                            if value["template_id"] == payload["template_id"]
+                        ),
+                        None,
                     )
+                    if template is None:
+                        raise ProtocolError(
+                            "operation.precondition-failed",
+                            "operation",
+                            "collaboration template is unavailable",
+                        )
+                    if operation == "policy.plan":
+                        operation_id, result = self.delivery.plan_policy(
+                            scenario_generation=payload["scenario_generation"],
+                            scenario_state_revision=payload[
+                                "scenario_state_revision"
+                            ],
+                            template=template,
+                            **common,
+                        )
+                    else:
+                        operation_id, result = self.delivery.apply_policy_plan(
+                            request_id=request["request_id"],
+                            request_digest=request_digest,
+                            scenario_generation=payload["scenario_generation"],
+                            scenario_state_revision=payload[
+                                "scenario_state_revision"
+                            ],
+                            template=template,
+                            plan_digest=payload["plan_digest"],
+                            **common,
+                        )
             elif operation == "policy.apply":
                 if request["fence"]["operation_generation"] != payload["scenario_state_revision"]:
                     raise ProtocolError(
@@ -2576,6 +3079,7 @@ class HarnessHost:
             scenario_state_revision=current["state_revision"],
             operation="scenario.destroy",
         )
+        force_close_committed = False
         if not normal_preview["eligible"]:
             if self.participants is None:
                 raise ProtocolError(
@@ -2631,11 +3135,19 @@ class HarnessHost:
                     force_stop_used=True,
                 )
             self.participant_auth.revoke_scenario(project_instance_id, scenario_id)
+            force_close_committed = True
             current = self.store.scenario_status(project_instance_id, scenario_id)[
                 "scenario"
             ]
 
         operation_id: str | None = None
+        workspace_destroy_completed = False
+        preserve_workspace_recovery = False
+        workspace_request_id = self.store.workspace_join_request_id(
+            "scenario.force-destroy",
+            request["request_id"],
+            request_digest,
+        )
         try:
             operation_id, replay, workspace_path = self.store.begin_scenario_destroy(
                 request_id=request["request_id"],
@@ -2645,23 +3157,77 @@ class HarnessHost:
                 scenario_id=scenario_id,
                 scenario_generation=current["scenario_generation"],
                 scenario_state_revision=current["state_revision"],
+                expected_workspace_binding_state=effect_preview["workspace"][
+                    "binding_state"
+                ],
+                expected_wip_summary_digest=effect_preview["workspace"][
+                    "wip_summary_digest"
+                ],
                 operation_kind="scenario.force-destroy",
             )
             if replay is not None:
                 return operation_id, replay
             assert workspace_path is not None
-            _, workspace_result = self.workspace.destroy(
-                request_id=request["request_id"],
-                request_digest=request_digest,
-                project_instance_id=project_instance_id,
-                scenario_id=scenario_id,
-                scenario_generation=payload["scenario_generation"],
-                workspace_path=workspace_path,
-                expected_wip_summary_digest=effect_preview["workspace"][
-                    "wip_summary_digest"
-                ],
-                force=True,
-            )
+            try:
+                with self._workspace_operation_lock:
+                    _, workspace_result = self.workspace.destroy(
+                        request_id=workspace_request_id,
+                        request_digest=request_digest,
+                        project_instance_id=project_instance_id,
+                        scenario_id=scenario_id,
+                        scenario_generation=payload["scenario_generation"],
+                        workspace_path=workspace_path,
+                        expected_wip_summary_digest=effect_preview["workspace"][
+                            "wip_summary_digest"
+                        ],
+                        expected_binding_state=effect_preview["workspace"][
+                            "binding_state"
+                        ],
+                        force=True,
+                        before_external=lambda claim: (
+                            self.store.bind_workspace_execution_claim(
+                                project_instance_id=project_instance_id,
+                                scenario_id=scenario_id,
+                                request_id=request["request_id"],
+                                request_digest=request_digest,
+                                operation_id=operation_id,
+                                workspace_request_id=workspace_request_id,
+                                operation_kind="scenario.force-destroy",
+                                scenario_generation=payload[
+                                    "scenario_generation"
+                                ],
+                                workspace_claim=dict(claim),
+                            )
+                        ),
+                    )
+            except BaseException as destroy_error:
+                completed = self.workspace.completed_request(
+                    workspace_request_id, request_digest
+                )
+                if completed is not None:
+                    _, workspace_result = completed
+                elif (
+                    isinstance(destroy_error, WorkspaceError)
+                    and destroy_error.mutation_state == "not_started"
+                ):
+                    self.store.abort_scenario_destroy_no_effect(
+                        project_instance_id=project_instance_id,
+                        scenario_id=scenario_id,
+                        request_id=request["request_id"],
+                        operation_id=operation_id,
+                        reason=destroy_error.code,
+                    )
+                    raise OperationFailed(
+                        operation_id,
+                        "operation.precondition-failed",
+                        "Scenario destroy evidence changed; confirm a new request",
+                        "committed",
+                        True,
+                    ) from destroy_error
+                else:
+                    preserve_workspace_recovery = True
+                    raise
+            workspace_destroy_completed = True
             result = self.store.finalize_scenario_destroy(
                 project_instance_id=project_instance_id,
                 scenario_id=scenario_id,
@@ -2671,15 +3237,91 @@ class HarnessHost:
             )
             self.participant_auth.revoke_scenario(project_instance_id, scenario_id)
             return operation_id, result
-        except BaseException:
+        except BaseException as exc:
+            if operation_id is None and isinstance(exc, OSError):
+                try:
+                    durable_status, durable_operation_id = (
+                        self.store.inspect_request_status(
+                            request["request_id"], request_digest
+                        )
+                    )
+                except (StoreError, OSError):
+                    durable_status, durable_operation_id = "unknown", None
+                if durable_status == "completed":
+                    replayed = self.store.replay_request(
+                        request["request_id"], request_digest
+                    )
+                    assert replayed is not None
+                    return replayed
+                if durable_status == "failed":
+                    self.store.replay_request(
+                        request["request_id"], request_digest
+                    )
+                    raise StoreError(
+                        "host.state-invalid", "failed request replay did not fail"
+                    )
+                if durable_status == "pending":
+                    stable_status, stable_operation_id = (
+                        self._stabilize_store_begin_pending(
+                            request["request_id"], request_digest
+                        )
+                    )
+                    if stable_status == "completed":
+                        replayed = self.store.replay_request(
+                            request["request_id"], request_digest
+                        )
+                        assert replayed is not None
+                        return replayed
+                    if stable_status == "failed":
+                        self.store.replay_request(
+                            request["request_id"], request_digest
+                        )
+                    raise OperationFailed(
+                        stable_operation_id
+                        or durable_operation_id
+                        or f"op-{request['request_id']}",
+                        "operation.internal-failure",
+                        "Scenario force destroy intent outcome is unknown",
+                        "unknown",
+                        True,
+                    ) from exc
+                if durable_status == "unknown":
+                    self._mark_workspace_join_unknown(request_digest)
+                    raise OperationFailed(
+                        f"op-{request['request_id']}",
+                        "operation.internal-failure",
+                        "Scenario force destroy intent outcome is unknown",
+                        "unknown",
+                        True,
+                    ) from exc
+                raise OperationFailed(
+                    f"op-{request['request_id']}",
+                    "operation.precondition-failed",
+                    "Scenario force destroy intent was not committed; confirm a new request",
+                    "committed" if force_close_committed else "not_started",
+                    True,
+                ) from exc
+            if isinstance(exc, OperationFailed):
+                raise
+            if workspace_destroy_completed or preserve_workspace_recovery:
+                self._mark_workspace_join_unknown(request_digest)
+                raise OperationFailed(
+                    operation_id or f"op-{request['request_id']}",
+                    "operation.internal-failure",
+                    "Scenario destroy outcome is pending reconciliation",
+                    "unknown",
+                    True,
+                ) from exc
             if operation_id is not None:
-                self.store.fail_scenario_repair_or_destroy(
+                persisted_failure = self.store.fail_scenario_repair_or_destroy(
                     project_instance_id=project_instance_id,
                     scenario_id=scenario_id,
                     request_id=request["request_id"],
                     operation_id=operation_id,
                     reason="lifecycle.force-destroy-failed",
                 )
+                if persisted_failure is not None:
+                    raise persisted_failure from exc
             raise
 
     def _scenario_preflight(
@@ -2887,15 +3529,297 @@ class HarnessHost:
     def _reconcile_workspace_operations(self) -> None:
         assert self.workspace is not None
         for pending in self.store.pending_workspace_operations():
-            completed = self.workspace.completed_request(
-                pending["request_id"], pending["request_digest"]
+            with self._workspace_operation_lock:
+                # Another startup/retry caller may have finalized the stale
+                # projection while this caller waited for the process-local
+                # join lock.  Refresh under that lock so one reconciliation
+                # wave cannot finalize twice or consume two bounded attempts.
+                current = next(
+                    (
+                        candidate
+                        for candidate in self.store.pending_workspace_operations()
+                        if candidate.get("operation_id")
+                        == pending.get("operation_id")
+                    ),
+                    None,
+                )
+                if current is None:
+                    continue
+                self._reconcile_workspace_operation(current)
+
+    @staticmethod
+    def _workspace_join_kwargs(pending: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            "project_instance_id": pending["project_instance_id"],
+            "scenario_id": pending["scenario_id"],
+            "request_id": pending["request_id"],
+            "request_digest": pending["request_digest"],
+            "operation_id": pending["operation_id"],
+            "workspace_request_id": pending["workspace_request_id"],
+            "operation_kind": pending["operation_kind"],
+            "scenario_generation": pending["scenario_generation"],
+        }
+
+    def _mark_workspace_join_unknown(self, request_digest: str) -> None:
+        if self.security is not None:
+            self.security.reconcile_unknown_outcome(
+                request_digest, allow_missing=True
             )
-            if completed is None:
-                continue
-            _, workspace_result = completed
-            evidence = canonical_json_sha256(workspace_result)
+
+    def _stabilize_store_begin_pending(
+        self, request_id: str, request_digest: str
+    ) -> tuple[str, str | None]:
+        """Publish Security unknown or observe a concurrent terminal Store result."""
+
+        try:
+            self._mark_workspace_join_unknown(request_digest)
+        except SecurityError as security_error:
+            try:
+                status = self.store.inspect_request_status(
+                    request_id, request_digest
+                )
+            except (StoreError, OSError):
+                raise security_error
+            if status[0] not in {"completed", "failed"}:
+                raise security_error
+            return status
+        try:
+            return self.store.inspect_request_status(request_id, request_digest)
+        except (StoreError, OSError):
+            return "unknown", None
+
+    @staticmethod
+    def _is_recovery_no_effect_failure(
+        failure: OperationFailed, *, operation_id: str
+    ) -> bool:
+        return (
+            failure.operation_id == operation_id
+            and failure.code == "operation.precondition-failed"
+            and failure.mutation_state == "committed"
+            and failure.retryable is True
+        )
+
+    def _abort_reconciled_recovery_no_effect(
+        self, pending: Mapping[str, Any], *, reason: str
+    ) -> bool:
+        """Finish a proven no-adapter recovery abort without risking Host bind."""
+
+        try:
+            self.store.abort_scenario_recovery_no_effect(
+                project_instance_id=pending["project_instance_id"],
+                scenario_id=pending["scenario_id"],
+                request_id=pending["request_id"],
+                operation_id=pending["operation_id"],
+                reason=reason,
+            )
+        except (StoreError, OSError):
+            try:
+                replay = self.store.replay_request(
+                    pending["request_id"], pending["request_digest"]
+                )
+            except OperationFailed as failure:
+                if not self._is_recovery_no_effect_failure(
+                    failure, operation_id=pending["operation_id"]
+                ):
+                    self._mark_workspace_join_unknown(
+                        pending["request_digest"]
+                    )
+                    return False
+                if self.security is not None:
+                    self.security.reconcile_failed_outcome(
+                        pending["request_digest"], allow_missing=True
+                    )
+                return True
+            except StoreError:
+                self._mark_workspace_join_unknown(pending["request_digest"])
+                return False
+            if replay is not None:
+                if self.security is not None:
+                    self.security.reconcile_completed_outcome(
+                        pending["request_digest"],
+                        operation_id=replay[0],
+                        result=replay[1],
+                        allow_missing=True,
+                    )
+                return True
+            self._mark_workspace_join_unknown(pending["request_digest"])
+            return False
+        if self.security is not None:
+            self.security.reconcile_failed_outcome(
+                pending["request_digest"], allow_missing=True
+            )
+        return True
+
+    def _degrade_workspace_join(
+        self,
+        pending: Mapping[str, Any],
+        *,
+        workspace_claim: Mapping[str, Any] | None,
+        reason: str,
+        unjoinable: bool,
+    ) -> None:
+        self.store.degrade_unknown_workspace_join(
+            **self._workspace_join_kwargs(pending),
+            workspace_claim=(
+                dict(workspace_claim) if workspace_claim is not None else None
+            ),
+            reason=reason,
+            unjoinable=unjoinable,
+        )
+        self._mark_workspace_join_unknown(pending["request_digest"])
+
+    def _flatten_unjoinable_workspace_recovery(
+        self,
+        pending: Mapping[str, Any],
+        *,
+        workspace_path: Path,
+        reason: str,
+    ) -> bool:
+        """Make every recover degradation leave a real manual-recovery exit."""
+
+        if (
+            self.workspace is None
+            or pending.get("workspace_operation_kind") != "recover"
+        ):
+            return False
+        try:
+            resolution, frozen_claim = (
+                self.workspace.retire_unjoinable_recovery(
+                    workspace_request_id=pending["workspace_request_id"],
+                    request_digest=pending["request_digest"],
+                    workspace_path=workspace_path,
+                    reason=reason,
+                )
+            )
+        except (WorkspaceError, OSError):
+            self._mark_workspace_join_unknown(pending["request_digest"])
+            return True
+        if resolution == "not_started":
+            bound_values = (
+                pending.get("workspace_operation_id"),
+                pending.get("workspace_join_claim_digest"),
+                pending.get("workspace_adapter_capability_digest"),
+            )
+            if any(value is not None for value in bound_values) and (
+                bound_values[0] != frozen_claim.get("workspace_operation_id")
+                or bound_values[1] != frozen_claim.get("claim_digest")
+                or bound_values[2]
+                != frozen_claim.get("adapter_capability_digest")
+            ):
+                # Workspace proved that *its* prepared recovery never called
+                # the adapter, but Store is bound to a different execution
+                # claim.  Do not use that proof to abort another operation.
+                self._mark_workspace_join_unknown(pending["request_digest"])
+                return True
+            self._abort_reconciled_recovery_no_effect(
+                pending, reason="workspace.recovery-not-started"
+            )
+            return True
+        store_bound_claim = (
+            frozen_claim
+            if pending.get("workspace_operation_id")
+            == frozen_claim.get("workspace_operation_id")
+            and pending.get("workspace_join_claim_digest")
+            == frozen_claim.get("claim_digest")
+            and pending.get("workspace_adapter_capability_digest")
+            == frozen_claim.get("adapter_capability_digest")
+            else None
+        )
+        try:
+            self._degrade_workspace_join(
+                pending,
+                workspace_claim=store_bound_claim,
+                reason=reason,
+                unjoinable=True,
+            )
+        except (StoreError, OSError):
+            self._mark_workspace_join_unknown(pending["request_digest"])
+        return True
+
+    def _degrade_with_frozen_workspace_claim(
+        self,
+        pending: Mapping[str, Any],
+        *,
+        workspace_path: Path,
+        reason: str,
+    ) -> bool:
+        """Preserve a manual-recovery capsule when live capability changed."""
+
+        if (
+            self.workspace is None
+            or pending.get("workspace_operation_kind") == "recover"
+        ):
+            return False
+        bound_values = (
+            pending.get("workspace_operation_id"),
+            pending.get("workspace_join_claim_digest"),
+            pending.get("workspace_adapter_capability_digest"),
+        )
+        if all(isinstance(value, str) for value in bound_values):
+            try:
+                self._degrade_workspace_join(
+                    pending,
+                    workspace_claim=None,
+                    reason=reason,
+                    unjoinable=True,
+                )
+            except (StoreError, OSError):
+                self._mark_workspace_join_unknown(pending["request_digest"])
+            return True
+        if any(value is not None for value in bound_values):
+            self._mark_workspace_join_unknown(pending["request_digest"])
+            return True
+        try:
+            frozen = self.workspace.inspect_frozen_pending_high_risk_join(
+                workspace_request_id=pending["workspace_request_id"],
+                request_digest=pending["request_digest"],
+                workspace_path=workspace_path,
+            )
+            if frozen is None:
+                return False
+            self.store.bind_workspace_execution_claim(
+                **self._workspace_join_kwargs(pending),
+                workspace_claim=frozen,
+            )
+            self._degrade_workspace_join(
+                pending,
+                workspace_claim=frozen,
+                reason=reason,
+                unjoinable=True,
+            )
+        except (WorkspaceError, StoreError, OSError):
+            self._mark_workspace_join_unknown(pending["request_digest"])
+        return True
+
+    def _finalize_reconciled_workspace_operation(
+        self,
+        pending: Mapping[str, Any],
+        completed: tuple[str, dict[str, Any]],
+    ) -> None:
+        workspace_operation_id, workspace_result = completed
+        expected_workspace_operation_id = pending.get("workspace_operation_id")
+        expected_binding_state = pending.get("expected_workspace_binding_state")
+        unprovisioned_destroy = (
+            pending["operation_kind"]
+            in {"scenario.destroy", "scenario.force-destroy"}
+            and expected_binding_state
+            in {"absent", "planned", "provision_failed"}
+        )
+        if (
+            not unprovisioned_destroy
+            and workspace_operation_id != expected_workspace_operation_id
+        ):
+            self._degrade_workspace_join(
+                pending,
+                workspace_claim=None,
+                reason="workspace.join-unprovable",
+                unjoinable=True,
+            )
+            return
+        evidence = canonical_json_sha256(workspace_result)
+        try:
             if pending["operation_kind"] == "scenario.repair":
-                self.store.finalize_scenario_repair(
+                result = self.store.finalize_scenario_repair(
                     project_instance_id=pending["project_instance_id"],
                     scenario_id=pending["scenario_id"],
                     request_id=pending["request_id"],
@@ -2903,13 +3827,583 @@ class HarnessHost:
                     workspace_evidence_sha256=evidence,
                 )
             else:
-                self.store.finalize_scenario_destroy(
+                result = self.store.finalize_scenario_destroy(
                     project_instance_id=pending["project_instance_id"],
                     scenario_id=pending["scenario_id"],
                     request_id=pending["request_id"],
                     operation_id=pending["operation_id"],
                     workspace_evidence_sha256=evidence,
                 )
+        except (StoreError, OSError) as publication_error:
+            try:
+                replay = self.store.replay_request(
+                    pending["request_id"], pending["request_digest"]
+                )
+            except OperationFailed as failure:
+                if failure.mutation_state == "unknown":
+                    self._mark_workspace_join_unknown(
+                        pending["request_digest"]
+                    )
+                elif self.security is not None:
+                    self.security.reconcile_failed_outcome(
+                        pending["request_digest"], allow_missing=True
+                    )
+                return
+            except StoreError:
+                raise publication_error
+            if replay is None:
+                raise publication_error
+            _, result = replay
+        if self.security is not None:
+            self.security.reconcile_completed_outcome(
+                pending["request_digest"],
+                operation_id=pending["operation_id"],
+                result=result,
+                allow_missing=True,
+            )
+
+    def _reconcile_workspace_operation(self, pending: dict[str, Any]) -> None:
+        """Join one exact Store/Workspace intersection without autonomous replay."""
+
+        assert self.workspace is not None
+        claim_box: dict[str, dict[str, Any]] = {}
+        if pending.get("workspace_operation_kind") == "recover":
+            try:
+                recovery_request_exists = self.workspace.has_exact_request(
+                    pending["workspace_request_id"],
+                    pending["request_digest"],
+                )
+            except (WorkspaceError, OSError):
+                self._mark_workspace_join_unknown(pending["request_digest"])
+                return
+            if not recovery_request_exists:
+                # Store committed the manual-recovery intent, but Workspace
+                # never published even the prepared request.  The recovery
+                # adapter therefore cannot have run; restore the prior
+                # degraded authority instead of manufacturing a first call
+                # during startup.
+                self._abort_reconciled_recovery_no_effect(
+                    pending, reason="workspace.recovery-not-started"
+                )
+                return
+            try:
+                terminal_recovery = self.workspace.inspect_terminal_recovery(
+                    workspace_request_id=pending["workspace_request_id"],
+                    request_digest=pending["request_digest"],
+                    workspace_path=self.store.workspace_path(
+                        pending["workspace_binding_id"]
+                    ),
+                )
+            except (WorkspaceError, StoreError, OSError):
+                self._mark_workspace_join_unknown(pending["request_digest"])
+                return
+            if terminal_recovery is not None:
+                if (
+                    terminal_recovery.get("project_instance_id")
+                    != pending["project_instance_id"]
+                    or terminal_recovery.get("scenario_id")
+                    != pending["scenario_id"]
+                    or terminal_recovery.get("scenario_generation")
+                    != pending["scenario_generation"]
+                    or terminal_recovery.get("workspace_id")
+                    != pending["workspace_binding_id"]
+                    or terminal_recovery.get("prior_operation_kind")
+                    != pending.get("expected_recovery_prior_operation_kind")
+                    or terminal_recovery.get("prior_claim_digest")
+                    != pending.get("expected_recovery_claim_digest")
+                    or (
+                        pending.get("workspace_operation_id") is not None
+                        and pending.get("workspace_operation_id")
+                        != terminal_recovery.get("workspace_operation_id")
+                    )
+                    or (
+                        pending.get("workspace_join_claim_digest") is not None
+                        and pending.get("workspace_join_claim_digest")
+                        != terminal_recovery.get(
+                            "last_recovery_claim_digest"
+                        )
+                    )
+                ):
+                    self._mark_workspace_join_unknown(
+                        pending["request_digest"]
+                    )
+                    return
+                if terminal_recovery["resolution"] == "not_started":
+                    self._abort_reconciled_recovery_no_effect(
+                        pending, reason=terminal_recovery["reason"]
+                    )
+                else:
+                    terminal_claim = terminal_recovery["workspace_claim"]
+                    store_bound_claim = (
+                        terminal_claim
+                        if isinstance(terminal_claim, dict)
+                        and pending.get("workspace_operation_id")
+                        == terminal_claim.get("workspace_operation_id")
+                        and pending.get("workspace_join_claim_digest")
+                        == terminal_claim.get("claim_digest")
+                        and pending.get(
+                            "workspace_adapter_capability_digest"
+                        )
+                        == terminal_claim.get("adapter_capability_digest")
+                        else None
+                    )
+                    if (
+                        terminal_recovery["unjoinable"] is False
+                        and store_bound_claim is None
+                    ):
+                        self._mark_workspace_join_unknown(
+                            pending["request_digest"]
+                        )
+                        return
+                    try:
+                        self._degrade_workspace_join(
+                            pending,
+                            workspace_claim=store_bound_claim,
+                            reason=terminal_recovery["reason"],
+                            unjoinable=terminal_recovery["unjoinable"],
+                        )
+                    except (StoreError, OSError):
+                        self._mark_workspace_join_unknown(
+                            pending["request_digest"]
+                        )
+                return
+        workspace_operation_id = pending.get("workspace_operation_id")
+        if (
+            pending.get("workspace_operation_kind") == "recover"
+            and isinstance(workspace_operation_id, str)
+        ):
+            try:
+                recovery_not_started = self.workspace.failed_no_effect_request(
+                    pending["workspace_request_id"],
+                    pending["request_digest"],
+                    workspace_operation_id,
+                )
+            except WorkspaceError:
+                recovery_not_started = False
+            if recovery_not_started:
+                self._abort_reconciled_recovery_no_effect(
+                    pending, reason="workspace.recovery-not-started"
+                )
+                return
+        try:
+            completed = self.workspace.completed_request(
+                pending["workspace_request_id"], pending["request_digest"]
+            )
+        except WorkspaceError:
+            try:
+                fallback_workspace_path = self.store.workspace_path(
+                    pending["workspace_binding_id"]
+                )
+            except StoreError:
+                self._mark_workspace_join_unknown(pending["request_digest"])
+                return
+            if self._flatten_unjoinable_workspace_recovery(
+                pending,
+                workspace_path=fallback_workspace_path,
+                reason="workspace.join-unprovable",
+            ):
+                return
+            if self._degrade_with_frozen_workspace_claim(
+                pending,
+                workspace_path=fallback_workspace_path,
+                reason="workspace.join-unprovable",
+            ):
+                return
+            self._degrade_workspace_join(
+                pending,
+                workspace_claim=None,
+                reason="workspace.join-unprovable",
+                unjoinable=True,
+            )
+            return
+        if completed is not None:
+            try:
+                self._finalize_reconciled_workspace_operation(pending, completed)
+            except (StoreError, OSError):
+                # Workspace has a durable completed outcome.  Keep Store
+                # transitional and security unknown so a later startup can
+                # finish the exact publication without another adapter call.
+                self._mark_workspace_join_unknown(pending["request_digest"])
+            return
+
+        expected_binding_state = pending.get("expected_workspace_binding_state")
+        expected_wip = pending.get("expected_wip_summary_digest")
+        try:
+            _, workspace_path = self.store.scenario_workspace(
+                pending["project_instance_id"], pending["scenario_id"]
+            )
+        except StoreError:
+            if (
+                pending["operation_kind"] == "scenario.destroy"
+                and expected_binding_state
+                in {"absent", "planned", "provision_failed"}
+            ):
+                try:
+                    self.store.restore_missing_workspace_container(
+                        pending["project_instance_id"], pending["scenario_id"]
+                    )
+                    _, workspace_path = self.store.scenario_workspace(
+                        pending["project_instance_id"], pending["scenario_id"]
+                    )
+                except StoreError:
+                    try:
+                        fallback_workspace_path = self.store.workspace_path(
+                            pending["workspace_binding_id"]
+                        )
+                    except StoreError:
+                        self._mark_workspace_join_unknown(
+                            pending["request_digest"]
+                        )
+                        return
+                    if self._flatten_unjoinable_workspace_recovery(
+                        pending,
+                        workspace_path=fallback_workspace_path,
+                        reason="workspace.join-unprovable",
+                    ):
+                        return
+                    self._mark_workspace_join_unknown(
+                        pending["request_digest"]
+                    )
+                    return
+            else:
+                try:
+                    fallback_workspace_path = self.store.workspace_path(
+                        pending["workspace_binding_id"]
+                    )
+                except StoreError:
+                    self._mark_workspace_join_unknown(
+                        pending["request_digest"]
+                    )
+                    return
+                self._mark_workspace_join_unknown(pending["request_digest"])
+                return
+
+        def retire_exhausted_recovery(claim: Mapping[str, Any]) -> str:
+            if claim.get("operation_kind") != "recover":
+                return "not_recover"
+            try:
+                resolution = self.workspace.retire_exhausted_recovery(
+                    workspace_claim=claim,
+                    workspace_path=workspace_path,
+                    reason="workspace.join-attempts-exhausted",
+                )
+            except (WorkspaceError, OSError):
+                # The checkpoint write may itself have crossed its atomic
+                # publication boundary.  Keep Store transitional until a
+                # later Host can observe the exact Workspace side.
+                self._mark_workspace_join_unknown(pending["request_digest"])
+                return "unknown"
+            if resolution == "not_started":
+                if not self._abort_reconciled_recovery_no_effect(
+                    pending, reason="workspace.recovery-not-started"
+                ):
+                    return "unknown"
+                return "aborted"
+            return "retired"
+
+        def authorize_join(raw_claim: Mapping[str, Any]) -> None:
+            claim = dict(raw_claim)
+            claim_box["claim"] = claim
+            workspace_operation_id = claim["workspace_operation_id"]
+            if workspace_operation_id in self._workspace_join_attempted_this_host:
+                raise OperationFailed(
+                    pending["operation_id"],
+                    "operation.internal-failure",
+                    "Scenario Workspace recovery is already pending this Host run",
+                    "unknown",
+                    True,
+                )
+            # Mark before the Store write/external call.  A crash or uncertain
+            # write therefore cannot cause a second invocation in this Host
+            # process; a later Host generation may consume the next durable
+            # bounded attempt.
+            self._workspace_join_attempted_this_host.add(
+                workspace_operation_id
+            )
+            kwargs = self._workspace_join_kwargs(pending)
+            self.store.bind_workspace_execution_claim(
+                **kwargs, workspace_claim=claim
+            )
+            joined = self.store.claim_workspace_join(
+                **kwargs, workspace_claim=claim
+            )
+            if joined["status"] == "exhausted":
+                retirement = retire_exhausted_recovery(claim)
+                if retirement == "aborted":
+                    raise OperationFailed(
+                        pending["operation_id"],
+                        "operation.precondition-failed",
+                        "Scenario recovery did not reach the adapter",
+                        "committed",
+                        True,
+                    )
+                if retirement == "unknown":
+                    raise OperationFailed(
+                        pending["operation_id"],
+                        "operation.internal-failure",
+                        "Scenario Workspace recovery remains pending",
+                        "unknown",
+                        True,
+                    )
+                self._degrade_workspace_join(
+                    pending,
+                    workspace_claim=claim,
+                    reason="workspace.join-attempts-exhausted",
+                    unjoinable=False,
+                )
+                raise OperationFailed(
+                    pending["operation_id"],
+                    "operation.internal-failure",
+                    "Scenario Workspace recovery attempts are exhausted",
+                    "unknown",
+                    False,
+                )
+
+        try:
+            pending_claim = self.workspace.inspect_pending_high_risk_join(
+                workspace_request_id=pending["workspace_request_id"],
+                request_digest=pending["request_digest"],
+                workspace_path=workspace_path,
+            )
+            if pending_claim is not None:
+                claim_box["claim"] = pending_claim
+                completed = self.workspace.resume_exact_high_risk_join(
+                    workspace_claim=pending_claim,
+                    workspace_path=workspace_path,
+                    before_external=authorize_join,
+                )
+            elif (
+                pending["operation_kind"] == "scenario.repair"
+                and pending.get("workspace_operation_kind") == "recover"
+            ):
+                recovery_claim_digest = pending.get(
+                    "expected_recovery_claim_digest"
+                )
+                recovery_inventory_digest = pending.get(
+                    "expected_recovery_inventory_digest"
+                )
+                if (
+                    not isinstance(expected_wip, str)
+                    or not isinstance(recovery_claim_digest, str)
+                    or not isinstance(recovery_inventory_digest, str)
+                ):
+                    raise WorkspaceError(
+                        "workspace.join-unprovable",
+                        "workspace recovery evidence is unavailable",
+                        mutation_state="unknown",
+                    )
+                completed = self.workspace.recover(
+                    request_id=pending["workspace_request_id"],
+                    request_digest=pending["request_digest"],
+                    project_instance_id=pending["project_instance_id"],
+                    scenario_id=pending["scenario_id"],
+                    scenario_generation=pending["scenario_generation"],
+                    workspace_path=workspace_path,
+                    expected_wip_summary_digest=expected_wip,
+                    expected_prior_claim_digest=recovery_claim_digest,
+                    expected_inventory_digest=recovery_inventory_digest,
+                    before_external=authorize_join,
+                )
+            elif pending["operation_kind"] == "scenario.repair":
+                if not isinstance(expected_wip, str):
+                    raise WorkspaceError(
+                        "workspace.join-unprovable",
+                        "workspace repair evidence is unavailable",
+                        mutation_state="unknown",
+                    )
+                completed = self.workspace.repair(
+                    request_id=pending["workspace_request_id"],
+                    request_digest=pending["request_digest"],
+                    project_instance_id=pending["project_instance_id"],
+                    scenario_id=pending["scenario_id"],
+                    scenario_generation=pending["scenario_generation"],
+                    workspace_path=workspace_path,
+                    expected_wip_summary_digest=expected_wip,
+                    before_external=authorize_join,
+                )
+            else:
+                if (
+                    expected_binding_state
+                    not in {"absent", "planned", "provision_failed", "ready"}
+                    or not isinstance(expected_wip, str)
+                ):
+                    raise WorkspaceError(
+                        "workspace.join-unprovable",
+                        "workspace destroy evidence is unavailable",
+                        mutation_state="unknown",
+                    )
+                completed = self.workspace.destroy(
+                    request_id=pending["workspace_request_id"],
+                    request_digest=pending["request_digest"],
+                    project_instance_id=pending["project_instance_id"],
+                    scenario_id=pending["scenario_id"],
+                    scenario_generation=pending["scenario_generation"],
+                    workspace_path=workspace_path,
+                    expected_wip_summary_digest=expected_wip,
+                    expected_binding_state=expected_binding_state,
+                    force=(
+                        pending["operation_kind"] == "scenario.force-destroy"
+                    ),
+                    before_external=authorize_join,
+                )
+        except OperationFailed:
+            return
+        except WorkspaceError as exc:
+            claim = claim_box.get("claim")
+            if exc.mutation_state == "not_started":
+                coordinator_no_effect = False
+                if claim is not None:
+                    try:
+                        coordinator_no_effect = (
+                            self.workspace.failed_no_effect_request(
+                                pending["workspace_request_id"],
+                                pending["request_digest"],
+                                claim["workspace_operation_id"],
+                            )
+                        )
+                    except WorkspaceError:
+                        coordinator_no_effect = False
+                unprovisioned_no_adapter = (
+                    pending["operation_kind"] == "scenario.destroy"
+                    and expected_binding_state
+                    in {"absent", "planned", "provision_failed"}
+                )
+                if not coordinator_no_effect and not unprovisioned_no_adapter:
+                    self._degrade_workspace_join(
+                        pending,
+                        workspace_claim=None,
+                        reason="workspace.join-unprovable",
+                        unjoinable=True,
+                    )
+                    return
+                if pending["operation_kind"] in {
+                    "scenario.destroy",
+                    "scenario.force-destroy",
+                }:
+                    try:
+                        self.store.abort_scenario_destroy_no_effect(
+                            project_instance_id=pending["project_instance_id"],
+                            scenario_id=pending["scenario_id"],
+                            request_id=pending["request_id"],
+                            operation_id=pending["operation_id"],
+                            reason=exc.code,
+                        )
+                    except (StoreError, OSError):
+                        self._mark_workspace_join_unknown(
+                            pending["request_digest"]
+                        )
+                        return
+                elif pending.get("workspace_operation_kind") == "recover":
+                    if not self._abort_reconciled_recovery_no_effect(
+                        pending, reason=exc.code
+                    ):
+                        return
+                    return
+                else:
+                    self.store.fail_scenario_repair_or_destroy(
+                        project_instance_id=pending["project_instance_id"],
+                        scenario_id=pending["scenario_id"],
+                        request_id=pending["request_id"],
+                        operation_id=pending["operation_id"],
+                        reason="lifecycle.repair-failed",
+                    )
+                if self.security is not None:
+                    self.security.reconcile_failed_outcome(
+                        pending["request_digest"], allow_missing=True
+                    )
+                return
+            latest = next(
+                (
+                    value
+                    for value in self.store.pending_workspace_operations()
+                    if value["operation_id"] == pending["operation_id"]
+                ),
+                None,
+            )
+            attempts = (
+                latest.get("workspace_join_attempts")
+                if isinstance(latest, dict)
+                else None
+            )
+            exhausted = (
+                isinstance(attempts, dict)
+                and attempts.get("count") == attempts.get("max_attempts") == 3
+            )
+            if exhausted and claim is not None:
+                retirement = retire_exhausted_recovery(claim)
+                if retirement in {"aborted", "unknown"}:
+                    return
+                self._degrade_workspace_join(
+                    pending,
+                    workspace_claim=claim,
+                    reason="workspace.join-attempts-exhausted",
+                    unjoinable=False,
+                )
+            elif claim is None or exc.code in {
+                "workspace.join-unprovable",
+                "ipc.request-reused",
+            }:
+                if self._flatten_unjoinable_workspace_recovery(
+                    pending,
+                    workspace_path=workspace_path,
+                    reason="workspace.join-unprovable",
+                ):
+                    return
+                if self._degrade_with_frozen_workspace_claim(
+                    pending,
+                    workspace_path=workspace_path,
+                    reason="workspace.join-unprovable",
+                ):
+                    return
+                self._degrade_workspace_join(
+                    pending,
+                    workspace_claim=None,
+                    reason="workspace.join-unprovable",
+                    unjoinable=True,
+                )
+            else:
+                self._mark_workspace_join_unknown(pending["request_digest"])
+            return
+        except (StoreError, OSError, KeyError, TypeError):
+            if self._flatten_unjoinable_workspace_recovery(
+                pending,
+                workspace_path=workspace_path,
+                reason="workspace.join-unprovable",
+            ):
+                return
+            if self._degrade_with_frozen_workspace_claim(
+                pending,
+                workspace_path=workspace_path,
+                reason="workspace.join-unprovable",
+            ):
+                return
+            try:
+                self._degrade_workspace_join(
+                    pending,
+                    workspace_claim=None,
+                    reason="workspace.join-unprovable",
+                    unjoinable=True,
+                )
+            except (StoreError, OSError):
+                self._mark_workspace_join_unknown(pending["request_digest"])
+            return
+
+        refreshed = next(
+            (
+                value
+                for value in self.store.pending_workspace_operations()
+                if value.get("operation_id") == pending["operation_id"]
+            ),
+            None,
+        )
+        if refreshed is None:
+            # Another exact caller finalized while this one was executing.
+            return
+        pending = refreshed
+        try:
+            self._finalize_reconciled_workspace_operation(pending, completed)
+        except (StoreError, OSError):
+            self._mark_workspace_join_unknown(pending["request_digest"])
 
     def _security_context(
         self, request: dict[str, Any]
@@ -2996,13 +4490,56 @@ class HarnessHost:
                     workspace_path=workspace_path,
                     operation=operation,
                 )
+                if workspace_preview.get("state") == "recovery-required":
+                    recovery = workspace_preview.get("recovery")
+                    try:
+                        authority = self.store.scenario_workspace_recovery_authority(
+                            project_instance_id=target["project_instance_id"],
+                            scenario_id=target["scenario_id"],
+                            scenario_generation=payload[
+                                "scenario_generation"
+                            ],
+                            scenario_state_revision=payload[
+                                "scenario_state_revision"
+                            ],
+                        )
+                    except StoreError:
+                        authority = None
+                    if (
+                        not isinstance(recovery, dict)
+                        or not isinstance(authority, dict)
+                        or authority.get("workspace_binding_id")
+                        != workspace_preview.get("workspace_id")
+                        or authority.get("prior_operation_kind")
+                        != recovery.get("prior_operation_kind")
+                        or authority.get("prior_operation_claim_digest")
+                        != recovery.get("prior_operation_claim_digest")
+                    ):
+                        workspace_preview = {
+                            **workspace_preview,
+                            "state": "recovery-unprovable",
+                            "drift_codes": sorted(
+                                set(workspace_preview.get("drift_codes", []))
+                                | {"workspace.recovery-authority-missing"}
+                            ),
+                        }
+                        subject = {}
         # force-destroy exists to remove a Scenario that is already broken, so a
         # workspace that no longer observes as aligned cannot be a prerequisite
         # for it without closing the only exit. The drift stays visible in the
         # workspace observation the owner confirms; it just stops blocking.
         alignment_blocks = (
             operation != "scenario.force-destroy"
-            and workspace_preview["state"] != "aligned"
+            and workspace_preview["state"]
+            not in {
+                "aligned",
+                "unprovisioned",
+                *(
+                    {"recovery-required"}
+                    if operation == "scenario.repair"
+                    else set()
+                ),
+            }
         )
         eligible = store_preview["eligible"] and not alignment_blocks
         effect_preview = {

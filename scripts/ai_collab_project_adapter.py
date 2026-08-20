@@ -12,6 +12,7 @@ resolved render for Scenario work; nothing project-specific lives in this code.
 
 from __future__ import annotations
 
+import ctypes
 import errno
 import hashlib
 import json
@@ -57,6 +58,20 @@ ZERO_SHA1 = "0" * 40
 SAFE_REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$")
 SAFE_OPERATION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+DESTROY_STAGING_PREFIX = ".destroying-"
+DARWIN_RENAME_EXCL = 0x00000004
+LINUX_RENAME_NOREPLACE = 0x00000001
+NO_REPLACE_CONFLICT_ERRNOS = frozenset({errno.EEXIST, errno.ENOTEMPTY})
+NO_REPLACE_UNAVAILABLE_ERRNOS = frozenset({errno.ENOSYS, errno.ENOTSUP})
+NO_REPLACE_PROVEN_NO_EFFECT_ERRNOS = frozenset(
+    {
+        errno.EACCES,
+        errno.EPERM,
+        errno.EROFS,
+        errno.EXDEV,
+        errno.EINVAL,
+    }
+)
 
 
 class AdapterError(ValueError):
@@ -82,12 +97,22 @@ def _canonical_bytes(value: Any) -> bytes:
     ).encode("utf-8")
 
 
+def _git_environment(**overrides: str) -> dict[str, str]:
+    """Return a private Git environment with optional metadata writes disabled."""
+
+    environment = dict(os.environ)
+    environment.update(overrides)
+    environment["GIT_OPTIONAL_LOCKS"] = "0"
+    return environment
+
+
 def _run_git(repo: Path, *arguments: str, input_bytes: bytes | None = None) -> bytes:
     completed = subprocess.run(
         ["git", "-C", str(repo), *arguments],
         input=input_bytes,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        env=_git_environment(),
         check=False,
     )
     if completed.returncode != 0:
@@ -100,6 +125,7 @@ def _probe_git(repo: Path, *arguments: str) -> tuple[int, bytes]:
         ["git", "-C", str(repo), *arguments],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        env=_git_environment(),
         check=False,
     )
     return completed.returncode, completed.stdout
@@ -113,7 +139,14 @@ def _descriptor(kind: str, adapter_id: str) -> dict[str, Any]:
             "adapter_id": adapter_id,
             "contract_version": 1,
         },
-        "operations": ["plan", "provision", "status", "repair", "destroy"],
+        "operations": [
+            "plan",
+            "provision",
+            "status",
+            "repair",
+            "destroy",
+            "recover",
+        ],
         "project_payload_schema_digest": canonical_json_sha256(PLAN_PAYLOAD_SCHEMA),
         "private_binding_format_digest": canonical_json_sha256(
             PRIVATE_WORKSPACE_FORMAT if kind == "workspace" else PRIVATE_ENVIRONMENT_FORMAT
@@ -253,26 +286,43 @@ def _collaboration_templates(payload: Mapping[str, Any]) -> dict[str, Any]:
     if payload:
         raise AdapterError("collaboration template payload fields differ")
     source = _resolved_render()["collaboration"]
-    path = (
-        ROOT / source["relative_path"]
-        if source["kind"] == "project-registry"
-        else PRODUCT_ROOT / "ai_collab_team_policies.json"
+    has_snapshot = (
+        "registry_snapshot" in source
+        or "registry_snapshot_digest" in source
     )
-    if path.is_symlink() or not path.is_file() or path.stat().st_uid != os.getuid():
-        raise AdapterError("collaboration template registry is unavailable")
-    if source.get("digest") != sha256_file(path):
-        raise AdapterError("collaboration template registry digest differs")
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise AdapterError("collaboration template registry is invalid") from exc
+    if has_snapshot:
+        value = source.get("registry_snapshot")
+        if source.get("registry_snapshot_digest") != canonical_json_sha256(value):
+            raise AdapterError("collaboration template registry digest differs")
+    else:
+        # Compatibility for v0.1.6.1 and prerelease registrations whose
+        # accepted render predates embedded catalogs. Reconciliation replaces
+        # this pointer with a self-contained snapshot for every new Scenario.
+        path = (
+            ROOT / source["relative_path"]
+            if source["kind"] == "project-registry"
+            else PRODUCT_ROOT / "ai_collab_team_policies.json"
+        )
+        if (
+            path.is_symlink()
+            or not path.is_file()
+            or path.stat().st_uid != os.getuid()
+            or source.get("digest") != sha256_file(path)
+        ):
+            raise AdapterError("collaboration template registry is unavailable")
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise AdapterError("collaboration template registry is invalid") from exc
     if (
         not isinstance(value, dict)
         or set(value) != {"schema_version", "templates"}
         or value["schema_version"] != 1
         or not isinstance(value["templates"], list)
         or not value["templates"]
+        or len(value["templates"]) > 64
         or any(not isinstance(item, dict) for item in value["templates"])
+        or len(_canonical_bytes(value)) > 512 * 1024
     ):
         raise AdapterError("collaboration template registry differs")
     return {"templates": value["templates"]}
@@ -513,7 +563,7 @@ def _remote_identity(row: Mapping[str, Any]) -> dict[str, Any]:
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+            env=_git_environment(GIT_TERMINAL_PROMPT="0"),
             timeout=120,
             check=False,
         )
@@ -796,6 +846,7 @@ def _install_guard(repo: Path, remote: str, target_ref: str) -> str:
         ["git", "-C", str(repo), "config", "--get", "core.hooksPath"],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        env=_git_environment(),
         check=False,
     )
     if hooks_path.returncode not in {0, 1} or hooks_path.stdout.strip():
@@ -841,7 +892,7 @@ def _materialize_components(
                 clone,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+                env=_git_environment(GIT_TERMINAL_PROMPT="0"),
                 timeout=240,
                 check=False,
             )
@@ -1268,16 +1319,22 @@ def _load_binding_marker(bundle: Path) -> tuple[Path, dict[str, Any]]:
     return marker, value
 
 
-def _status_binding_marker(
-    bundle: Path,
+def _require_binding_marker_provenance(
+    value: Mapping[str, Any],
     plan: Mapping[str, Any],
     receipt: Mapping[str, Any],
-) -> tuple[str | None, list[str]]:
+) -> None:
+    """Prove that an owned marker is the exact receipt/plan binding."""
+
     try:
-        marker, value = _load_binding_marker(bundle)
         journal = value["journal"]
         marker_receipt = value["receipt"]
         snapshot = value["review_snapshot"]
+        if not all(
+            isinstance(item, Mapping)
+            for item in (journal, marker_receipt, snapshot)
+        ):
+            raise AdapterError("workspace binding marker artifacts are invalid")
         snapshot_without_digest = dict(snapshot)
         snapshot_digest = snapshot_without_digest.pop("snapshot_digest", None)
         receipt_digest = canonical_json_sha256(receipt)
@@ -1293,6 +1350,256 @@ def _status_binding_marker(
             or snapshot_digest != canonical_json_sha256(snapshot_without_digest)
         ):
             raise AdapterError("workspace binding marker provenance differs")
+    except (KeyError, TypeError, ValueError) as exc:
+        raise AdapterError("workspace binding marker provenance differs") from exc
+
+
+def _require_owned_directory(
+    path: Path,
+    *,
+    require_private_mode: bool = False,
+) -> None:
+    """Prove one exact directory without following a final-component link."""
+
+    try:
+        details = path.lstat()
+    except OSError as exc:
+        raise AdapterError("workspace owned directory is unavailable") from exc
+    if (
+        stat.S_ISLNK(details.st_mode)
+        or not stat.S_ISDIR(details.st_mode)
+        or details.st_uid != os.getuid()
+        or (
+            require_private_mode
+            and stat.S_IMODE(details.st_mode) != 0o700
+        )
+    ):
+        raise AdapterError("workspace owned directory differs")
+
+
+def _require_owned_workspace_tree(
+    bundle: Path,
+    receipt: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Re-prove the private container, binding marker, and owned roots.
+
+    A status result alone is insufficient for a high-risk mutation: Git and
+    ``Path.is_dir`` both follow links, and neither proves that the object still
+    belongs to the current Host user.  Only the declared component roots and
+    environment root are checked here; repository-internal symlinks remain
+    ordinary Scenario content and are covered by the WIP digest.
+    """
+
+    _require_owned_directory(bundle.parent, require_private_mode=True)
+    _require_owned_directory(bundle, require_private_mode=True)
+    _, marker_value = _load_binding_marker(bundle)
+    try:
+        components = receipt["components"]
+        environment = receipt["environment"]
+    except (KeyError, TypeError) as exc:
+        raise AdapterError("workspace receipt ownership fields differ") from exc
+    if not isinstance(components, list) or not isinstance(environment, Mapping):
+        raise AdapterError("workspace receipt ownership fields differ")
+    bundle_root = bundle.resolve(strict=True)
+    for component in components:
+        if not isinstance(component, Mapping):
+            raise AdapterError("workspace component ownership differs")
+        target = _target_path(bundle, component)
+        _require_owned_directory(target)
+        try:
+            resolved = target.resolve(strict=True)
+        except OSError as exc:
+            raise AdapterError("workspace component ownership differs") from exc
+        if resolved != target or not resolved.is_relative_to(bundle_root):
+            raise AdapterError("workspace component ownership differs")
+    environment_path = bundle / ".venv"
+    _require_owned_directory(environment_path)
+    try:
+        resolved_environment = environment_path.resolve(strict=True)
+    except OSError as exc:
+        raise AdapterError("workspace environment ownership differs") from exc
+    if (
+        resolved_environment != environment_path
+        or not resolved_environment.is_relative_to(bundle_root)
+    ):
+        raise AdapterError("workspace environment ownership differs")
+    return marker_value
+
+
+def _destroy_staging_entries(parent: Path) -> list[Path]:
+    try:
+        return sorted(
+            (
+                entry
+                for entry in parent.iterdir()
+                if entry.name.startswith(DESTROY_STAGING_PREFIX)
+            ),
+            key=lambda entry: entry.name,
+        )
+    except OSError as exc:
+        raise AdapterError(
+            "workspace destroy staging cannot be inspected",
+            code="workspace.destroy-outcome-unknown",
+            retryable=True,
+            mutation_state="unknown",
+        ) from exc
+
+
+def _reject_foreign_destroy_staging(
+    parent: Path,
+    *,
+    exact: Path | None,
+) -> None:
+    foreign = [
+        entry
+        for entry in _destroy_staging_entries(parent)
+        if exact is None or entry != exact
+    ]
+    if foreign:
+        raise AdapterError(
+            "workspace has a conflicting destroy operation",
+            code="workspace.destroy-outcome-unknown",
+            retryable=True,
+            mutation_state="unknown",
+        )
+
+
+def _unknown_repair(error: BaseException, message: str) -> AdapterError:
+    if (
+        isinstance(error, AdapterError)
+        and error.mutation_state == "unknown"
+        and error.code == "workspace.repair-outcome-unknown"
+    ):
+        return error
+    return AdapterError(
+        message,
+        code="workspace.repair-outcome-unknown",
+        retryable=True,
+        mutation_state="unknown",
+    )
+
+
+def _unknown_destroy(error: BaseException, message: str) -> AdapterError:
+    if (
+        isinstance(error, AdapterError)
+        and error.mutation_state == "unknown"
+        and error.code == "workspace.destroy-outcome-unknown"
+    ):
+        return error
+    return AdapterError(
+        message,
+        code="workspace.destroy-outcome-unknown",
+        retryable=True,
+        mutation_state="unknown",
+    )
+
+
+def _unknown_recover(error: BaseException, message: str) -> AdapterError:
+    if (
+        isinstance(error, AdapterError)
+        and error.mutation_state == "unknown"
+        and error.code == "workspace.recover-outcome-unknown"
+    ):
+        return error
+    return AdapterError(
+        message,
+        code="workspace.recover-outcome-unknown",
+        retryable=True,
+        mutation_state="unknown",
+    )
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _rename_directory_no_replace(source: Path, target: Path) -> None:
+    """Atomically rename one directory while refusing an existing target.
+
+    Plain POSIX ``rename``/``os.replace`` may replace an empty directory that
+    appears after recovery's final inventory check.  Darwin exposes the exact
+    primitive through ``renameatx_np(..., RENAME_EXCL)``; Linux exposes the
+    equivalent ``renameat2(..., RENAME_NOREPLACE)``.  Platforms without an
+    equivalent fail before touching either path.
+    """
+
+    if (
+        not source.is_absolute()
+        or not target.is_absolute()
+        or source.parent != target.parent
+        or source.name in {"", ".", ".."}
+        or target.name in {"", ".", ".."}
+    ):
+        raise OSError(errno.EINVAL, "no-replace rename identity differs")
+    if os.name == "nt":
+        # Windows rename fails when the destination already exists.
+        os.rename(source, target)
+        return
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        if sys.platform == "darwin":
+            function = libc.renameatx_np
+            function.argtypes = [
+                ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.c_uint,
+            ]
+            function.restype = ctypes.c_int
+            directory_fd = -2  # Darwin AT_FDCWD.
+            flags = DARWIN_RENAME_EXCL
+        elif sys.platform.startswith("linux"):
+            function = libc.renameat2
+            function.argtypes = [
+                ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.c_uint,
+            ]
+            function.restype = ctypes.c_int
+            directory_fd = -100  # Linux AT_FDCWD.
+            flags = LINUX_RENAME_NOREPLACE
+        else:
+            raise OSError(
+                errno.ENOTSUP,
+                "atomic no-replace directory rename is unavailable",
+            )
+    except AttributeError as exc:
+        raise OSError(
+            errno.ENOTSUP,
+            "atomic no-replace directory rename is unavailable",
+        ) from exc
+    ctypes.set_errno(0)
+    result = function(
+        directory_fd,
+        os.fsencode(str(source)),
+        directory_fd,
+        os.fsencode(str(target)),
+        flags,
+    )
+    if result != 0:
+        error_number = ctypes.get_errno() or errno.EIO
+        raise OSError(
+            error_number,
+            os.strerror(error_number),
+            str(target),
+        )
+
+
+def _status_binding_marker(
+    bundle: Path,
+    plan: Mapping[str, Any],
+    receipt: Mapping[str, Any],
+) -> tuple[str | None, list[str]]:
+    try:
+        marker, value = _load_binding_marker(bundle)
+        _require_binding_marker_provenance(value, plan, receipt)
     except (AdapterError, OSError, TypeError, ValueError, KeyError):
         return None, ["workspace.binding-evidence-drift"]
     return sha256_file(marker), []
@@ -1445,11 +1752,16 @@ def _repair(payload: Mapping[str, Any]) -> dict[str, Any]:
         or not isinstance(expected_wip, str)
         or SHA256_RE.fullmatch(expected_wip) is None
         or not bundle.is_absolute()
-        or bundle.is_symlink()
-        or not bundle.is_dir()
+        or bundle.name != "bundle"
     ):
         raise AdapterError("repair operation identity is invalid")
-    _, marker_value = _load_binding_marker(bundle)
+    try:
+        marker_value = _require_owned_workspace_tree(bundle, base_receipt)
+        _reject_foreign_destroy_staging(bundle.parent, exact=None)
+    except (AdapterError, OSError, KeyError, TypeError, ValueError) as exc:
+        raise _unknown_repair(
+            exc, "workspace repair ownership could not be proved"
+        ) from exc
     marker_journal = marker_value["journal"]
     marker_receipt = marker_value["receipt"]
     marker_snapshot = marker_value["review_snapshot"]
@@ -1476,20 +1788,42 @@ def _repair(payload: Mapping[str, Any]) -> dict[str, Any]:
             or marker_snapshot.get("receipt_digest") != marker_receipt_digest
             or snapshot_digest != canonical_json_sha256(snapshot_without_digest)
         ):
-            raise AdapterError("repair replay provenance differs")
-        replay_observation = _status(
-            {
-                "operation_id": f"{operation_id}-replay-status",
-                "bundle_path": str(bundle),
-                "plan": plan,
-                "receipt": marker_receipt,
-            }
-        )["observation"]
-        if (
-            replay_observation["state"] != "aligned"
-            or replay_observation["wip_summary_digest"] != expected_wip
-        ):
-            raise AdapterError("repair replay workspace differs")
+            raise AdapterError(
+                "repair replay provenance differs",
+                code="workspace.repair-outcome-unknown",
+                retryable=True,
+                mutation_state="unknown",
+            )
+        try:
+            _require_binding_marker_provenance(
+                marker_value, plan, marker_receipt
+            )
+        except (AdapterError, KeyError, TypeError, ValueError) as exc:
+            raise _unknown_repair(
+                exc, "workspace repair replay provenance could not be proved"
+            ) from exc
+        try:
+            _reject_foreign_destroy_staging(bundle.parent, exact=None)
+            replay_observation = _status(
+                {
+                    "operation_id": f"{operation_id}-replay-status",
+                    "bundle_path": str(bundle),
+                    "plan": plan,
+                    "receipt": marker_receipt,
+                }
+            )["observation"]
+            replay_marker = _require_owned_workspace_tree(bundle, marker_receipt)
+            if (
+                canonical_json_sha256(replay_marker)
+                != canonical_json_sha256(marker_value)
+                or replay_observation["state"] != "aligned"
+                or replay_observation["wip_summary_digest"] != expected_wip
+            ):
+                raise AdapterError("repair replay workspace differs")
+        except (AdapterError, OSError, KeyError, TypeError, ValueError) as exc:
+            raise _unknown_repair(
+                exc, "workspace repair replay could not be proved"
+            ) from exc
         replay_observation.update(
             {
                 "operation_id": operation_id,
@@ -1504,6 +1838,12 @@ def _repair(payload: Mapping[str, Any]) -> dict[str, Any]:
             "observation": replay_observation,
             "review_snapshot": marker_snapshot,
         }
+    try:
+        _require_binding_marker_provenance(marker_value, plan, base_receipt)
+    except (AdapterError, KeyError, TypeError, ValueError) as exc:
+        raise _unknown_repair(
+            exc, "workspace repair base provenance could not be proved"
+        ) from exc
     preflight = _status(
         {
             "operation_id": f"{operation_id}-preflight",
@@ -1588,16 +1928,88 @@ def _repair(payload: Mapping[str, Any]) -> dict[str, Any]:
         ],
     }
     review_snapshot["snapshot_digest"] = canonical_json_sha256(review_snapshot)
-    _write_binding_marker(
-        bundle / ".ai-collab-harness-binding.json",
-        {
-            "journal": journal,
-            "receipt": receipt,
-            "review_snapshot": review_snapshot,
-        },
-    )
+    marker_payload = {
+        "journal": journal,
+        "receipt": receipt,
+        "review_snapshot": review_snapshot,
+    }
+    try:
+        # Close the observation-to-publication window. A different marker or a
+        # newly introduced destroy staging tree means another operation raced
+        # this repair, so this invocation must not publish over it.
+        current = _status(
+            {
+                "operation_id": f"{operation_id}-commit-preflight",
+                "bundle_path": str(bundle),
+                "plan": plan,
+                "receipt": base_receipt,
+            }
+        )["observation"]
+        _reject_foreign_destroy_staging(bundle.parent, exact=None)
+        current_marker = _require_owned_workspace_tree(bundle, base_receipt)
+        if canonical_json_sha256(current_marker) != canonical_json_sha256(marker_value):
+            raise AdapterError("workspace repair binding changed concurrently")
+        if (
+            current["state"] != "aligned"
+            or current["wip_summary_digest"] != expected_wip
+        ):
+            raise AdapterError("workspace repair changed before publication")
+    except (AdapterError, OSError, KeyError, TypeError, ValueError) as exc:
+        if isinstance(exc, AdapterError) and exc.mutation_state == "unknown":
+            raise
+        try:
+            # Only classify this as no-effect when the receipt-owned base
+            # marker is still exact and no destroy operation appeared while
+            # the commit preflight was running.
+            refused_marker = _require_owned_workspace_tree(bundle, base_receipt)
+            _reject_foreign_destroy_staging(bundle.parent, exact=None)
+            if canonical_json_sha256(refused_marker) != canonical_json_sha256(
+                marker_value
+            ):
+                raise AdapterError("workspace repair binding changed concurrently")
+        except (AdapterError, OSError, KeyError, TypeError, ValueError) as proof_error:
+            raise _unknown_repair(
+                proof_error,
+                "workspace repair pre-effect refusal could not be proved",
+            ) from exc
+        raise AdapterError(str(exc)) from exc
+    try:
+        _write_binding_marker(
+            bundle / ".ai-collab-harness-binding.json",
+            marker_payload,
+        )
+    except (AdapterError, OSError) as exc:
+        # ``os.replace`` may already have published the new marker before a
+        # chmod/fsync error became observable.
+        raise _unknown_repair(
+            exc, "workspace repair publication outcome is unknown"
+        ) from exc
+    try:
+        postflight = _status(
+            {
+                "operation_id": f"{operation_id}-postflight",
+                "bundle_path": str(bundle),
+                "plan": plan,
+                "receipt": receipt,
+            }
+        )["observation"]
+        _reject_foreign_destroy_staging(bundle.parent, exact=None)
+        published_marker = _require_owned_workspace_tree(bundle, receipt)
+        if canonical_json_sha256(published_marker) != canonical_json_sha256(
+            marker_payload
+        ):
+            raise AdapterError("workspace repair marker publication differs")
+        if (
+            postflight["state"] != "aligned"
+            or postflight["wip_summary_digest"] != expected_wip
+        ):
+            raise AdapterError("workspace repair postflight differs")
+    except (AdapterError, OSError, KeyError, TypeError, ValueError) as exc:
+        raise _unknown_repair(
+            exc, "workspace repair publication could not be proved"
+        ) from exc
     observation = {
-        **preflight,
+        **postflight,
         "operation_id": operation_id,
         "operation_kind": "repair",
         "journal_digest": canonical_json_sha256(journal),
@@ -1640,14 +2052,14 @@ def _destroy(payload: Mapping[str, Any]) -> dict[str, Any]:
     ):
         raise AdapterError("destroy target is invalid")
     parent = bundle.parent
-    details = parent.lstat()
-    if (
-        parent.is_symlink()
-        or not stat.S_ISDIR(details.st_mode)
-        or details.st_uid != os.getuid()
-        or stat.S_IMODE(details.st_mode) != 0o700
-    ):
-        raise AdapterError("destroy target owner differs")
+    try:
+        _require_owned_directory(parent, require_private_mode=True)
+    except (AdapterError, OSError) as exc:
+        # Without the exact private container there is no trustworthy basis
+        # for declaring that an earlier execution did not already mutate it.
+        raise _unknown_destroy(
+            exc, "workspace destroy target ownership could not be proved"
+        ) from exc
     fence = {
         "base_receipt_digest": canonical_json_sha256(receipt),
         "expected_ready_revision": receipt["finalization"][
@@ -1661,52 +2073,173 @@ def _destroy(payload: Mapping[str, Any]) -> dict[str, Any]:
         ],
     }
     destroying = parent / f".destroying-{operation_id}"
-    bundle_exists = bundle.exists() or bundle.is_symlink()
-    destroying_exists = destroying.exists() or destroying.is_symlink()
+    try:
+        _reject_foreign_destroy_staging(parent, exact=destroying)
+        bundle_exists = bundle.exists() or bundle.is_symlink()
+        destroying_exists = destroying.exists() or destroying.is_symlink()
+    except (AdapterError, OSError) as exc:
+        raise _unknown_destroy(
+            exc, "workspace destroy targets could not be inspected"
+        ) from exc
     if bundle_exists and destroying_exists:
-        raise AdapterError("destroy targets conflict")
+        raise AdapterError(
+            "destroy targets conflict",
+            code="workspace.destroy-outcome-unknown",
+            retryable=True,
+            mutation_state="unknown",
+        )
     if bundle_exists:
-        bundle_details = bundle.lstat()
-        if (
-            bundle.is_symlink()
-            or not stat.S_ISDIR(bundle_details.st_mode)
-            or bundle_details.st_uid != os.getuid()
-        ):
-            raise AdapterError("destroy target is invalid")
-        preflight = _status(
-            {
-                "operation_id": f"{operation_id}-preflight",
-                "bundle_path": str(bundle),
-                "plan": plan,
-                "receipt": receipt,
-            }
-        )["observation"]
-        # A forced destroy is the owner-confirmed teardown of a workspace that
-        # is already known to have drifted, so alignment cannot be a
-        # prerequisite for it. The WIP fence below is a separate check and is
-        # enforced either way, so uncommitted work still stops the destroy.
-        if not force and preflight["state"] != "aligned":
-            raise AdapterError("workspace destroy binding is not aligned")
-        if preflight["wip_summary_digest"] != expected_wip:
-            raise AdapterError("workspace destroy WIP fence differs")
-        os.replace(bundle, destroying)
-        directory = os.open(parent, os.O_RDONLY)
         try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+            base_marker = _require_owned_workspace_tree(bundle, receipt)
+            _require_binding_marker_provenance(base_marker, plan, receipt)
+        except (AdapterError, OSError, KeyError, TypeError, ValueError) as exc:
+            # A path that merely exists is not proof that it is still the
+            # receipt-owned Workspace.  Treat a failed ownership proof as an
+            # ambiguous replay instead of a fresh, no-effect refusal.
+            raise _unknown_destroy(
+                exc, "workspace destroy ownership could not be proved"
+            ) from exc
+        try:
+            preflight = _status(
+                {
+                    "operation_id": f"{operation_id}-preflight",
+                    "bundle_path": str(bundle),
+                    "plan": plan,
+                    "receipt": receipt,
+                }
+            )["observation"]
+            # A forced destroy is the owner-confirmed teardown of a workspace
+            # already known to have drifted. It may bypass alignment, but never
+            # the exact WIP fence or ownership proof.
+            if not force and preflight["state"] != "aligned":
+                raise AdapterError("workspace destroy binding is not aligned")
+            if preflight["wip_summary_digest"] != expected_wip:
+                raise AdapterError("workspace destroy WIP fence differs")
+            _reject_foreign_destroy_staging(parent, exact=destroying)
+            if destroying.exists() or destroying.is_symlink():
+                raise AdapterError(
+                    "destroy targets conflict",
+                    code="workspace.destroy-outcome-unknown",
+                    retryable=True,
+                    mutation_state="unknown",
+                )
+            current_marker = _require_owned_workspace_tree(bundle, receipt)
+            if canonical_json_sha256(current_marker) != canonical_json_sha256(
+                base_marker
+            ):
+                raise AdapterError(
+                    "workspace destroy binding changed concurrently",
+                    code="workspace.destroy-outcome-unknown",
+                    retryable=True,
+                    mutation_state="unknown",
+                )
+        except (AdapterError, OSError, KeyError, TypeError, ValueError) as exc:
+            if isinstance(exc, AdapterError) and exc.mutation_state == "unknown":
+                raise
+            try:
+                # A semantic preflight refusal is only ``not_started`` when
+                # the unchanged receipt-owned marker and absence of this
+                # operation's staging path can still be re-proved.
+                refused_marker = _require_owned_workspace_tree(bundle, receipt)
+                _reject_foreign_destroy_staging(parent, exact=destroying)
+                if destroying.exists() or destroying.is_symlink():
+                    raise AdapterError("destroy staging appeared concurrently")
+                if canonical_json_sha256(refused_marker) != canonical_json_sha256(
+                    base_marker
+                ):
+                    raise AdapterError("workspace destroy binding changed concurrently")
+            except (AdapterError, OSError, KeyError, TypeError, ValueError) as proof_error:
+                raise _unknown_destroy(
+                    proof_error,
+                    "workspace destroy pre-effect refusal could not be proved",
+                ) from exc
+            raise AdapterError(str(exc)) from exc
+        try:
+            os.replace(bundle, destroying)
+            _fsync_directory(parent)
+        except OSError as exc:
+            mutation_state = "unknown"
+            try:
+                refused_marker = _require_owned_workspace_tree(bundle, receipt)
+                _reject_foreign_destroy_staging(parent, exact=destroying)
+                if destroying.exists() or destroying.is_symlink():
+                    raise AdapterError("destroy staging appeared concurrently")
+                if canonical_json_sha256(refused_marker) != canonical_json_sha256(
+                    base_marker
+                ):
+                    raise AdapterError("workspace destroy binding changed concurrently")
+                mutation_state = "not_started"
+            except (AdapterError, OSError, KeyError, TypeError, ValueError):
+                pass
+            raise AdapterError(
+                "workspace destroy publication outcome is unknown",
+                code="workspace.destroy-outcome-unknown",
+                retryable=True,
+                mutation_state=mutation_state,
+            ) from exc
         destroying_exists = True
     if destroying_exists:
-        staging_details = destroying.lstat()
+        try:
+            _reject_foreign_destroy_staging(parent, exact=destroying)
+            if bundle.exists() or bundle.is_symlink():
+                raise AdapterError("destroy targets conflict")
+            staging_preflight_marker = _require_owned_workspace_tree(
+                destroying, receipt
+            )
+            _require_binding_marker_provenance(
+                staging_preflight_marker, plan, receipt
+            )
+            staging_preflight = _status(
+                {
+                    "operation_id": f"{operation_id}-staging-preflight",
+                    "bundle_path": str(destroying),
+                    "plan": plan,
+                    "receipt": receipt,
+                }
+            )["observation"]
+            if not force and staging_preflight["state"] != "aligned":
+                raise AdapterError("workspace destroy staging is not aligned")
+            if staging_preflight["wip_summary_digest"] != expected_wip:
+                raise AdapterError("workspace destroy staging WIP fence differs")
+            _reject_foreign_destroy_staging(parent, exact=destroying)
+            if bundle.exists() or bundle.is_symlink():
+                raise AdapterError("destroy targets conflict")
+            current_staging_marker = _require_owned_workspace_tree(
+                destroying, receipt
+            )
+            if canonical_json_sha256(
+                current_staging_marker
+            ) != canonical_json_sha256(staging_preflight_marker):
+                raise AdapterError("workspace destroy staging changed concurrently")
+        except (AdapterError, OSError, KeyError, TypeError, ValueError) as exc:
+            # The exact staging name proves an earlier execution crossed the
+            # rename boundary. No failure from this point can be no-effect.
+            raise _unknown_destroy(
+                exc, "workspace destroy staging could not be proved"
+            ) from exc
+        try:
+            shutil.rmtree(destroying)
+            _fsync_directory(parent)
+        except OSError as exc:
+            raise AdapterError(
+                "workspace destroy cleanup outcome is unknown",
+                code="workspace.destroy-outcome-unknown",
+                retryable=True,
+                mutation_state="unknown",
+            ) from exc
+    try:
+        _reject_foreign_destroy_staging(parent, exact=destroying)
         if (
-            destroying.is_symlink()
-            or not stat.S_ISDIR(staging_details.st_mode)
-            or staging_details.st_uid != os.getuid()
+            bundle.exists()
+            or bundle.is_symlink()
+            or destroying.exists()
+            or destroying.is_symlink()
         ):
-            raise AdapterError("destroy staging target is invalid")
-        shutil.rmtree(destroying)
-    if bundle.exists() or bundle.is_symlink() or destroying.exists():
-        raise AdapterError("workspace absence could not be proved")
+            raise AdapterError("workspace absence could not be proved")
+    except (AdapterError, OSError) as exc:
+        raise _unknown_destroy(
+            exc, "workspace destroy absence could not be proved"
+        ) from exc
     destroy_evidence_digest = canonical_json_sha256(
         {
             "receipt_digest": canonical_json_sha256(receipt),
@@ -1750,6 +2283,613 @@ def _destroy(payload: Mapping[str, Any]) -> dict[str, Any]:
     return {"journal": journal, "observation": observation}
 
 
+def _recovery_fence(receipt: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "base_receipt_digest": canonical_json_sha256(receipt),
+        "expected_ready_revision": receipt["finalization"][
+            "committed_ready_revision"
+        ],
+        "workspace_id": receipt["workspace_id"],
+        "workspace_binding_digest": receipt["workspace_binding_digest"],
+        "environment_id": receipt["environment"]["environment_id"],
+        "environment_binding_digest": receipt["environment"][
+            "environment_binding_digest"
+        ],
+    }
+
+
+def _expected_review_snapshot(
+    plan: Mapping[str, Any], receipt: Mapping[str, Any]
+) -> dict[str, Any]:
+    snapshot = {
+        "snapshot_contract_version": 1,
+        "scenario": plan["scenario"],
+        "plan_digest": canonical_json_sha256(plan),
+        "receipt_digest": canonical_json_sha256(receipt),
+        "components": [
+            {
+                "component_id": item["component_id"],
+                "revision_kind": item["revision_kind"],
+                "exact_revision": item["realized_revision"],
+                "target_ref": item["target_ref"],
+                "content_digest": item["content_digest"],
+            }
+            for item in receipt["components"]
+        ],
+    }
+    snapshot["snapshot_digest"] = canonical_json_sha256(snapshot)
+    return snapshot
+
+
+def _recovery_parent_entries(parent: Path) -> set[Path]:
+    try:
+        return set(parent.iterdir())
+    except OSError as exc:
+        raise AdapterError("workspace recovery inventory is unavailable") from exc
+
+
+def _require_recovery_marker(
+    marker_value: Mapping[str, Any],
+    plan: Mapping[str, Any],
+    receipt: Mapping[str, Any],
+) -> None:
+    _require_binding_marker_provenance(marker_value, plan, receipt)
+    if marker_value["review_snapshot"] != _expected_review_snapshot(plan, receipt):
+        raise AdapterError("workspace recovery review snapshot differs")
+
+
+def _require_prior_repair_receipt(
+    marker_value: Mapping[str, Any],
+    plan: Mapping[str, Any],
+    base_receipt: Mapping[str, Any],
+    prior_operation: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Select only the exact base or the exact completed prior repair marker."""
+
+    marker_journal = marker_value["journal"]
+    marker_receipt = marker_value["receipt"]
+    marker_snapshot = marker_value["review_snapshot"]
+    if canonical_json_sha256(marker_receipt) == canonical_json_sha256(base_receipt):
+        _require_recovery_marker(marker_value, plan, base_receipt)
+        return dict(base_receipt), dict(marker_snapshot)
+
+    prior_operation_id = prior_operation["operation_id"]
+    try:
+        finalization = marker_receipt["finalization"]
+        base_finalization = base_receipt["finalization"]
+        if (
+            set(marker_receipt) != set(base_receipt)
+            or marker_receipt.get("receipt_id")
+            != f"receipt:{prior_operation_id}"
+            or marker_receipt.get("operation_id") != prior_operation_id
+            or marker_receipt.get("base_receipt_digest")
+            != canonical_json_sha256(base_receipt)
+            or marker_receipt.get("journal_digest")
+            != canonical_json_sha256(marker_journal)
+            or marker_receipt.get("source_wip_before_digest")
+            != base_receipt["source_wip_before_digest"]
+            or marker_receipt.get("source_wip_after_digest")
+            != base_receipt["source_wip_before_digest"]
+            or not isinstance(finalization, Mapping)
+            or set(finalization) != set(base_finalization)
+            or finalization.get("atomic_publish") is not True
+            or finalization.get("expected_registry_revision")
+            != base_finalization["committed_ready_revision"]
+            or finalization.get("committed_ready_revision")
+            != base_finalization["committed_ready_revision"] + 1
+            or not isinstance(finalization.get("staging_binding_digest"), str)
+            or SHA256_RE.fullmatch(finalization["staging_binding_digest"]) is None
+        ):
+            raise AdapterError("workspace prior repair receipt differs")
+        mutable_receipt_fields = {
+            "receipt_id",
+            "operation_id",
+            "base_receipt_digest",
+            "journal_digest",
+            "source_wip_before_digest",
+            "source_wip_after_digest",
+            "finalization",
+        }
+        if any(
+            marker_receipt[field] != base_receipt[field]
+            for field in set(base_receipt) - mutable_receipt_fields
+        ):
+            raise AdapterError("workspace prior repair binding differs")
+        if (
+            set(marker_journal)
+            != {
+                "journal_contract_version",
+                "operation_id",
+                "operation_kind",
+                "plan_digest",
+                "scenario",
+                "operation_fence",
+                "events",
+            }
+            or marker_journal.get("journal_contract_version") != 1
+            or marker_journal.get("operation_id") != prior_operation_id
+            or marker_journal.get("operation_kind") != "repair"
+            or marker_journal.get("plan_digest") != canonical_json_sha256(plan)
+            or marker_journal.get("scenario") != base_receipt["scenario"]
+            or marker_journal.get("operation_fence")
+            != _recovery_fence(base_receipt)
+        ):
+            raise AdapterError("workspace prior repair journal differs")
+        expected_events = [
+            _event(
+                1,
+                "planned",
+                "coordinator",
+                "workspace.plan-frozen",
+                plan["plan_id"],
+                "committed",
+                _operation_intent(marker_journal),
+            ),
+            _event(
+                2,
+                "repair",
+                "workspace",
+                "workspace.repair",
+                base_receipt["workspace_id"],
+                "committed",
+                finalization["staging_binding_digest"],
+            ),
+            _event(
+                3,
+                "verify",
+                "workspace",
+                "workspace.components-verified",
+                plan["plan_id"],
+                "committed",
+                canonical_json_sha256(plan["components"]),
+            ),
+            _event(
+                4,
+                "verify",
+                "environment",
+                "environment.binding-verified",
+                plan["environment"]["environment_id"],
+                "committed",
+                canonical_json_sha256(plan["environment"]),
+            ),
+            _event(
+                5,
+                "finalize",
+                "coordinator",
+                "workspace.atomic-publish",
+                base_receipt["workspace_id"],
+                "committed",
+                finalization["staging_binding_digest"],
+            ),
+        ]
+        if marker_journal.get("events") != expected_events:
+            raise AdapterError("workspace prior repair journal events differ")
+        _require_recovery_marker(marker_value, plan, marker_receipt)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise AdapterError("workspace prior repair provenance differs") from exc
+    return dict(marker_receipt), dict(marker_snapshot)
+
+
+def _recover_observation(
+    *,
+    operation_id: str,
+    bundle: Path,
+    plan: Mapping[str, Any],
+    receipt: Mapping[str, Any],
+    marker_value: Mapping[str, Any],
+    expected_wip: str,
+    require_aligned: bool,
+) -> dict[str, Any]:
+    status = _status(
+        {
+            "operation_id": operation_id,
+            "bundle_path": str(bundle),
+            "plan": plan,
+            "receipt": receipt,
+        }
+    )["observation"]
+    current_marker = _require_owned_workspace_tree(bundle, receipt)
+    _require_recovery_marker(current_marker, plan, receipt)
+    if (
+        canonical_json_sha256(current_marker)
+        != canonical_json_sha256(marker_value)
+        or (require_aligned and status["state"] != "aligned")
+        or status["wip_summary_digest"] != expected_wip
+    ):
+        raise AdapterError("workspace recovery ready proof differs")
+    return status
+
+
+def _recover_result(
+    *,
+    operation_id: str,
+    plan: Mapping[str, Any],
+    base_receipt: Mapping[str, Any],
+    expected_wip: str,
+    prior_operation: Mapping[str, Any],
+    resolution: str,
+    current_receipt: Mapping[str, Any] | None,
+    review_snapshot: Mapping[str, Any] | None,
+    ready_observation: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    recovery = {
+        "prior_operation_id": prior_operation["operation_id"],
+        "prior_operation_kind": prior_operation["operation_kind"],
+        "prior_claim_digest": prior_operation["claim_digest"],
+        "resolution": resolution,
+    }
+    missing_ownership_digest = canonical_json_sha256(
+        {
+            "bundle_missing": True,
+            "workspace_id": base_receipt["workspace_id"],
+        }
+    )
+    proof = {
+        "recovery": recovery,
+        "base_receipt_digest": canonical_json_sha256(base_receipt),
+        "current_receipt_digest": (
+            canonical_json_sha256(current_receipt)
+            if current_receipt is not None
+            else None
+        ),
+        "expected_wip_summary_digest": expected_wip,
+        "observed_state": (
+            ready_observation.get("state")
+            if ready_observation is not None
+            else "missing"
+        ),
+        "ownership_summary_digest": (
+            ready_observation.get("ownership_summary_digest")
+            if ready_observation is not None
+            else missing_ownership_digest
+        ),
+    }
+    journal = {
+        "journal_contract_version": 1,
+        "operation_id": operation_id,
+        "operation_kind": "recover",
+        "plan_digest": canonical_json_sha256(plan),
+        "scenario": base_receipt["scenario"],
+        "operation_fence": _recovery_fence(base_receipt),
+        "events": [],
+    }
+    journal["events"] = [
+        _event(
+            1,
+            "planned",
+            "coordinator",
+            "workspace.recovery-planned",
+            prior_operation["operation_id"],
+            "committed",
+            canonical_json_sha256(
+                {
+                    "operation_intent": _operation_intent(journal),
+                    "prior_operation": prior_operation,
+                }
+            ),
+        ),
+        _event(
+            2,
+            "verify",
+            "workspace",
+            "workspace.recovery-resolved",
+            base_receipt["workspace_id"],
+            "committed",
+            canonical_json_sha256(proof),
+        ),
+        _event(
+            3,
+            "finalize",
+            "coordinator",
+            "workspace.recovery-finalized",
+            base_receipt["workspace_id"],
+            "committed",
+            canonical_json_sha256(recovery),
+        ),
+    ]
+    journal_digest = canonical_json_sha256(journal)
+    if resolution == "ready":
+        if (
+            current_receipt is None
+            or review_snapshot is None
+            or ready_observation is None
+        ):
+            raise AdapterError("workspace recovery ready result is incomplete")
+        observation = {
+            **ready_observation,
+            "operation_id": operation_id,
+            "operation_kind": "recover",
+            "journal_digest": journal_digest,
+            "plan_digest": canonical_json_sha256(plan),
+            "receipt_digest": canonical_json_sha256(current_receipt),
+        }
+        receipt_result: dict[str, Any] | None = dict(current_receipt)
+        snapshot_result: dict[str, Any] | None = dict(review_snapshot)
+    else:
+        observation = {
+            "observation_contract_version": 1,
+            "operation_id": operation_id,
+            "operation_kind": "recover",
+            "journal_digest": journal_digest,
+            "plan_digest": canonical_json_sha256(plan),
+            "receipt_digest": canonical_json_sha256(base_receipt),
+            "scenario": base_receipt["scenario"],
+            "workspace_id": None,
+            "workspace_binding_digest": None,
+            "components": [],
+            "environment": None,
+            "state": "missing",
+            "drift_codes": ["workspace.destroyed"],
+            "wip_summary_digest": expected_wip,
+            "ownership_summary_digest": missing_ownership_digest,
+        }
+        receipt_result = None
+        snapshot_result = None
+    return {
+        "journal": journal,
+        "receipt": receipt_result,
+        "observation": observation,
+        "review_snapshot": snapshot_result,
+        "recovery": recovery,
+    }
+
+
+def _recover(payload: Mapping[str, Any]) -> dict[str, Any]:
+    required = {
+        "operation_id",
+        "bundle_path",
+        "plan",
+        "receipt",
+        "expected_wip_summary_digest",
+        "prior_operation",
+    }
+    if set(payload) != required:
+        raise AdapterError("recover payload fields differ")
+    operation_id = payload["operation_id"]
+    bundle_value = payload["bundle_path"]
+    plan = payload["plan"]
+    base_receipt = payload["receipt"]
+    expected_wip = payload["expected_wip_summary_digest"]
+    prior_operation = payload["prior_operation"]
+    if (
+        not isinstance(operation_id, str)
+        or SAFE_OPERATION_ID_RE.fullmatch(operation_id) is None
+        or len(operation_id) > 127
+        or not isinstance(bundle_value, str)
+        or not bundle_value
+        or not isinstance(plan, Mapping)
+        or not isinstance(base_receipt, Mapping)
+        or not isinstance(expected_wip, str)
+        or SHA256_RE.fullmatch(expected_wip) is None
+        or not isinstance(prior_operation, Mapping)
+        or set(prior_operation)
+        != {"operation_id", "operation_kind", "force", "claim_digest"}
+    ):
+        raise AdapterError("recover operation identity is invalid")
+    bundle = Path(bundle_value)
+    if not bundle.is_absolute() or bundle.name != "bundle":
+        raise AdapterError("recover bundle identity is invalid")
+    prior_operation_id = prior_operation["operation_id"]
+    prior_kind = prior_operation["operation_kind"]
+    prior_force = prior_operation["force"]
+    prior_claim_digest = prior_operation["claim_digest"]
+    if (
+        not isinstance(prior_operation_id, str)
+        or SAFE_OPERATION_ID_RE.fullmatch(prior_operation_id) is None
+        or len(prior_operation_id) > 127
+        or prior_operation_id == operation_id
+        or not isinstance(prior_kind, str)
+        or prior_kind not in {"repair", "destroy"}
+        or not isinstance(prior_force, bool)
+        or (prior_kind == "repair" and prior_force)
+        or not isinstance(prior_claim_digest, str)
+        or SHA256_RE.fullmatch(prior_claim_digest) is None
+    ):
+        raise AdapterError("recover prior operation identity is invalid")
+    try:
+        _recovery_fence(base_receipt)
+        _expected_review_snapshot(plan, base_receipt)
+        if (
+            base_receipt.get("plan_digest") != canonical_json_sha256(plan)
+            or base_receipt.get("scenario") != plan.get("scenario")
+            or base_receipt.get("state") != "ready"
+        ):
+            raise AdapterError("recover base receipt provenance differs")
+    except (AdapterError, KeyError, TypeError, ValueError) as exc:
+        raise AdapterError("recover base receipt is invalid") from exc
+
+    parent = bundle.parent
+    exact_staging = parent / f"{DESTROY_STAGING_PREFIX}{prior_operation_id}"
+    try:
+        _require_owned_directory(parent, require_private_mode=True)
+        parent_entries = _recovery_parent_entries(parent)
+    except (AdapterError, OSError) as exc:
+        raise AdapterError("workspace recovery container differs") from exc
+
+    if prior_kind == "repair":
+        if parent_entries != {bundle}:
+            raise AdapterError("workspace repair recovery inventory differs")
+        if not bundle.exists() or bundle.is_symlink():
+            raise AdapterError("workspace repair recovery bundle differs")
+        try:
+            marker_value = _require_owned_workspace_tree(bundle, base_receipt)
+            current_receipt, review_snapshot = _require_prior_repair_receipt(
+                marker_value, plan, base_receipt, prior_operation
+            )
+            _require_owned_workspace_tree(bundle, current_receipt)
+            observation = _recover_observation(
+                operation_id=operation_id,
+                bundle=bundle,
+                plan=plan,
+                receipt=current_receipt,
+                marker_value=marker_value,
+                expected_wip=expected_wip,
+                require_aligned=True,
+            )
+            if _recovery_parent_entries(parent) != {bundle}:
+                raise AdapterError("workspace recovery changed concurrently")
+        except (AdapterError, OSError, KeyError, TypeError, ValueError) as exc:
+            raise AdapterError("workspace repair recovery proof differs") from exc
+        return _recover_result(
+            operation_id=operation_id,
+            plan=plan,
+            base_receipt=base_receipt,
+            expected_wip=expected_wip,
+            prior_operation=prior_operation,
+            resolution="ready",
+            current_receipt=current_receipt,
+            review_snapshot=review_snapshot,
+            ready_observation=observation,
+        )
+
+    unexpected_entries = parent_entries - {bundle, exact_staging}
+    if unexpected_entries:
+        raise AdapterError("workspace destroy recovery inventory differs")
+    bundle_exists = bundle.exists() or bundle.is_symlink()
+    staging_exists = exact_staging.exists() or exact_staging.is_symlink()
+    if bundle_exists and staging_exists:
+        raise AdapterError("workspace destroy recovery targets conflict")
+    if not bundle_exists and not staging_exists:
+        return _recover_result(
+            operation_id=operation_id,
+            plan=plan,
+            base_receipt=base_receipt,
+            expected_wip=expected_wip,
+            prior_operation=prior_operation,
+            resolution="missing",
+            current_receipt=None,
+            review_snapshot=None,
+            ready_observation=None,
+        )
+
+    current_path = bundle if bundle_exists else exact_staging
+    if current_path.is_symlink() or not current_path.is_dir():
+        raise AdapterError("workspace destroy recovery target differs")
+    try:
+        marker_value = _require_owned_workspace_tree(current_path, base_receipt)
+        _require_recovery_marker(marker_value, plan, base_receipt)
+        observation = _recover_observation(
+            operation_id=operation_id,
+            bundle=current_path,
+            plan=plan,
+            receipt=base_receipt,
+            marker_value=marker_value,
+            expected_wip=expected_wip,
+            # A force-destroy may have started from a degraded but exactly
+            # owned/WIP-fenced tree.  After an exact stage rollback, replay
+            # observes the indistinguishable bundle-only form, so the same
+            # force proof must apply to both forms for deterministic replay.
+            require_aligned=not prior_force,
+        )
+        expected_entries = {bundle} if bundle_exists else {exact_staging}
+        if _recovery_parent_entries(parent) != expected_entries:
+            raise AdapterError("workspace recovery changed concurrently")
+    except (AdapterError, OSError, KeyError, TypeError, ValueError) as exc:
+        raise AdapterError("workspace destroy recovery proof differs") from exc
+
+    if staging_exists:
+        # Exercise the complete deterministic result construction before the
+        # sole recovery effect.  Malformed provenance must fail no-effect,
+        # never after the stage has been moved back into place.
+        _recover_result(
+            operation_id=operation_id,
+            plan=plan,
+            base_receipt=base_receipt,
+            expected_wip=expected_wip,
+            prior_operation=prior_operation,
+            resolution="ready",
+            current_receipt=base_receipt,
+            review_snapshot=marker_value["review_snapshot"],
+            ready_observation=observation,
+        )
+        try:
+            _rename_directory_no_replace(exact_staging, bundle)
+        except OSError as exc:
+            if exc.errno in NO_REPLACE_CONFLICT_ERRNOS:
+                # RENAME_EXCL/NOREPLACE makes this a proof about this exact
+                # invocation: neither path was changed.  The Host's durable
+                # pending_recover_external_attempted bit still promotes a
+                # later/replayed not_started response to unknown.
+                raise AdapterError(
+                    "workspace recovery target appeared concurrently",
+                    code="workspace.recover-target-conflict",
+                    retryable=False,
+                    mutation_state="not_started",
+                ) from exc
+            if exc.errno in NO_REPLACE_UNAVAILABLE_ERRNOS:
+                raise AdapterError(
+                    "atomic no-replace recovery rename is unavailable",
+                    code="workspace.recover-no-replace-unavailable",
+                    retryable=False,
+                    mutation_state="not_started",
+                ) from exc
+            if exc.errno in NO_REPLACE_PROVEN_NO_EFFECT_ERRNOS:
+                raise AdapterError(
+                    "workspace recovery rollback could not start",
+                    code="workspace.recover-rename-not-started",
+                    retryable=False,
+                    mutation_state="not_started",
+                ) from exc
+            raise _unknown_recover(
+                exc, "workspace recovery rollback outcome is unknown"
+            ) from exc
+        try:
+            _fsync_directory(parent)
+        except OSError as exc:
+            raise _unknown_recover(
+                exc, "workspace recovery rollback outcome is unknown"
+            ) from exc
+        try:
+            if exact_staging.exists() or exact_staging.is_symlink():
+                raise AdapterError("workspace recovery staging remains")
+            if _recovery_parent_entries(parent) != {bundle}:
+                raise AdapterError("workspace recovery inventory changed")
+            published_marker = _require_owned_workspace_tree(bundle, base_receipt)
+            _require_recovery_marker(published_marker, plan, base_receipt)
+            if canonical_json_sha256(published_marker) != canonical_json_sha256(
+                marker_value
+            ):
+                raise AdapterError("workspace recovery marker changed")
+            observation = _recover_observation(
+                operation_id=operation_id,
+                bundle=bundle,
+                plan=plan,
+                receipt=base_receipt,
+                marker_value=published_marker,
+                expected_wip=expected_wip,
+                require_aligned=not prior_force,
+            )
+            result = _recover_result(
+                operation_id=operation_id,
+                plan=plan,
+                base_receipt=base_receipt,
+                expected_wip=expected_wip,
+                prior_operation=prior_operation,
+                resolution="ready",
+                current_receipt=base_receipt,
+                review_snapshot=published_marker["review_snapshot"],
+                ready_observation=observation,
+            )
+        except (AdapterError, OSError, KeyError, TypeError, ValueError) as exc:
+            raise _unknown_recover(
+                exc, "workspace recovery rollback could not be proved"
+            ) from exc
+        return result
+
+    review_snapshot = marker_value["review_snapshot"]
+    return _recover_result(
+        operation_id=operation_id,
+        plan=plan,
+        base_receipt=base_receipt,
+        expected_wip=expected_wip,
+        prior_operation=prior_operation,
+        resolution="ready",
+        current_receipt=base_receipt,
+        review_snapshot=review_snapshot,
+        ready_observation=observation,
+    )
+
+
 def _handle(request: Any) -> dict[str, Any]:
     if not isinstance(request, dict) or set(request) != {
         "adapter_protocol_version",
@@ -1780,6 +2920,8 @@ def _handle(request: Any) -> dict[str, Any]:
         result = _repair(payload)
     elif operation == "destroy":
         result = _destroy(payload)
+    elif operation == "recover":
+        result = _recover(payload)
     else:
         raise AdapterError("adapter operation is unavailable")
     return {
@@ -1807,8 +2949,11 @@ def _failed_response(error: AdapterError) -> dict[str, Any]:
 
 
 def main() -> int:
+    operation: Any = None
     try:
         request = json.loads(sys.stdin.buffer.read())
+        if isinstance(request, Mapping):
+            operation = request.get("operation")
         response = _handle(request)
     except descriptor_validator.DescriptorError as exc:
         error = AdapterError(str(exc), code="project.descriptor-invalid")
@@ -1824,6 +2969,7 @@ def main() -> int:
         response = _failed_response(exc)
     except (OSError, subprocess.SubprocessError) as exc:
         is_disk_full = isinstance(exc, OSError) and exc.errno in {errno.ENOSPC, errno.EDQUOT}
+        high_risk = operation in {"repair", "destroy", "recover"}
         response = _failed_response(
             AdapterError(
                 (
@@ -1832,6 +2978,8 @@ def main() -> int:
                     else "project adapter could not access a required local resource"
                 ),
                 code="workspace.disk-full" if is_disk_full else "adapter.io-failed",
+                retryable=high_risk,
+                mutation_state="unknown" if high_risk else "not_started",
             )
         )
     except (json.JSONDecodeError, ValueError):

@@ -31,6 +31,11 @@ PROJECT_ID = "project-one"
 SCENARIO_ID = "scenario-one"
 SENDER_ID = "sender-one"
 RECEIVER_ID = "receiver-one"
+_BUILTIN_COLLABORATION_REGISTRY = json.loads(
+    (Path(__file__).resolve().parents[1] / "ai_collab_team_policies.json").read_text(
+        encoding="utf-8"
+    )
+)
 PROJECT_RENDER = {
     "render_contract_version": 1,
     "source": {"kind": "fileless", "intent_schema_version": None, "source_digest": "1" * 64},
@@ -45,7 +50,14 @@ PROJECT_RENDER = {
     "repo_manifest": {"schema_version": 1, "project_key": PROJECT_ID, "repos": []},
     "repo_manifest_digest": "2" * 64,
     "gate": {"kind": "builtin", "profile_id": "builtin.standard-v1"},
-    "collaboration": {"kind": "builtin", "profile_id": "builtin.standard-v1"},
+    "collaboration": {
+        "kind": "builtin",
+        "profile_id": "builtin.standard-v1",
+        "registry_snapshot": _BUILTIN_COLLABORATION_REGISTRY,
+        "registry_snapshot_digest": canonical_json_sha256(
+            _BUILTIN_COLLABORATION_REGISTRY
+        ),
+    },
     "availability": {"status": "ready", "observations": [], "changes": [], "warnings": []},
 }
 PROJECT_RENDER["availability"]["fingerprint"] = canonical_json_sha256(  # type: ignore[index]
@@ -648,6 +660,11 @@ def test_project_template_plan_apply_and_generation_drift_require_replan(
         host.projects.collaboration_templates = (  # type: ignore[method-assign]
             lambda project_id: {"templates": [copy.deepcopy(template)]}
         )
+        host._scenario_collaboration_templates = (  # type: ignore[method-assign]
+            lambda project_id, scenario_id: {
+                "templates": [copy.deepcopy(template)]
+            }
+        )
         opened, sender, receiver = _prepare(client)
 
         listed = client.list_policy_templates(project_instance_id=PROJECT_ID)
@@ -777,6 +794,11 @@ def test_policy_plan_reports_missing_declared_participant(tmp_path: Path) -> Non
     with running_host(state_root) as (host, client, _):
         host.projects.collaboration_templates = (  # type: ignore[method-assign]
             lambda project_id: {"templates": [copy.deepcopy(template)]}
+        )
+        host._scenario_collaboration_templates = (  # type: ignore[method-assign]
+            lambda project_id, scenario_id: {
+                "templates": [copy.deepcopy(template)]
+            }
         )
         opened, _, _ = _prepare(client)
         plan = client.plan_policy(
@@ -1436,3 +1458,354 @@ def test_restart_resumes_delivered_but_unconsumed_without_reinjection(
         after = _wait_delivery(client, delivery_id)
         assert after["state"] == "consumed"
         assert resumed_driver.delivery_calls == 0
+
+
+def _versioned_policy_template(version: int) -> dict[str, Any]:
+    template = _policy_template()
+    template["display_name"] = f"Peer review team v{version}"
+    for assignment in template["assignments"]:
+        if assignment["participant_id"] == RECEIVER_ID:
+            assignment["task_id"] = f"review-v{version}"
+    return template
+
+
+def _snapshot_project_render(
+    template: Mapping[str, Any], *, version: int
+) -> dict[str, Any]:
+    registry = {
+        "schema_version": 1,
+        "templates": [copy.deepcopy(dict(template))],
+    }
+    availability: dict[str, Any] = {
+        "status": "ready",
+        "observations": [],
+        "changes": [],
+        "warnings": [],
+    }
+    availability["fingerprint"] = canonical_json_sha256(availability)
+    render: dict[str, Any] = {
+        "render_contract_version": 1,
+        "source": {
+            "kind": "team-intent",
+            "intent_schema_version": 1,
+            "source_digest": str(version) * 64,
+        },
+        "project": {
+            "project_key": "snapshot-project",
+            "product_contract_version": "1.0",
+            "workspace_adapter_id": "workspace.test-v1",
+            "environment_adapter_id": "environment.test-v1",
+            "participant_driver_contract": 2,
+            "collaboration_policy_schema": 1,
+        },
+        "repo_manifest": {
+            "schema_version": 1,
+            "project_key": "snapshot-project",
+            "repos": [],
+        },
+        "repo_manifest_digest": "2" * 64,
+        "gate": {"kind": "builtin", "profile_id": "builtin.standard-v1"},
+        "collaboration": {
+            "kind": "project-registry",
+            "relative_path": "ai_collab_team_policies.json",
+            "digest": canonical_json_sha256(registry),
+            "registry_snapshot": registry,
+            "registry_snapshot_digest": canonical_json_sha256(registry),
+        },
+        "availability": availability,
+    }
+    render["render_digest"] = canonical_json_sha256(
+        {key: value for key, value in render.items() if key != "availability"}
+    )
+    return render
+
+
+class SnapshotProjectAdapter:
+    def __init__(self, project_root: Path, render: Mapping[str, Any]) -> None:
+        self.project_root = project_root
+        self.render = copy.deepcopy(dict(render))
+        self.collaboration_calls = 0
+
+    def call(
+        self,
+        operation: str,
+        payload: Mapping[str, Any],
+        *,
+        timeout_seconds: float = 300,
+    ) -> dict[str, Any]:
+        del timeout_seconds
+        if operation == "collaboration_templates":
+            self.collaboration_calls += 1
+            registry_path = self.project_root / "ai_collab_team_policies.json"
+            if not registry_path.is_file():
+                raise AssertionError("mutable collaboration registry was consulted")
+            return {
+                "templates": json.loads(registry_path.read_text(encoding="utf-8"))[
+                    "templates"
+                ]
+            }
+        assert operation == "register"
+        assert Path(payload["canonical_project_path"]) == self.project_root
+        render = copy.deepcopy(self.render)
+        project = render["project"]
+        return {
+            "project": {
+                "project_key": project["project_key"],
+                "project_binding_digest": render["render_digest"],
+                "product_contract_version": project["product_contract_version"],
+                "workspace_adapter_id": project["workspace_adapter_id"],
+                "environment_adapter_id": project["environment_adapter_id"],
+                "participant_driver_contract": project[
+                    "participant_driver_contract"
+                ],
+                "collaboration_policy_schema": project[
+                    "collaboration_policy_schema"
+                ],
+                "repo_manifest_digest": render["repo_manifest_digest"],
+                "adapter_capability_digest": "b" * 64,
+            },
+            "render": render,
+        }
+
+
+@contextmanager
+def running_snapshot_policy_host(
+    state_root: Path, adapter: SnapshotProjectAdapter
+) -> Iterator[tuple[HarnessHost, HarnessClient]]:
+    with tempfile.TemporaryDirectory(prefix="acps-") as runtime:
+        host = HarnessHost(state_root, Path(runtime) / "host.sock")
+        host.projects.adapter = adapter  # type: ignore[assignment]
+        driver = FakeDeliveryDriver()
+        host.participants = ParticipantCoordinator(host.store, driver)  # type: ignore[arg-type]
+        host.delivery = DeliveryCoordinator(state_root, host.store, host.participants)
+        host.bind()
+        thread = threading.Thread(target=host.serve_forever, daemon=True)
+        thread.start()
+        try:
+            yield host, HarnessClient(state_root, host.socket_path)
+        finally:
+            host.shutdown()
+            thread.join(timeout=3)
+
+
+def _prepare_snapshot_policy_scenario(
+    client: HarnessClient,
+    *,
+    project_instance_id: str,
+    scenario_id: str,
+    project_binding_digest: str,
+) -> dict[str, Any]:
+    created = client.create_scenario(
+        project_instance_id=project_instance_id,
+        scenario_id=scenario_id,
+        project_binding_digest=project_binding_digest,
+    )["scenario"]
+    added: dict[str, dict[str, Any]] = {}
+    for participant_id in (SENDER_ID, RECEIVER_ID):
+        added[participant_id] = client.add_participant(
+            project_instance_id=project_instance_id,
+            scenario_id=scenario_id,
+            participant_id=participant_id,
+            scenario_generation=1,
+            scenario_state_revision=created["state_revision"],
+            launch_spec=_launch_spec(),
+            presentation_driver_id="presentation.iterm2",
+        )["participant"]
+    opened = client.open_scenario(
+        project_instance_id=project_instance_id,
+        scenario_id=scenario_id,
+        scenario_generation=1,
+        scenario_state_revision=created["state_revision"],
+    )["scenario"]
+    for participant_id in (SENDER_ID, RECEIVER_ID):
+        client.start_participant(
+            project_instance_id=project_instance_id,
+            scenario_id=scenario_id,
+            participant_id=participant_id,
+            scenario_generation=1,
+            scenario_state_revision=opened["state_revision"],
+            participant_generation=1,
+            participant_state_revision=added[participant_id]["state_revision"],
+        )
+    return opened
+
+
+def _write_snapshot_project_files(
+    project_root: Path, template: Mapping[str, Any]
+) -> None:
+    intent_root = project_root / ".aicollab"
+    intent_root.mkdir(parents=True, exist_ok=True)
+    (intent_root / "project.yaml").write_text(
+        "schema_version: 1\ncollaboration:\n  registry: ai_collab_team_policies.json\n",
+        encoding="utf-8",
+    )
+    (project_root / "ai_collab_team_policies.json").write_text(
+        json.dumps({"schema_version": 1, "templates": [template]}),
+        encoding="utf-8",
+    )
+
+
+def _remove_snapshot_project_files(project_root: Path) -> None:
+    (project_root / "ai_collab_team_policies.json").unlink()
+    (project_root / ".aicollab" / "project.yaml").unlink()
+    (project_root / ".aicollab").rmdir()
+    project_root.rmdir()
+
+
+def test_policy_catalog_updates_without_rewriting_scenario_snapshots(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    project_root = tmp_path / "canonical"
+    project_root.mkdir()
+    template_v1 = _versioned_policy_template(1)
+    template_v2 = _versioned_policy_template(2)
+    render_v1 = _snapshot_project_render(template_v1, version=1)
+    render_v2 = _snapshot_project_render(template_v2, version=2)
+    _write_snapshot_project_files(project_root, template_v1)
+    adapter = SnapshotProjectAdapter(project_root, render_v1)
+
+    with running_snapshot_policy_host(state_root, adapter) as (_, client):
+        project = client.register_project(
+            canonical_project_path=str(project_root),
+            request_id="register-policy-snapshot-project",
+        )["project"]
+        project_id = project["project_instance_id"]
+        opened_a = _prepare_snapshot_policy_scenario(
+            client,
+            project_instance_id=project_id,
+            scenario_id="snapshot-a",
+            project_binding_digest=render_v1["render_digest"],
+        )
+
+        _write_snapshot_project_files(project_root, template_v2)
+        adapter.render = copy.deepcopy(render_v2)
+        observed = client.reconcile_project(
+            project_instance_id=project_id,
+            request_id="observe-policy-v2",
+        )
+        assert observed["reconciliation"]["binding_changed"] is True
+        accepted = client.accept_project_reconciliation(
+            project_instance_id=project_id,
+            availability_fingerprint=observed["reconciliation"][
+                "availability_fingerprint"
+            ],
+            request_id="accept-policy-v2",
+        )
+        assert accepted["project"]["project_binding_digest"] == render_v2[
+            "render_digest"
+        ]
+        opened_b = _prepare_snapshot_policy_scenario(
+            client,
+            project_instance_id=project_id,
+            scenario_id="snapshot-b",
+            project_binding_digest=render_v2["render_digest"],
+        )
+
+        assert client.list_policy_templates(project_instance_id=project_id) == {
+            "templates": [template_v2]
+        }
+        plan_a = client.plan_policy(
+            project_instance_id=project_id,
+            scenario_id="snapshot-a",
+            scenario_generation=1,
+            scenario_state_revision=opened_a["state_revision"],
+            template_id=template_v1["template_id"],
+        )["policy_plan"]
+        plan_b = client.plan_policy(
+            project_instance_id=project_id,
+            scenario_id="snapshot-b",
+            scenario_generation=1,
+            scenario_state_revision=opened_b["state_revision"],
+            template_id=template_v2["template_id"],
+        )["policy_plan"]
+        assert plan_a["template_snapshot"]["template_digest"] == (
+            canonical_json_sha256(template_v1)
+        )
+        assert plan_b["template_snapshot"]["template_digest"] == (
+            canonical_json_sha256(template_v2)
+        )
+        assert next(
+            value
+            for value in plan_a["policy_pack"]["assignments"]
+            if value["participant"]["participant_id"] == RECEIVER_ID
+        )["task_id"] == "review-v1"
+        assert next(
+            value
+            for value in plan_b["policy_pack"]["assignments"]
+            if value["participant"]["participant_id"] == RECEIVER_ID
+        )["task_id"] == "review-v2"
+
+        _remove_snapshot_project_files(project_root)
+        assert client.list_policy_templates(project_instance_id=project_id) == {
+            "templates": [template_v2]
+        }
+        assert client.plan_policy(
+            project_instance_id=project_id,
+            scenario_id="snapshot-a",
+            scenario_generation=1,
+            scenario_state_revision=opened_a["state_revision"],
+            template_id=template_v1["template_id"],
+        )["policy_plan"] == plan_a
+        assert adapter.collaboration_calls == 0
+
+
+def test_policy_apply_plan_replays_before_mutable_template_inputs(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    project_root = tmp_path / "canonical"
+    project_root.mkdir()
+    template = _versioned_policy_template(1)
+    render = _snapshot_project_render(template, version=1)
+    _write_snapshot_project_files(project_root, template)
+    adapter = SnapshotProjectAdapter(project_root, render)
+
+    with running_snapshot_policy_host(state_root, adapter) as (host, client):
+        project_id = client.register_project(
+            canonical_project_path=str(project_root),
+            request_id="register-policy-replay-project",
+        )["project"]["project_instance_id"]
+        opened = _prepare_snapshot_policy_scenario(
+            client,
+            project_instance_id=project_id,
+            scenario_id="snapshot-replay",
+            project_binding_digest=render["render_digest"],
+        )
+        plan = client.plan_policy(
+            project_instance_id=project_id,
+            scenario_id="snapshot-replay",
+            scenario_generation=1,
+            scenario_state_revision=opened["state_revision"],
+            template_id=template["template_id"],
+        )["policy_plan"]
+        applied = client.apply_policy_plan(
+            project_instance_id=project_id,
+            scenario_id="snapshot-replay",
+            scenario_generation=1,
+            scenario_state_revision=opened["state_revision"],
+            template_id=template["template_id"],
+            plan_digest=plan["plan_digest"],
+            request_id="apply-frozen-policy-plan",
+        )
+
+        _remove_snapshot_project_files(project_root)
+
+        def mutable_input_was_consulted(*_args: Any, **_kwargs: Any) -> Any:
+            raise AssertionError("mutable policy input was consulted before replay")
+
+        host._scenario_collaboration_templates = (  # type: ignore[method-assign]
+            mutable_input_was_consulted
+        )
+        assert host.delivery is not None
+        host.delivery.plan_policy = mutable_input_was_consulted  # type: ignore[method-assign]
+        assert client.apply_policy_plan(
+            project_instance_id=project_id,
+            scenario_id="snapshot-replay",
+            scenario_generation=1,
+            scenario_state_revision=opened["state_revision"],
+            template_id=template["template_id"],
+            plan_digest=plan["plan_digest"],
+            request_id="apply-frozen-policy-plan",
+        ) == applied
+        assert adapter.collaboration_calls == 0

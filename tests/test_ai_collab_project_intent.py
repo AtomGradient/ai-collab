@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -22,6 +23,24 @@ import ai_collab_project_intent as intent  # noqa: E402
 
 def _git(repo: Path, *arguments: str) -> str:
     return subprocess.check_output(["git", "-C", str(repo), *arguments]).decode().strip()
+
+
+def _stale_index_snapshot(repo: Path, tracked_file: Path) -> tuple[Path, bytes, int]:
+    details = tracked_file.stat()
+    os.utime(
+        tracked_file,
+        ns=(details.st_atime_ns, max(1, details.st_mtime_ns - 10_000_000_000)),
+    )
+    index = Path(_git(repo, "rev-parse", "--git-path", "index"))
+    if not index.is_absolute():
+        index = repo / index
+    return index, index.read_bytes(), index.stat().st_mtime_ns
+
+
+def _assert_index_unchanged(snapshot: tuple[Path, bytes, int]) -> None:
+    index, contents, modified = snapshot
+    assert index.read_bytes() == contents
+    assert index.stat().st_mtime_ns == modified
 
 
 def _repo(path: Path, *, remote: str | None = None) -> Path:
@@ -72,12 +91,18 @@ def _write_intent(project: Path, *, min_reader: str = "0.1.7") -> None:
 
 
 def test_fileless_git_project_resolves_without_writing_canonical_source(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project = _repo(
         tmp_path / "sampleproject",
         remote="https://github.com/example/sampleproject.git",
     )
+    tracked = project / "README.md"
+    tracked.write_text("sample\n", encoding="utf-8")
+    _git(project, "add", "README.md")
+    _git(project, "commit", "-m", "add sample")
+    index_snapshot = _stale_index_snapshot(project, tracked)
+    monkeypatch.setenv("GIT_OPTIONAL_LOCKS", "1")
     before = sorted(item.relative_to(project).as_posix() for item in project.rglob("*"))
     first = intent.resolve_project(project)
     second = intent.resolve_project(project)
@@ -85,6 +110,8 @@ def test_fileless_git_project_resolves_without_writing_canonical_source(
 
     assert first == second
     assert before == after
+    _assert_index_unchanged(index_snapshot)
+    assert os.environ["GIT_OPTIONAL_LOCKS"] == "1"
     assert first["source"]["kind"] == "fileless"
     assert first["project"]["project_key"] == "sampleproject"
     assert first["gate"] == {
@@ -92,6 +119,13 @@ def test_fileless_git_project_resolves_without_writing_canonical_source(
         "profile_id": "builtin.standard-v1",
         "digest": first["gate"]["digest"],
     }
+    collaboration = first["collaboration"]
+    assert collaboration["registry_snapshot"]["schema_version"] == 1
+    assert collaboration["registry_snapshot"]["templates"]
+    assert collaboration["registry_snapshot_digest"] == (
+        intent.canonical_json_sha256(collaboration["registry_snapshot"])
+    )
+    assert str(project) not in str(collaboration)
     assert first["availability"]["status"] == "ready"
 
 

@@ -112,8 +112,16 @@ def test_public_payload_embeds_generic_adapters_and_no_integration_content(
     adapter = json.loads(
         (destination / "ai_collab_harness_adapter.json").read_text(encoding="utf-8")
     )
-    assert adapter["adapter_id"] == "ai-collab-project-adapter-v1"
-    assert adapter["command"][1] == "scripts/ai_collab_project_adapter.py"
+    assert adapter == {
+        "adapter_id": "ai-collab-project-adapter-v1",
+        "command": [
+            "runtime/bin/python3",
+            "scripts/ai_collab_project_adapter.py",
+        ],
+        "idempotent_join_operations": ["destroy", "recover", "repair"],
+        "schema_version": 1,
+        "working_directory": ".",
+    }
     security = json.loads(
         (destination / "ai_collab_security_adapter.json").read_text(encoding="utf-8")
     )
@@ -141,7 +149,16 @@ def test_integration_payload_embeds_the_integration_adapters(
     adapter = json.loads(
         (destination / "ai_collab_harness_adapter.json").read_text(encoding="utf-8")
     )
-    assert adapter["adapter_id"] == "ai-collab-edgestudio-bundle-v1"
+    assert adapter == {
+        "adapter_id": "ai-collab-edgestudio-bundle-v1",
+        "command": [
+            "runtime/bin/python3",
+            "scripts/ai_collab_edgestudio_adapter.py",
+        ],
+        "idempotent_join_operations": ["destroy", "recover", "repair"],
+        "schema_version": 1,
+        "working_directory": ".",
+    }
     security = json.loads(
         (destination / "ai_collab_security_adapter.json").read_text(encoding="utf-8")
     )
