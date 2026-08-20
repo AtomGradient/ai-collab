@@ -251,6 +251,7 @@ class HarnessHost:
                 self.state_root,
                 project_adapter,
                 project_root_resolver=self.projects.canonical_root,
+                project_render_resolver=self._scenario_project_render,
             )
             if project_adapter is not None
             else None
@@ -284,6 +285,24 @@ class HarnessHost:
         self._supervision_stop = threading.Event()
         self._supervision_thread: threading.Thread | None = None
         self.supervision_interval_seconds = 5.0
+
+    def _scenario_project_render(
+        self,
+        project_instance_id: str,
+        scenario_id: str | None,
+        project_binding_digest: str | None,
+    ) -> dict[str, Any] | None:
+        """Prefer the Scenario's self-contained contract over mutable registry state."""
+
+        if scenario_id is not None:
+            snapshot = self.store.scenario_project_contract(
+                project_instance_id, scenario_id
+            )
+            if snapshot is not None:
+                return snapshot
+        return self.projects.resolved_render(
+            project_instance_id, project_binding_digest
+        )
 
     def bind(self) -> None:
         if self._server is not None:
@@ -422,9 +441,20 @@ class HarnessHost:
     def _reconcile_scenario_resumes(self) -> None:
         for pending in self.store.pending_scenario_resume_requests():
             project_binding_digest = pending.pop("project_binding_digest")
-            self.projects.validate_binding(
-                pending["project_instance_id"], project_binding_digest
+            snapshot = self.store.scenario_project_contract(
+                pending["project_instance_id"], pending["scenario_id"]
             )
+            if snapshot is None:
+                # Only v0.1.6.1 migrations lack a self-contained render. Its
+                # frozen Workspace plan/receipt is the compatibility snapshot;
+                # require the registered project root, but do not re-interpret
+                # that historical digest through a mutable registry cache.
+                self.projects.canonical_root(pending["project_instance_id"])
+            elif snapshot["render_digest"] != project_binding_digest:
+                raise StoreError(
+                    "scenario.restore-plan-invalid",
+                    "Scenario project snapshot binding differs",
+                )
             if self.workspace is not None and not self.workspace.is_ready(
                 pending["project_instance_id"], pending["scenario_id"]
             ):
@@ -1433,6 +1463,33 @@ class HarnessHost:
         elif operation == "project.list":
             result = self.projects.list()
             operation_id = f"read-{request['request_id']}"
+        elif operation == "project.reconcile":
+            if request["fence"]["operation_generation"] != 0:
+                raise ProtocolError(
+                    "fence.stale-operation-generation",
+                    "fencing",
+                    "project reconciliation requires an absent-request fence",
+                    retryable=True,
+                )
+            operation_id, result = self.projects.reconcile(
+                request_id=request["request_id"],
+                request_digest=request_digest,
+                project_instance_id=request["target"]["project_instance_id"],
+            )
+        elif operation == "project.accept-reconciliation":
+            if request["fence"]["operation_generation"] != 0:
+                raise ProtocolError(
+                    "fence.stale-operation-generation",
+                    "fencing",
+                    "project reconciliation acceptance requires an absent-request fence",
+                    retryable=True,
+                )
+            operation_id, result = self.projects.accept_reconciliation(
+                request_id=request["request_id"],
+                request_digest=request_digest,
+                project_instance_id=request["target"]["project_instance_id"],
+                availability_fingerprint=request["payload"]["availability_fingerprint"],
+            )
         elif operation == "project.bootstrap":
             if request["fence"]["operation_generation"] != 0:
                 raise ProtocolError(
@@ -1598,6 +1655,18 @@ class HarnessHost:
                 target["project_instance_id"],
                 request["payload"]["project_binding_digest"],
             )
+            try:
+                project_contract_snapshot = self.projects.resolved_render(
+                    target["project_instance_id"],
+                    request["payload"]["project_binding_digest"],
+                )
+            except ProjectError as exc:
+                # Some isolated Host contract fixtures intentionally replace
+                # validate_binding without registering a project. Production
+                # traffic cannot reach this branch with an unknown project.
+                if exc.code != "project.not-found":
+                    raise
+                project_contract_snapshot = None
             operation_id, result = self.store.create_scenario(
                 request_id=request["request_id"],
                 request_digest=request_digest,
@@ -1605,6 +1674,7 @@ class HarnessHost:
                 project_instance_id=target["project_instance_id"],
                 scenario_id=target["scenario_id"],
                 project_binding_digest=request["payload"]["project_binding_digest"],
+                project_contract_snapshot=project_contract_snapshot,
             )
         elif operation == "scenario.open":
             if request["fence"]["operation_generation"] != request["payload"]["scenario_state_revision"]:
@@ -3189,6 +3259,9 @@ class HarnessHost:
             "project.intent-invalid",
             "project.partial-configuration",
             "project.intent-too-new",
+            "project.intent-proposal-incomplete",
+            "project.reconciliation-unavailable",
+            "project.reconciliation-stale",
         }:
             return ProtocolError(
                 error.code,
@@ -3292,6 +3365,27 @@ class HarnessHost:
                 error.message,
                 True,
                 "workspace.prepare",
+            )
+        workspace_repairs = {
+            "workspace.git-auth-required": "git.authenticate",
+            "workspace.network-unavailable": "workspace.prepare",
+            "workspace.branch-unavailable": "project.resolve-branch",
+            "workspace.remote-unavailable": "project.resolve-remote",
+            "workspace.remote-download-failed": "project.resolve-remote",
+            "workspace.disk-full": "disk.free-space",
+            "workspace.source-origin-mismatch": "project.resolve-origin",
+            "workspace.shallow-source": "git.fetch-full-history",
+            "workspace.partial-source-invalid": "git.materialize-full-clone",
+            "workspace.partial-source": "git.materialize-full-clone",
+            "workspace.alternate-object-source": "git.materialize-full-clone",
+        }
+        if error.code in workspace_repairs:
+            return ProtocolError(
+                error.code,
+                "availability",
+                error.message,
+                error.retryable,
+                workspace_repairs[error.code],
             )
         if error.code in {
             "workspace.concurrent-change",

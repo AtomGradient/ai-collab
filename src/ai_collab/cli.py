@@ -88,6 +88,20 @@ def add_harness_parser(subparsers: Any) -> None:
     _add_connection_options(project_register)
     project_list = project_commands.add_parser("list", help="List registered projects")
     _add_connection_options(project_list)
+    project_reconcile = project_commands.add_parser(
+        "reconcile", help="Refresh one project render and report repository drift"
+    )
+    project_reconcile.add_argument("project_instance_id")
+    project_reconcile.add_argument("--request-id")
+    _add_connection_options(project_reconcile)
+    project_accept = project_commands.add_parser(
+        "accept-update",
+        help="Apply one exact pending project configuration update",
+    )
+    project_accept.add_argument("project_instance_id")
+    project_accept.add_argument("availability_fingerprint")
+    project_accept.add_argument("--request-id")
+    _add_connection_options(project_accept)
     project_unregister = project_commands.add_parser(
         "unregister",
         help="Remove one registered project that owns no remaining Scenarios",
@@ -97,7 +111,7 @@ def add_harness_parser(subparsers: Any) -> None:
     _add_connection_options(project_unregister)
     project_bootstrap = project_commands.add_parser(
         "bootstrap",
-        help="Draft the declaration files for a project that has none yet",
+        help="Generate an owner-private .aicollab/project.yaml proposal",
     )
     project_bootstrap.add_argument("canonical_project_path", type=Path)
     project_bootstrap.add_argument("--request-id")
@@ -244,6 +258,14 @@ def add_harness_parser(subparsers: Any) -> None:
     plan.add_argument("--project-payload-json", default="{}")
     plan.add_argument("--request-id")
     _add_connection_options(plan)
+
+    prepare = workspace_commands.add_parser(
+        "prepare", help="Plan and provision an isolated Workspace in one command"
+    )
+    _add_workspace_identity_options(prepare)
+    prepare.add_argument("--component", action="append", default=[])
+    prepare.add_argument("--project-payload-json", default="{}")
+    _add_connection_options(prepare)
 
     provision = workspace_commands.add_parser(
         "provision", help="Materialize and atomically publish a frozen plan"
@@ -484,6 +506,17 @@ def run_harness_command(args: argparse.Namespace) -> int:
                     project_instance_id=args.project_instance_id,
                     request_id=args.request_id,
                 )
+            elif args.project_command == "reconcile":
+                result = client.reconcile_project(
+                    project_instance_id=args.project_instance_id,
+                    request_id=args.request_id,
+                )
+            elif args.project_command == "accept-update":
+                result = client.accept_project_reconciliation(
+                    project_instance_id=args.project_instance_id,
+                    availability_fingerprint=args.availability_fingerprint,
+                    request_id=args.request_id,
+                )
             elif args.project_command == "bootstrap":
                 result = client.bootstrap_project(
                     canonical_project_path=str(args.canonical_project_path),
@@ -602,7 +635,10 @@ def run_harness_command(args: argparse.Namespace) -> int:
                 raise HarnessClientError(
                     "cli.invalid-command", "Harness Scenario command is unavailable"
                 )
-        elif args.harness_command == "workspace" and args.workspace_command == "plan":
+        elif args.harness_command == "workspace" and args.workspace_command in {
+            "plan",
+            "prepare",
+        }:
             try:
                 project_payload = json.loads(args.project_payload_json)
             except json.JSONDecodeError as exc:
@@ -613,15 +649,39 @@ def run_harness_command(args: argparse.Namespace) -> int:
                 raise HarnessClientError(
                     "cli.invalid-command", "project payload must be a JSON object"
                 )
-            result = client.plan_workspace(
+            planned = client.plan_workspace(
                 project_instance_id=args.project_instance_id,
                 scenario_id=args.scenario_id,
                 scenario_generation=args.scenario_generation,
                 scenario_state_revision=args.state_revision,
                 requested_component_ids=args.component,
                 project_payload=project_payload,
-                request_id=args.request_id,
+                request_id=(args.request_id if args.workspace_command == "plan" else None),
             )
+            if args.workspace_command == "plan":
+                result = planned
+            else:
+                workspace = planned.get("workspace")
+                plan_digest = (
+                    workspace.get("plan_digest")
+                    if isinstance(workspace, dict)
+                    else None
+                )
+                if not isinstance(plan_digest, str):
+                    raise HarnessClientError(
+                        "cli.invalid-reply", "workspace plan digest is unavailable"
+                    )
+                provisioned = client.provision_workspace(
+                    project_instance_id=args.project_instance_id,
+                    scenario_id=args.scenario_id,
+                    scenario_generation=args.scenario_generation,
+                    scenario_state_revision=args.state_revision,
+                    plan_digest=plan_digest,
+                )
+                result = {
+                    "plan": workspace,
+                    "workspace": provisioned.get("workspace"),
+                }
         elif args.harness_command == "resource":
             if args.resource_command == "list":
                 result = client.list_resources(

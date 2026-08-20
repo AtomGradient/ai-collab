@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -77,6 +78,12 @@ def _git(repo: Path, *arguments: str) -> None:
     )
 
 
+def _git_output(repo: Path, *arguments: str) -> str:
+    return subprocess.check_output(
+        ["git", "-C", str(repo), *arguments], stderr=subprocess.DEVNULL
+    ).decode().strip()
+
+
 def _init_repo(path: Path, remote: str) -> None:
     path.mkdir(parents=True, exist_ok=True)
     subprocess.run(
@@ -134,6 +141,7 @@ def _call(
     payload: dict[str, Any],
     *,
     adapter_id: str = ADAPTER_ID,
+    extra_environment: dict[str, str] | None = None,
 ) -> tuple[int, dict[str, Any] | None, bytes]:
     request = {
         "adapter_protocol_version": 1,
@@ -146,12 +154,48 @@ def _call(
         input=json.dumps(request).encode("utf-8"),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        env={**os.environ, "AI_COLLAB_PROJECT_ROOT": str(project_root)},
+        env={
+            **os.environ,
+            **(extra_environment or {}),
+            "AI_COLLAB_PROJECT_ROOT": str(project_root),
+        },
     )
     reply = None
     if completed.returncode == 0:
         reply = json.loads(completed.stdout)
     return completed.returncode, reply, completed.stderr
+
+
+def _remote_only_helper(project: Path, tmp_path: Path) -> tuple[str, dict[str, str]]:
+    helper = project.parent / "helper-lib"
+    bare = tmp_path / "helper-remote.git"
+    subprocess.run(
+        ["git", "clone", "--bare", str(helper), str(bare)],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    shutil.rmtree(helper)
+    remote = f"ssh://git@localhost:22{bare}"
+    manifest = project / "repo_manifest.yaml"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace(
+            "https://github.com/example/helper-lib.git", remote
+        ),
+        encoding="utf-8",
+    )
+    ssh = tmp_path / "test-ssh.py"
+    ssh.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os,shlex,sys\n"
+        "if '-G' in sys.argv: raise SystemExit(0)\n"
+        "parts=shlex.split(sys.argv[-1])\n"
+        "if len(parts)!=2 or parts[0]!='git-upload-pack': raise SystemExit(2)\n"
+        "os.execvp(parts[0], parts)\n",
+        encoding="utf-8",
+    )
+    ssh.chmod(0o700)
+    return remote, {"GIT_SSH_COMMAND": str(ssh), "GIT_SSH_VARIANT": "ssh"}
 
 
 def _assert_failed(
@@ -203,7 +247,7 @@ def test_register_serves_a_second_project_key_without_any_code_change(
     assert reply["result"]["project"]["project_key"] == "otherproj"
 
 
-def test_register_rejects_descriptor_naming_a_different_adapter(
+def test_register_migrates_a_legacy_descriptor_adapter_pin_in_memory(
     tmp_path: Path,
 ) -> None:
     project = _build_project(tmp_path)
@@ -214,10 +258,12 @@ def test_register_rejects_descriptor_naming_a_different_adapter(
         ),
         encoding="utf-8",
     )
-    _assert_failed(
-        _call(project, "register", {"canonical_project_path": str(project)}),
-        "adapter.rejected",
+    code, reply, stderr = _call(
+        project, "register", {"canonical_project_path": str(project)}
     )
+    assert code == 0, stderr
+    assert reply is not None
+    assert reply["result"]["project"]["workspace_adapter_id"] == "ai-collab-workspace-v1"
 
 
 def test_register_rejects_descriptor_manifest_project_key_mismatch(
@@ -254,6 +300,222 @@ def test_collaboration_templates_come_from_the_project_root(tmp_path: Path) -> N
     assert code == 0, stderr
     assert reply is not None
     assert reply["result"]["templates"] == [{"template_id": "team.solo"}]
+
+
+@pytest.mark.slow
+def test_plan_and_provision_clone_a_missing_declared_repo_from_remote(
+    tmp_path: Path,
+) -> None:
+    project = _build_project(tmp_path)
+    _remote, git_environment = _remote_only_helper(project, tmp_path)
+    code, plan_reply, stderr = _call(
+        project,
+        "plan",
+        {
+            "operation_id": "wsop-remote-1",
+            "scenario": {"scenario_id": "scenario-remote"},
+            "scenario_state_revision": 1,
+            "workspace_id": "workspace:remote",
+            "requested_component_ids": [],
+            "project_payload": {},
+        },
+        extra_environment=git_environment,
+    )
+    assert code == 0, stderr
+    assert plan_reply is not None and plan_reply["outcome"] == "completed"
+    plan = plan_reply["result"]["plan"]
+    helper = next(
+        item for item in plan["components"] if item["component_id"] == "helper-lib"
+    )
+    assert helper["materialization_mode"] == "workspace.remote-clone"
+
+    staging = tmp_path / "scenario-remote" / "bundle"
+    staging.parent.mkdir(mode=0o700)
+    code, reply, stderr = _call(
+        project,
+        "provision",
+        {
+            "workspace_id": "workspace:remote",
+            "staging_path": str(staging),
+            "plan": plan,
+            "descriptors": plan_reply["result"]["descriptors"],
+        },
+        extra_environment=git_environment,
+    )
+    assert code == 0, stderr
+    assert reply is not None and reply["outcome"] == "completed"
+    assert (staging / "helper-lib" / ".git").is_dir()
+    assert _git_output(staging / "helper-lib", "rev-parse", "HEAD") == helper[
+        "planned_revision"
+    ]
+
+
+def test_missing_repo_auth_failure_is_typed_and_actionable(tmp_path: Path) -> None:
+    project = _build_project(tmp_path)
+    _remote, git_environment = _remote_only_helper(project, tmp_path)
+    ssh = tmp_path / "deny-ssh.py"
+    ssh.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "if '-G' in sys.argv: raise SystemExit(0)\n"
+        "sys.stderr.write('Permission denied (publickey).\\n')\n"
+        "raise SystemExit(255)\n",
+        encoding="utf-8",
+    )
+    ssh.chmod(0o700)
+    git_environment["GIT_SSH_COMMAND"] = str(ssh)
+    error = _assert_failed(
+        _call(
+            project,
+            "plan",
+            {
+                "operation_id": "wsop-auth-1",
+                "scenario": {"scenario_id": "scenario-auth"},
+                "scenario_state_revision": 1,
+                "workspace_id": "workspace:auth",
+                "requested_component_ids": [],
+                "project_payload": {},
+            },
+            extra_environment=git_environment,
+        ),
+        "workspace.git-auth-required",
+    )
+    assert error["retryable"] is False
+    assert "Sign in" in error["message"]
+
+
+def test_scan_era_wrong_branch_fails_typed_without_mutating_canonical_source(
+    tmp_path: Path,
+) -> None:
+    project = _build_project(tmp_path)
+    remote, git_environment = _remote_only_helper(project, tmp_path)
+    manifest = project / "repo_manifest.yaml"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace(
+            f"remote: {remote}\n    base_branch: main",
+            f"remote: {remote}\n    base_branch: guessed-main",
+        ),
+        encoding="utf-8",
+    )
+    before = _git_output(project, "status", "--porcelain=v1", "--untracked-files=all")
+
+    error = _assert_failed(
+        _call(
+            project,
+            "plan",
+            {
+                "operation_id": "wsop-wrong-branch-1",
+                "scenario": {"scenario_id": "scenario-wrong-branch"},
+                "scenario_state_revision": 1,
+                "workspace_id": "workspace:wrong-branch",
+                "requested_component_ids": [],
+                "project_payload": {},
+            },
+            extra_environment=git_environment,
+        ),
+        "workspace.branch-unavailable",
+    )
+
+    assert error["retryable"] is False
+    assert error["mutation_state"] == "not_started"
+    assert _git_output(
+        project, "status", "--porcelain=v1", "--untracked-files=all"
+    ) == before
+
+
+def test_present_checkouts_use_local_head_on_arbitrary_and_detached_branches(
+    tmp_path: Path,
+) -> None:
+    project = _build_project(tmp_path)
+    helper = project.parent / "helper-lib"
+    _git(project, "checkout", "-b", "employee/work")
+    _git(helper, "checkout", "--detach")
+    (project / "local-wip.txt").write_text("not committed\n", encoding="utf-8")
+
+    code, reply, stderr = _call(
+        project,
+        "plan",
+        {
+            "operation_id": "wsop-local-head-1",
+            "scenario": {"scenario_id": "scenario-local-head"},
+            "scenario_state_revision": 1,
+            "workspace_id": "workspace:local-head",
+            "requested_component_ids": [],
+            "project_payload": {},
+        },
+    )
+
+    assert code == 0, stderr
+    assert reply is not None and reply["outcome"] == "completed"
+    components = {
+        item["component_id"]: item for item in reply["result"]["plan"]["components"]
+    }
+    assert components["sampleproject"]["planned_revision"] == _git_output(
+        project, "rev-parse", "HEAD"
+    )
+    assert components["helper-lib"]["planned_revision"] == _git_output(
+        helper, "rev-parse", "HEAD"
+    )
+
+
+def test_shallow_checkout_failure_is_typed_and_actionable(tmp_path: Path) -> None:
+    project = _build_project(tmp_path)
+    shallow = Path(_git_output(project, "rev-parse", "--git-path", "shallow"))
+    if not shallow.is_absolute():
+        shallow = project / shallow
+    shallow.write_text(_git_output(project, "rev-parse", "HEAD") + "\n", encoding="utf-8")
+
+    error = _assert_failed(
+        _call(
+            project,
+            "plan",
+            {
+                "operation_id": "wsop-shallow-1",
+                "scenario": {"scenario_id": "scenario-shallow"},
+                "scenario_state_revision": 1,
+                "workspace_id": "workspace:shallow",
+                "requested_component_ids": [],
+                "project_payload": {},
+            },
+        ),
+        "workspace.shallow-source",
+    )
+    assert error["retryable"] is False
+    assert "git fetch --unshallow" in error["message"]
+
+
+@pytest.mark.parametrize(
+    ("fixture", "expected_code"),
+    [
+        ("origin", "workspace.source-origin-mismatch"),
+        ("partial", "workspace.partial-source"),
+    ],
+)
+def test_unsupported_present_checkout_storage_is_typed(
+    tmp_path: Path, fixture: str, expected_code: str
+) -> None:
+    project = _build_project(tmp_path)
+    if fixture == "origin":
+        _git(project, "remote", "set-url", "origin", "https://example.invalid/other.git")
+    else:
+        _git(project, "config", "extensions.partialClone", "origin")
+
+    error = _assert_failed(
+        _call(
+            project,
+            "plan",
+            {
+                "operation_id": f"wsop-{fixture}-1",
+                "scenario": {"scenario_id": f"scenario-{fixture}"},
+                "scenario_state_revision": 1,
+                "workspace_id": f"workspace:{fixture}",
+                "requested_component_ids": [],
+                "project_payload": {},
+            },
+        ),
+        expected_code,
+    )
+    assert error["mutation_state"] == "not_started"
 
 
 @pytest.mark.slow
@@ -495,14 +757,14 @@ def test_bootstrap_drafts_a_registrable_project_from_a_bare_git_directory(
     outcome = reply["result"]["bootstrap"]
     assert outcome["already_configured"] is False
     assert outcome["project_key"] == "freshproject"
-    assert set(outcome["created"]) == {
-        "project_descriptor.yaml",
-        "repo_manifest.yaml",
-        "gates.yaml",
-        "ai_collab_team_policies.json",
-    }
+    assert outcome["created"] == []
+    assert not (project / "project_descriptor.yaml").exists()
+    assert not (project / "repo_manifest.yaml").exists()
+    assert not (project / "gates.yaml").exists()
+    assert not (project / "ai_collab_team_policies.json").exists()
 
-    # The drafts register as-is: that is the entire point of bootstrap.
+    # Fileless registration accepts the observed project without canonical
+    # source mutation.
     code, reply, stderr = _call(
         project, "register", {"canonical_project_path": str(project)}
     )
@@ -511,17 +773,18 @@ def test_bootstrap_drafts_a_registrable_project_from_a_bare_git_directory(
     observed = reply["result"]["project"]
     assert observed["project_key"] == "freshproject"
 
-    manifest_text = (project / "repo_manifest.yaml").read_text(encoding="utf-8")
-    assert "repo_key: helper-lib" in manifest_text
-    assert "placement: project_child" in manifest_text
+    assert any(
+        row["repo_key"] == "helper-lib"
+        for row in reply["result"]["render"]["repo_manifest"]["repos"]
+    )
 
-    # A second bootstrap never touches the existing files.
+    # A second bootstrap remains a side-effect-free proposal.
     code, reply, stderr = _call(
         project, "bootstrap", {"canonical_project_path": str(project)}
     )
     assert code == 0, stderr
     assert reply is not None
-    assert reply["result"]["bootstrap"]["already_configured"] is True
+    assert reply["result"]["bootstrap"]["already_configured"] is False
     assert reply["result"]["bootstrap"]["created"] == []
 
 
@@ -536,11 +799,18 @@ def test_bootstrap_leaves_no_residue_when_the_draft_cannot_validate(
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    # No origin remote: the manifest contract cannot be satisfied.
+    # No origin remote: fileless registration still succeeds and exposes the
+    # missing remote as availability instead of failing registration.
     project = bare.resolve()
+    code, reply, stderr = _call(
+        project, "register", {"canonical_project_path": str(project)}
+    )
+    assert code == 0, stderr
+    assert reply is not None
+    assert reply["result"]["render"]["availability"]["status"] == "attention"
     _assert_failed(
         _call(project, "bootstrap", {"canonical_project_path": str(project)}),
-        "adapter.rejected",
+        "project.intent-proposal-incomplete",
     )
     assert not (project / "project_descriptor.yaml").exists()
     assert not (project / "repo_manifest.yaml").exists()

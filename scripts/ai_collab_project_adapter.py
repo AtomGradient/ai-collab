@@ -5,15 +5,14 @@
 
 """Generic Workspace/Environment adapter for the Harness Host.
 
-This adapter serves any project that provides three files at its canonical
-root: ``project_descriptor.yaml``, ``repo_manifest.yaml``, and
-``ai_collab_team_policies.json``. Project identity, repository topology,
-provisioning order, and Scenario environment bindings all come from those
-files; nothing project-specific lives in this code.
+This adapter serves fileless Git roots, stable ``.aicollab/project.yaml`` team
+intent, and every legacy preview declaration. The Host supplies a pinned
+resolved render for Scenario work; nothing project-specific lives in this code.
 """
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -23,20 +22,19 @@ import shutil
 import stat
 import subprocess
 import sys
-import time
 import venv
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
 
 from ai_collab_project_support import canonical_json_sha256, sha256_file
 import ai_collab_project_descriptor as descriptor_validator
+import ai_collab_project_intent as intent_resolver
 import ai_collab_repo_manifest as manifest_validator
 
 
 ROOT = Path(
     os.environ.get("AI_COLLAB_PROJECT_ROOT", Path(__file__).resolve().parents[1])
 ).resolve()
-COLLABORATION_TEMPLATE_PATH = ROOT / "ai_collab_team_policies.json"
 ADAPTER_ID = "ai-collab-project-adapter-v1"
 WORKSPACE_ADAPTER_ID = "ai-collab-workspace-v1"
 ENVIRONMENT_ADAPTER_ID = "ai-collab-environment-v1"
@@ -133,21 +131,49 @@ def _descriptors() -> list[dict[str, Any]]:
     ]
 
 
+def _resolved_render() -> dict[str, Any]:
+    encoded = os.environ.get("AI_COLLAB_PROJECT_RENDER")
+    if encoded is None:
+        return intent_resolver.resolve_project(ROOT)
+    try:
+        value = json.loads(encoded)
+        expected = value["render_digest"]
+        material = {
+            key: item
+            for key, item in value.items()
+            if key not in {"render_digest", "availability"}
+        }
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+        raise AdapterError(
+            "Host project render is invalid", code="project.render-invalid"
+        ) from exc
+    if not isinstance(expected, str) or canonical_json_sha256(material) != expected:
+        raise AdapterError(
+            "Host project render digest differs", code="project.render-invalid"
+        )
+    return value
+
+
 def _project_inputs() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
-    descriptor_result = descriptor_validator.validate_descriptor(repo_root=ROOT)
-    manifest_result = manifest_validator.validate_manifest(repo_root=ROOT)
-    descriptor = descriptor_validator.parse_descriptor(
-        (ROOT / descriptor_validator.DESCRIPTOR_RELATIVE_PATH).read_text(encoding="utf-8")
+    render = _resolved_render()
+    project = render["project"]
+    descriptor = {
+        "schema_version": 1,
+        "project_key": project["project_key"],
+        "product_contract_version": project["product_contract_version"],
+        "workspace_adapter": project["workspace_adapter_id"],
+        "repo_manifest": "repo_manifest.yaml",
+        "environment_adapter": project["environment_adapter_id"],
+        "gate_registry": render["gate"],
+        "participant_driver_contract": project["participant_driver_contract"],
+        "collaboration_policy_schema": project["collaboration_policy_schema"],
+    }
+    return (
+        descriptor,
+        {"descriptor_digest": render["render_digest"]},
+        render["repo_manifest"],
+        {"manifest_digest": render["repo_manifest_digest"]},
     )
-    manifest = manifest_validator._parse_manifest(  # noqa: SLF001
-        (ROOT / manifest_validator.MANIFEST_RELATIVE_PATH).read_text(encoding="utf-8")
-    )
-    # The two hard project pins of the historical validators are gone, so the
-    # only thing tying descriptor and manifest to the same project is this
-    # explicit cross-check.
-    if descriptor["project_key"] != manifest["project_key"]:
-        raise AdapterError("descriptor and manifest project keys differ")
-    return descriptor, descriptor_result, manifest, manifest_result
 
 
 def _register(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -162,6 +188,7 @@ def _register(payload: Mapping[str, Any]) -> dict[str, Any]:
         raise AdapterError("canonical project path is unavailable") from exc
     if project_root != ROOT or not project_root.is_dir():
         raise AdapterError("canonical project root differs")
+    render = _resolved_render()
     descriptor, descriptor_result, _, manifest_result = _project_inputs()
     if (
         descriptor["workspace_adapter"] != WORKSPACE_ADAPTER_ID
@@ -184,58 +211,16 @@ def _register(payload: Mapping[str, Any]) -> dict[str, Any]:
             ],
             "repo_manifest_digest": manifest_result["manifest_digest"],
             "adapter_capability_digest": canonical_json_sha256(descriptors),
-        }
+        },
+        "render": render,
     }
 
 
 PRODUCT_ROOT = Path(__file__).resolve().parents[1]
-PROJECT_KEY_SANITIZE_RE = re.compile(r"[^a-z0-9-]+")
-
-
-def _bootstrap_project_key(root: Path) -> str:
-    candidate = PROJECT_KEY_SANITIZE_RE.sub("-", root.name.lower()).strip("-")
-    if not candidate or not candidate[0].isalpha():
-        candidate = f"project-{candidate}".strip("-")
-    candidate = candidate[:64].rstrip("-")
-    if descriptor_validator.PROJECT_KEY_RE.fullmatch(candidate) is None:
-        raise AdapterError("project name cannot become a project key")
-    return candidate
-
-
-def _bootstrap_repo_row(repo: Path, *, key: str, placement: str, path: str, order: int, after: list[str]) -> dict[str, Any] | None:
-    status, raw = _probe_git(repo, "config", "--get", "remote.origin.url")
-    remote = raw.decode().strip()
-    if status != 0 or not remote:
-        return None
-    if ".." in remote or not any(
-        pattern.fullmatch(remote) for pattern in manifest_validator.REMOTE_RES
-    ):
-        return None
-    branch_status, branch_raw = _probe_git(repo, "symbolic-ref", "--short", "HEAD")
-    branch = branch_raw.decode().strip() if branch_status == 0 else ""
-    if not branch or manifest_validator.BRANCH_RE.fullmatch(branch) is None:
-        branch = "main"
-    return {
-        "key": key,
-        "placement": placement,
-        "path": path,
-        "remote": remote,
-        "branch": branch,
-        "order": order,
-        "after": after,
-    }
 
 
 def _bootstrap(payload: Mapping[str, Any]) -> dict[str, Any]:
-    """Write valid draft declaration files for an undescribed project.
-
-    Cold start: a project that has never met the Harness has none of the
-    declaration files. This scans the canonical root (and its immediate
-    child Git repositories), writes drafts, and then validates them with the
-    same validators registration uses — a draft that would not register is
-    deleted again rather than left half-written. Files that already exist
-    are never touched.
-    """
+    """Build an owner-private intent proposal without writing canonical source."""
     if set(payload) != {"canonical_project_path"}:
         raise AdapterError("bootstrap payload fields differ")
     supplied = payload["canonical_project_path"]
@@ -248,112 +233,16 @@ def _bootstrap(payload: Mapping[str, Any]) -> dict[str, Any]:
     if root != ROOT or not root.is_dir():
         raise AdapterError("canonical project root differs")
 
-    descriptor_path = root / descriptor_validator.DESCRIPTOR_RELATIVE_PATH
-    manifest_path = root / manifest_validator.MANIFEST_RELATIVE_PATH
-    if descriptor_path.exists() or manifest_path.exists():
-        return {
-            "bootstrap": {
-                "created": [],
-                "already_configured": True,
-                "project_key": None,
-            }
-        }
-    _run_git(root, "rev-parse", "--git-dir")
-    key = _bootstrap_project_key(root)
-    rows = [
-        _bootstrap_repo_row(
-            root, key=key, placement="project_root", path=".", order=0, after=[]
-        )
-    ]
-    if rows[0] is None:
-        raise AdapterError("project origin remote is missing or not canonical")
-    order = 10
-    for child in sorted(root.iterdir()):
-        if not child.is_dir() or child.is_symlink() or not (child / ".git").exists():
-            continue
-        if manifest_validator.PATH_PART_RE.fullmatch(child.name) is None:
-            continue
-        child_key = PROJECT_KEY_SANITIZE_RE.sub("-", child.name.lower()).strip("-")
-        if (
-            not child_key
-            or child_key == key
-            or manifest_validator.REPO_KEY_RE.fullmatch(child_key) is None
-        ):
-            continue
-        row = _bootstrap_repo_row(
-            child,
-            key=child_key,
-            placement="project_child",
-            path=child.name,
-            order=order,
-            after=[key],
-        )
-        if row is not None:
-            rows.append(row)
-            order += 10
-    date = time.strftime("%Y%m%d")
-    created: list[str] = []
-    try:
-        manifest_lines = ["schema_version: 1", f"project_key: {key}", "repos:"]
-        for row in rows:
-            manifest_lines += [
-                f"  - repo_key: {row['key']}",
-                f"    classification: required",
-                f"    placement: {row['placement']}",
-                f"    path: {row['path']}",
-                f"    remote: {row['remote']}",
-                f"    base_branch: {row['branch']}",
-                f"    provision_order: {row['order']}",
-                f"    provision_after: [{', '.join(row['after'])}]",
-                "    acceptance_layer: base",
-                "    smoke_policy: "
-                + ("required" if row["placement"] == "project_root" else "optional"),
-            ]
-        manifest_path.write_text("\n".join(manifest_lines) + "\n", encoding="utf-8")
-        created.append(manifest_validator.MANIFEST_RELATIVE_PATH)
-        descriptor_path.write_text(
-            "schema_version: 1\n"
-            f"project_key: {key}\n"
-            'product_contract_version: "1.0"\n'
-            f"workspace_adapter: {WORKSPACE_ADAPTER_ID}\n"
-            "repo_manifest: repo_manifest.yaml\n"
-            f"environment_adapter: {ENVIRONMENT_ADAPTER_ID}\n"
-            "gate_registry: gates.yaml\n"
-            "participant_driver_contract: 2\n"
-            "collaboration_policy_schema: 1\n",
-            encoding="utf-8",
-        )
-        created.append(descriptor_validator.DESCRIPTOR_RELATIVE_PATH)
-        gates_path = root / "gates.yaml"
-        if not gates_path.exists():
-            gates_path.write_text(
-                "schema_version: 1\n"
-                f"registry_id: ai-collab-scenario-harness-{key}-v1.0-{date}\n",
-                encoding="utf-8",
-            )
-            created.append("gates.yaml")
-        policies_path = root / "ai_collab_team_policies.json"
-        if not policies_path.exists():
-            shipped = PRODUCT_ROOT / "ai_collab_team_policies.json"
-            policies_path.write_text(
-                shipped.read_text(encoding="utf-8"), encoding="utf-8"
-            )
-            created.append("ai_collab_team_policies.json")
-        # The draft must be a registrable project, not merely plausible YAML.
-        descriptor_validator.validate_descriptor(repo_root=root)
-        manifest_validator.validate_manifest(repo_root=root)
-    except (AdapterError, OSError, ValueError) as exc:
-        for name in created:
-            try:
-                (root / name).unlink()
-            except OSError:
-                pass
-        raise AdapterError("bootstrap draft failed validation") from exc
+    proposal = intent_resolver.draft_intent(root)
     return {
         "bootstrap": {
-            "created": created,
-            "already_configured": False,
-            "project_key": key,
+            "created": [],
+            "already_configured": (root / intent_resolver.INTENT_RELATIVE_PATH).is_file(),
+            "project_key": proposal["intent"]["project_key"],
+            "proposal": {
+                "intent_digest": proposal["intent_digest"],
+                "yaml": proposal["yaml"],
+            },
         }
     }
 
@@ -361,9 +250,16 @@ def _bootstrap(payload: Mapping[str, Any]) -> dict[str, Any]:
 def _collaboration_templates(payload: Mapping[str, Any]) -> dict[str, Any]:
     if payload:
         raise AdapterError("collaboration template payload fields differ")
-    path = COLLABORATION_TEMPLATE_PATH
+    source = _resolved_render()["collaboration"]
+    path = (
+        ROOT / source["relative_path"]
+        if source["kind"] == "project-registry"
+        else PRODUCT_ROOT / "ai_collab_team_policies.json"
+    )
     if path.is_symlink() or not path.is_file() or path.stat().st_uid != os.getuid():
         raise AdapterError("collaboration template registry is unavailable")
+    if source.get("digest") != sha256_file(path):
+        raise AdapterError("collaboration template registry digest differs")
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -417,6 +313,28 @@ def _source_path(row: Mapping[str, Any]) -> Path:
     return resolved
 
 
+def _source_path_if_present(row: Mapping[str, Any]) -> Path | None:
+    """Resolve a declared checkout, while treating an absent repo as availability."""
+
+    placement = row["placement"]
+    logical_path = Path(row["path"])
+    if logical_path.is_absolute():
+        raise AdapterError("declared source path is not relative")
+    if placement == "project_root":
+        path = ROOT
+    elif placement == "project_child":
+        path = ROOT / logical_path
+    elif placement == "bundle_sibling":
+        path = ROOT.parent / logical_path
+    else:
+        raise AdapterError("declared source placement is unavailable")
+    if path.is_symlink():
+        raise AdapterError("declared source repository traverses a symlink")
+    if not path.exists():
+        return None
+    return _source_path(row)
+
+
 def _selected_rows(
     manifest: Mapping[str, Any], requested: Sequence[str]
 ) -> list[dict[str, Any]]:
@@ -468,21 +386,39 @@ def _git_identity(path: Path, row: Mapping[str, Any]) -> dict[str, Any]:
     # machine's url.<base>.insteadOf rewrites, so on a machine with such a
     # rule the manifest's declared remote would never match even though the
     # repository is configured exactly as declared.
+    remote = row.get("remote")
+    if not isinstance(remote, str) or not remote:
+        raise AdapterError(
+            "This repository has no canonical remote. Add an origin before preparing the Workspace.",
+            code="workspace.remote-unavailable",
+        )
     origin = _run_git(path, "config", "--get", "remote.origin.url").decode().strip()
-    if origin != row["remote"]:
-        raise AdapterError("canonical source origin differs from manifest")
+    if origin != remote:
+        raise AdapterError(
+            "This checkout's origin does not match the team project definition.",
+            code="workspace.source-origin-mismatch",
+        )
     if _run_git(path, "rev-parse", "--is-shallow-repository").decode().strip() != "false":
-        raise AdapterError("canonical source is shallow")
+        raise AdapterError(
+            "This checkout has partial history. Use your Git client to fetch complete history (or run git fetch --unshallow), then retry Prepare Workspace.",
+            code="workspace.shallow-source",
+        )
     config_status, promisor_config = _probe_git(
         path,
         "config",
         "--get-regexp",
-        r"^(extensions\.partialClone|remote\..*\.promisor)$",
+        r"^(extensions\.partial[Cc]lone|remote\..*\.promisor)$",
     )
     if config_status not in {0, 1}:
-        raise AdapterError("canonical source promisor configuration is unreadable")
+        raise AdapterError(
+            "This checkout's partial-clone configuration cannot be read.",
+            code="workspace.partial-source-invalid",
+        )
     if config_status == 0 or promisor_config.strip():
-        raise AdapterError("canonical source uses partial-clone or promisor storage")
+        raise AdapterError(
+            "This checkout uses partial Git object storage. Download all repository objects, then retry Prepare Workspace.",
+            code="workspace.partial-source",
+        )
     common_dir_raw = _run_git(path, "rev-parse", "--git-common-dir").decode().strip()
     common_dir = Path(common_dir_raw)
     if not common_dir.is_absolute():
@@ -490,7 +426,10 @@ def _git_identity(path: Path, row: Mapping[str, Any]) -> dict[str, Any]:
     common_dir = common_dir.resolve(strict=True)
     alternates = common_dir / "objects" / "info" / "alternates"
     if alternates.exists() or alternates.is_symlink():
-        raise AdapterError("canonical source uses alternate object storage")
+        raise AdapterError(
+            "This checkout uses shared alternate Git object storage and cannot be isolated safely.",
+            code="workspace.alternate-object-source",
+        )
     return {
         "head": head,
         "object_format": object_format,
@@ -499,12 +438,127 @@ def _git_identity(path: Path, row: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _source_wip_digest(rows: Sequence[Mapping[str, Any]]) -> str:
+def _remote_failure(stderr: bytes, returncode: int, *, mutation_state: str) -> AdapterError:
+    detail = stderr.decode("utf-8", errors="replace").lower()
+    if "no space left on device" in detail or "disk quota exceeded" in detail:
+        return AdapterError(
+            "The Scenario Workspace does not have enough free disk space.",
+            code="workspace.disk-full",
+            mutation_state=mutation_state,
+        )
+    authentication_markers = (
+        "permission denied",
+        "authentication failed",
+        "could not read username",
+        "terminal prompts disabled",
+        "publickey",
+        "access denied",
+        "repository not found",
+    )
+    if any(marker in detail for marker in authentication_markers):
+        return AdapterError(
+            "Git credentials are unavailable to AICollab. Sign in to the repository provider, then retry Prepare Workspace.",
+            code="workspace.git-auth-required",
+            mutation_state=mutation_state,
+        )
+    network_markers = (
+        "could not resolve host",
+        "connection timed out",
+        "network is unreachable",
+        "connection refused",
+        "failed to connect",
+        "operation timed out",
+        "no route to host",
+        "connection closed",
+    )
+    if any(marker in detail for marker in network_markers):
+        return AdapterError(
+            "The repository network is unavailable. Check the network or VPN, then retry Prepare Workspace.",
+            code="workspace.network-unavailable",
+            retryable=True,
+            mutation_state=mutation_state,
+        )
+    if returncode == 2:
+        return AdapterError(
+            "The declared repository branch is unavailable.",
+            code="workspace.branch-unavailable",
+            mutation_state=mutation_state,
+        )
+    return AdapterError(
+        "The repository could not be downloaded.",
+        code="workspace.remote-download-failed",
+        mutation_state=mutation_state,
+    )
+
+
+def _remote_identity(row: Mapping[str, Any]) -> dict[str, Any]:
+    remote = row.get("remote")
+    branch = row.get("base_branch")
+    if not isinstance(remote, str) or not remote:
+        raise AdapterError(
+            "This repository has no canonical remote. Add an origin before preparing the Workspace.",
+            code="workspace.remote-unavailable",
+        )
+    try:
+        completed = subprocess.run(
+            [
+                "git",
+                "ls-remote",
+                "--exit-code",
+                "--refs",
+                remote,
+                f"refs/heads/{branch}",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+            timeout=120,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise AdapterError(
+            "The repository network timed out. Check the network or VPN, then retry Prepare Workspace.",
+            code="workspace.network-unavailable",
+            retryable=True,
+        ) from exc
+    if completed.returncode != 0:
+        raise _remote_failure(completed.stderr, completed.returncode, mutation_state="not_started")
+    fields = completed.stdout.decode("utf-8", errors="replace").strip().split()
+    if len(fields) != 2 or fields[1] != f"refs/heads/{branch}" or re.fullmatch(
+        r"[0-9a-f]{40}|[0-9a-f]{64}", fields[0]
+    ) is None:
+        raise AdapterError("The repository returned an invalid branch identity.")
+    object_format = "sha1" if len(fields[0]) == 40 else "sha256"
+    return {"head": fields[0], "object_format": object_format}
+
+
+def _source_wip_digest(
+    rows: Sequence[Mapping[str, Any]], components: Sequence[Mapping[str, Any]]
+) -> str:
+    components_by_id = {item["component_id"]: item for item in components}
+    values: list[dict[str, Any]] = []
+    for row in rows:
+        component = components_by_id[row["repo_key"]]
+        source = _source_path_if_present(row)
+        if source is None:
+            values.append(
+                {
+                    "component_id": row["repo_key"],
+                    "source_kind": "remote",
+                    "planned_revision": component["planned_revision"],
+                    "source_identity_digest": component["source_identity_digest"],
+                }
+            )
+        else:
+            values.append(
+                {
+                    "component_id": row["repo_key"],
+                    "source_kind": "canonical-checkout",
+                    **_git_identity(source, row),
+                }
+            )
     return canonical_json_sha256(
-        [
-            {"component_id": row["repo_key"], **_git_identity(_source_path(row), row)}
-            for row in rows
-        ]
+        values
     )
 
 
@@ -528,7 +582,9 @@ def _safe_target_ref(scenario_id: str) -> str:
     return value
 
 
-def _environment_spec(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+def _environment_spec(
+    rows: Sequence[Mapping[str, Any]], components: Sequence[Mapping[str, Any]]
+) -> dict[str, Any]:
     lock_rows = [row for row in rows if "dependency_lock" in row]
     if len(lock_rows) > 1:
         raise AdapterError("multiple dependency lock declarations are unsupported")
@@ -536,13 +592,15 @@ def _environment_spec(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     if lock_rows:
         row = lock_rows[0]
         relative = PurePosixPath(row["dependency_lock"])
-        lock_path = _source_path(row).joinpath(*relative.parts)
-        if lock_path.is_file():
+        source = _source_path_if_present(row)
+        lock_path = source.joinpath(*relative.parts) if source is not None else None
+        if lock_path is not None and lock_path.is_file():
             lock_digest = sha256_file(lock_path)
+    components_by_id = {item["component_id"]: item for item in components}
     source_bindings = [
         {
             "component_id": row["repo_key"],
-            "revision": _git_identity(_source_path(row), row)["head"],
+            "revision": components_by_id[row["repo_key"]]["planned_revision"],
         }
         for row in rows
     ]
@@ -584,8 +642,8 @@ def _plan(payload: Mapping[str, Any]) -> dict[str, Any]:
     target_ref = _safe_target_ref(scenario["scenario_id"])
     components: list[dict[str, Any]] = []
     for row in rows:
-        source = _source_path(row)
-        identity = _git_identity(source, row)
+        source = _source_path_if_present(row)
+        identity = _git_identity(source, row) if source is not None else _remote_identity(row)
         revision_kind = f"scm.git-{identity['object_format']}"
         component = {
             "component_id": row["repo_key"],
@@ -601,12 +659,16 @@ def _plan(payload: Mapping[str, Any]) -> dict[str, Any]:
             "revision_kind": revision_kind,
             "planned_revision": identity["head"],
             "target_ref": target_ref,
-            "materialization_mode": "workspace.no-local-clone",
+            "materialization_mode": (
+                "workspace.no-local-clone"
+                if source is not None
+                else "workspace.remote-clone"
+            ),
             "source_mutation_allowed": False,
             "isolated_writable": True,
             "shared_mutable_storage": False,
             "adapter_plan_digest": "",
-            "estimated_bytes": _estimated_git_bytes(source),
+            "estimated_bytes": _estimated_git_bytes(source) if source is not None else 0,
         }
         component["adapter_plan_digest"] = canonical_json_sha256(
             {
@@ -617,7 +679,7 @@ def _plan(payload: Mapping[str, Any]) -> dict[str, Any]:
             }
         )
         components.append(component)
-    environment_details = _environment_spec(rows)
+    environment_details = _environment_spec(rows, components)
     environment_id = f"environment:{str(payload['operation_id']).removeprefix('wsop-')}"
     environment = {
         "environment_id": environment_id,
@@ -647,7 +709,7 @@ def _plan(payload: Mapping[str, Any]) -> dict[str, Any]:
         "requested_component_ids": [item["component_id"] for item in components],
         "components": components,
         "environment": environment,
-        "source_wip_snapshot_digest": _source_wip_digest(rows),
+        "source_wip_snapshot_digest": _source_wip_digest(rows, components),
         "total_estimated_bytes": sum(item["estimated_bytes"] for item in components)
         + environment["estimated_bytes"],
         "project_payload_digest": canonical_json_sha256(project_payload),
@@ -758,31 +820,53 @@ def _materialize_components(
     receipts: list[dict[str, Any]] = []
     for component in plan["components"]:
         row = rows[component["component_id"]]
-        source = _source_path(row)
         target = _target_path(staging, component)
         target.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
-        completed = subprocess.run(
-            [
-                "git",
-                "clone",
-                "--no-local",
-                "--no-checkout",
-                "--origin",
-                "canonical-source",
-                str(source),
-                str(target),
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-        )
+        remote_clone = component["materialization_mode"] == "workspace.remote-clone"
+        if remote_clone:
+            clone = [
+                "git", "clone", "--no-checkout", "--origin", "origin",
+                row["remote"], str(target),
+            ]
+        else:
+            source = _source_path(row)
+            clone = [
+                "git", "clone", "--no-local", "--no-checkout", "--origin",
+                "canonical-source", str(source), str(target),
+            ]
+        try:
+            completed = subprocess.run(
+                clone,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+                timeout=240,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise AdapterError(
+                "The repository download timed out. Check the network or VPN, then retry Prepare Workspace.",
+                code="workspace.network-unavailable",
+                retryable=True,
+                mutation_state="started",
+            ) from exc
         if completed.returncode != 0:
-            raise AdapterError("no-local clone failed")
+            if remote_clone:
+                raise _remote_failure(
+                    completed.stderr, completed.returncode, mutation_state="started"
+                )
+            raise AdapterError(
+                "The canonical checkout could not be copied into the Scenario Workspace.",
+                code="workspace.provision-failed",
+                retryable=True,
+                mutation_state="started",
+            )
         revision = component["planned_revision"]
         _run_git(target, "cat-file", "-e", f"{revision}^{{commit}}")
         _run_git(target, "switch", "--create", component["target_ref"], revision)
-        _run_git(target, "remote", "remove", "canonical-source")
-        _run_git(target, "remote", "add", "origin", row["remote"])
+        if not remote_clone:
+            _run_git(target, "remote", "remove", "canonical-source")
+            _run_git(target, "remote", "add", "origin", row["remote"])
         if _run_git(target, "remote").decode().splitlines() != ["origin"]:
             raise AdapterError("scenario remote set differs")
         configured = _run_git(
@@ -1034,11 +1118,11 @@ def _provision(payload: Mapping[str, Any]) -> dict[str, Any]:
     del descriptor
     rows = {row["repo_key"]: row for row in manifest["repos"]}
     planned_rows = [rows[item["component_id"]] for item in plan["components"]]
-    if _source_wip_digest(planned_rows) != plan["source_wip_snapshot_digest"]:
+    if _source_wip_digest(planned_rows, plan["components"]) != plan["source_wip_snapshot_digest"]:
         raise AdapterError("canonical source changed after planning")
     components = _materialize_components(staging, plan, rows)
     environment = _materialize_environment(staging, plan, components, rows)
-    if _source_wip_digest(planned_rows) != plan["source_wip_snapshot_digest"]:
+    if _source_wip_digest(planned_rows, plan["components"]) != plan["source_wip_snapshot_digest"]:
         raise AdapterError("canonical source WIP changed during provisioning")
     workspace_binding_digest = canonical_json_sha256(
         {
@@ -1730,14 +1814,22 @@ def main() -> int:
     except manifest_validator.ManifestError as exc:
         error = AdapterError(str(exc), code="project.manifest-invalid")
         response = _failed_response(error)
+    except intent_resolver.IntentError as exc:
+        response = _failed_response(
+            AdapterError(str(exc), code=exc.code, retryable=exc.retryable)
+        )
     except AdapterError as exc:
         response = _failed_response(exc)
     except (OSError, subprocess.SubprocessError) as exc:
+        is_disk_full = isinstance(exc, OSError) and exc.errno in {errno.ENOSPC, errno.EDQUOT}
         response = _failed_response(
             AdapterError(
-                "project adapter could not access a required local resource",
-                code="adapter.io-failed",
-                retryable=True,
+                (
+                    "The Scenario Workspace does not have enough free disk space."
+                    if is_disk_full
+                    else "project adapter could not access a required local resource"
+                ),
+                code="workspace.disk-full" if is_disk_full else "adapter.io-failed",
             )
         )
     except (json.JSONDecodeError, ValueError):

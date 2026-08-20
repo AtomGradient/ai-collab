@@ -28,6 +28,7 @@ REQUIRED_PRODUCT_FILES = (
     "scripts/ai_collab_participant_driver.py",
     "scripts/ai_collab_project_adapter.py",
     "scripts/ai_collab_project_descriptor.py",
+    "scripts/ai_collab_project_intent.py",
     "scripts/ai_collab_project_support.py",
     "scripts/ai_collab_repo_manifest.py",
     "scripts/ai_collab_window_topology_screens.swift",

@@ -1,0 +1,13 @@
+schema_version: 1
+project_key: sampleproject
+repos:
+  - repo_key: sampleproject
+    classification: required
+    placement: project_root
+    path: .
+    remote: https://github.com/example/sampleproject.git
+    base_branch: main
+    provision_order: 0
+    provision_after: []
+    acceptance_layer: base
+    smoke_policy: required

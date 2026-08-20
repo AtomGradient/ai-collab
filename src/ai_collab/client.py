@@ -81,6 +81,35 @@ class HarnessClient:
     def list_projects(self) -> dict[str, Any]:
         return self._call("project.list", {"scope": "host"}, {}, {})
 
+    def reconcile_project(
+        self,
+        *,
+        project_instance_id: str,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        return self._call(
+            "project.reconcile",
+            {"scope": "project", "project_instance_id": project_instance_id},
+            {"operation_generation": 0},
+            {},
+            request_id=request_id,
+        )
+
+    def accept_project_reconciliation(
+        self,
+        *,
+        project_instance_id: str,
+        availability_fingerprint: str,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        return self._call(
+            "project.accept-reconciliation",
+            {"scope": "project", "project_instance_id": project_instance_id},
+            {"operation_generation": 0},
+            {"availability_fingerprint": availability_fingerprint},
+            request_id=request_id,
+        )
+
     def bootstrap_project(
         self,
         *,

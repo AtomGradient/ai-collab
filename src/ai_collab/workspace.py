@@ -16,6 +16,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import stat
 import subprocess
 import threading
@@ -33,6 +34,7 @@ ADAPTER_PROTOCOL_VERSION = 1
 MAX_ADAPTER_REPLY_BYTES = 8 * 1024 * 1024
 ADAPTER_ERROR_CODE_RE = re.compile(r"^[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*)+$")
 ADAPTER_ENVIRONMENT_KEYS = {
+    "HOME",
     "PATH",
     "TMPDIR",
     "LANG",
@@ -47,6 +49,7 @@ ADAPTER_ENVIRONMENT_KEYS = {
     "all_proxy",
     "no_proxy",
     "PYTHONDONTWRITEBYTECODE",
+    "SSH_AUTH_SOCK",
 }
 
 
@@ -150,6 +153,7 @@ class ProjectAdapterCommand:
         payload: Mapping[str, Any],
         *,
         project_root: Path | None = None,
+        project_render: Mapping[str, Any] | None = None,
         timeout_seconds: float = 300,
     ) -> dict[str, Any]:
         request = {
@@ -167,6 +171,13 @@ class ProjectAdapterCommand:
             environment["AI_COLLAB_PROJECT_ROOT"] = str(
                 Path(project_root).resolve(strict=True)
             )
+        if project_render is not None:
+            encoded_render = canonical_json_bytes(dict(project_render))
+            if len(encoded_render) > MAX_ADAPTER_REPLY_BYTES:
+                raise WorkspaceError(
+                    "project.render-invalid", "project render exceeds the adapter limit"
+                )
+            environment["AI_COLLAB_PROJECT_RENDER"] = encoded_render.decode("utf-8")
         try:
             completed = subprocess.run(
                 self.command,
@@ -257,11 +268,16 @@ class WorkspaceCoordinator:
         adapter: ProjectAdapterCommand,
         *,
         project_root_resolver: Callable[[str], Path] | None = None,
+        project_render_resolver: Callable[
+            [str, str | None, str | None], Mapping[str, Any] | None
+        ]
+        | None = None,
     ):
         self.state_root = Path(state_root).resolve()
         self.state_path = self.state_root / "workspace-execution.json"
         self.adapter = adapter
         self.project_root_resolver = project_root_resolver
+        self.project_render_resolver = project_render_resolver
         self._lock = threading.RLock()
         with self._lock:
             if not self.state_path.exists():
@@ -273,13 +289,41 @@ class WorkspaceCoordinator:
         project_instance_id: str,
         operation: str,
         payload: Mapping[str, Any],
+        *,
+        project_binding_digest: str | None = None,
     ) -> dict[str, Any]:
         if self.project_root_resolver is None:
             return self.adapter.call(operation, payload)
+        if project_binding_digest is None:
+            plan = payload.get("plan")
+            if isinstance(plan, Mapping):
+                candidate = plan.get("project_descriptor_digest")
+                if isinstance(candidate, str):
+                    project_binding_digest = candidate
+        scenario_id: str | None = None
+        candidates = [payload]
+        for field in ("plan", "receipt"):
+            nested = payload.get(field)
+            if isinstance(nested, Mapping):
+                candidates.append(nested)
+        for candidate in candidates:
+            scenario = candidate.get("scenario")
+            if isinstance(scenario, Mapping) and isinstance(
+                scenario.get("scenario_id"), str
+            ):
+                scenario_id = scenario["scenario_id"]
+                break
         return self.adapter.call(
             operation,
             payload,
             project_root=self.project_root_resolver(project_instance_id),
+            project_render=(
+                self.project_render_resolver(
+                    project_instance_id, scenario_id, project_binding_digest
+                )
+                if self.project_render_resolver is not None
+                else None
+            ),
         )
 
     @staticmethod
@@ -421,8 +465,34 @@ class WorkspaceCoordinator:
             if replay is not None:
                 return replay
             key = _binding_key(project_instance_id, scenario_id)
-            if key in state["bindings"]:
-                raise WorkspaceError("workspace.already-planned", "workspace already has a plan")
+            existing = state["bindings"].get(key)
+            if existing is not None:
+                if (
+                    existing["state"] in {"planned", "provision_failed"}
+                    and existing.get("project_binding_digest")
+                    == project_binding_digest
+                    and existing.get("requested_component_ids_input")
+                    == requested_component_ids
+                    and existing.get("project_payload_input") == project_payload
+                    and existing["scenario_generation"] == scenario_generation
+                    and existing["scenario_state_revision"]
+                    == scenario_state_revision
+                ):
+                    response = copy.deepcopy(existing["result"])
+                    operation_id = existing["plan"]["operation_id"]
+                    self._record_request(
+                        state,
+                        request_id,
+                        request_digest,
+                        operation_id,
+                        response,
+                    )
+                    state["state_revision"] += 1
+                    self._write_state(state)
+                    return operation_id, response
+                raise WorkspaceError(
+                    "workspace.already-planned", "workspace already has a plan"
+                )
         operation_id = f"wsop-{uuid.uuid4().hex}"
         result = self._call_adapter(
             project_instance_id,
@@ -438,6 +508,7 @@ class WorkspaceCoordinator:
                 "requested_component_ids": requested_component_ids,
                 "project_payload": project_payload,
             },
+            project_binding_digest=project_binding_digest,
         )
         if set(result) != {"descriptors", "plan"}:
             raise WorkspaceError("adapter.invalid-reply", "plan result fields differ")
@@ -473,6 +544,11 @@ class WorkspaceCoordinator:
                 "scenario_generation": scenario_generation,
                 "scenario_state_revision": scenario_state_revision,
                 "workspace_id": workspace_id,
+                "project_binding_digest": project_binding_digest,
+                "requested_component_ids_input": copy.deepcopy(
+                    requested_component_ids
+                ),
+                "project_payload_input": copy.deepcopy(project_payload),
                 "state": "planned",
                 "descriptors": copy.deepcopy(descriptors),
                 "plan": copy.deepcopy(plan),
@@ -540,7 +616,10 @@ class WorkspaceCoordinator:
             if replay is not None:
                 return replay
             binding = state["bindings"].get(key)
-            if binding is None or binding["state"] != "planned":
+            if binding is None or binding["state"] not in {
+                "planned",
+                "provision_failed",
+            }:
                 raise WorkspaceError("workspace.not-planned", "workspace has no provisionable plan")
             self._check_binding_fence(
                 binding, scenario_generation, scenario_state_revision, plan_digest
@@ -596,16 +675,18 @@ class WorkspaceCoordinator:
             finally:
                 os.close(directory)
         except WorkspaceError as exc:
-            self._record_provision_failure(key, request_id)
+            self._discard_owned_stage(staging_path, workspace_path)
+            self._record_provision_failure(key, request_id, exc.code)
             raise WorkspaceError(
-                "workspace.provision-failed",
-                "workspace provisioning failed",
+                exc.code,
+                exc.message,
                 retryable=exc.retryable,
                 mutation_state="committed",
                 operation_id=operation_id,
             ) from exc
         except OSError as exc:
-            self._record_provision_failure(key, request_id)
+            self._discard_owned_stage(staging_path, workspace_path)
+            self._record_provision_failure(key, request_id, "workspace.provision-failed")
             raise WorkspaceError(
                 "workspace.provision-failed",
                 "workspace provisioning failed",
@@ -1274,13 +1355,30 @@ class WorkspaceCoordinator:
             raise WorkspaceError("workspace.stage-invalid", "adapter staging owner differs")
         os.chmod(path, 0o700)
 
-    def _record_provision_failure(self, key: str, request_id: str) -> None:
+    @staticmethod
+    def _discard_owned_stage(path: Path, workspace_path: Path) -> None:
+        """Remove only the Host-owned failed staging tree; never follow links."""
+
+        if path.parent != workspace_path or not path.name.startswith(".stage-wsop-"):
+            return
+        if path.is_symlink() or not path.exists():
+            return
+        try:
+            details = path.stat()
+            if path.is_dir() and details.st_uid == os.getuid():
+                shutil.rmtree(path)
+        except OSError:
+            return
+
+    def _record_provision_failure(
+        self, key: str, request_id: str, error_code: str
+    ) -> None:
         with self._lock:
             state = self._read_state()
             binding = state["bindings"].get(key)
             if binding is not None and binding["state"] == "provisioning":
                 self._fail_pending_binding(
-                    state, binding, "workspace.adapter-execution-failed"
+                    state, binding, error_code
                 )
             request = state["requests"].get(request_id)
             if request is not None:

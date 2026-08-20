@@ -22,7 +22,8 @@ from .protocol import canonical_json_bytes, canonical_json_sha256
 from .workspace import ProjectAdapterCommand, WorkspaceError
 
 
-PROJECT_REGISTRY_SCHEMA_VERSION = 1
+PROJECT_REGISTRY_SCHEMA_VERSION = 2
+LEGACY_PROJECT_REGISTRY_SCHEMA_VERSION = 1
 NAMESPACED_RE = re.compile(r"^[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*)+$")
 OPAQUE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 
@@ -52,6 +53,8 @@ class ProjectRegistry:
         with self._lock:
             if not self.state_path.exists():
                 self._write_state(self._empty_state())
+            else:
+                self._migrate_legacy_state()
             self._read_state()
 
     @staticmethod
@@ -91,7 +94,14 @@ class ProjectRegistry:
                     or not project_instance_id
                     or not isinstance(item, dict)
                     or set(item)
-                    != {"canonical_root", "canonical_root_fingerprint", "record"}
+                    != {
+                        "canonical_root",
+                        "canonical_root_fingerprint",
+                        "record",
+                        "render",
+                        "pending_reconciliation",
+                        "accepted_binding_digests",
+                    }
                     or not isinstance(item["canonical_root"], str)
                     or not Path(item["canonical_root"]).is_absolute()
                     or not self._is_sha256(item["canonical_root_fingerprint"])
@@ -102,6 +112,31 @@ class ProjectRegistry:
                 ):
                     raise ValueError
                 record = self._validate_record(item["record"])
+                self._validate_render(item["render"])
+                accepted = item["accepted_binding_digests"]
+                if (
+                    not isinstance(accepted, list)
+                    or not accepted
+                    or len(accepted) > 256
+                    or len(accepted) != len(set(accepted))
+                    or any(not self._is_sha256(digest) for digest in accepted)
+                    or record["project_binding_digest"] not in accepted
+                ):
+                    raise ValueError
+                pending = item["pending_reconciliation"]
+                if pending is not None:
+                    if (
+                        not isinstance(pending, dict)
+                        or set(pending) != {"public", "render", "reconciliation"}
+                    ):
+                        raise ValueError
+                    self._validate_observation(
+                        {
+                            "project": pending["public"],
+                            "render": pending["render"],
+                        }
+                    )
+                    self._validate_reconciliation(pending["reconciliation"])
                 if record["project_instance_id"] != project_instance_id:
                     raise ValueError
             for request_id, request in value["requests"].items():
@@ -115,11 +150,20 @@ class ProjectRegistry:
                     or not request["operation_id"]
                     or not isinstance(request["result"], dict)
                     or set(request["result"])
-                    not in ({"project"}, {"unregistered"}, {"bootstrap"})
+                    not in (
+                        {"project"},
+                        {"project", "reconciliation"},
+                        {"unregistered"},
+                        {"bootstrap"},
+                    )
                 ):
                     raise ValueError
                 if "project" in request["result"]:
                     self._validate_record(request["result"]["project"])
+                    if "reconciliation" in request["result"]:
+                        self._validate_reconciliation(
+                            request["result"]["reconciliation"]
+                        )
                 elif "bootstrap" in request["result"]:
                     self._validate_bootstrap_result(request["result"]["bootstrap"])
                 else:
@@ -146,6 +190,105 @@ class ProjectRegistry:
                 "project.state-invalid", "project registry records differ"
             ) from exc
         return value
+
+    def _migrate_legacy_state(self) -> None:
+        """Upgrade v0.1.6.1 project registrations without re-registration."""
+
+        if self.state_path.is_symlink() or not self.state_path.is_file():
+            return
+        details = self.state_path.stat()
+        if stat.S_IMODE(details.st_mode) != 0o600 or details.st_uid != os.getuid():
+            return
+        try:
+            raw = self.state_path.read_bytes()
+            value = json.loads(raw)
+        except (OSError, json.JSONDecodeError):
+            return
+        if (
+            not isinstance(value, dict)
+            or value.get("schema_version")
+            != LEGACY_PROJECT_REGISTRY_SCHEMA_VERSION
+        ):
+            return
+        if set(value) != {"schema_version", "state_revision", "projects", "requests"}:
+            raise ProjectError("project.state-invalid", "legacy project registry fields differ")
+        projects = value.get("projects")
+        state_revision = value.get("state_revision")
+        requests = value.get("requests")
+        if (
+            not isinstance(projects, dict)
+            or not isinstance(requests, dict)
+            or not isinstance(state_revision, int)
+            or isinstance(state_revision, bool)
+            or state_revision < 0
+        ):
+            raise ProjectError("project.state-invalid", "legacy project registry differs")
+        for item in projects.values():
+            if not isinstance(item, dict) or set(item) != {
+                "canonical_root",
+                "canonical_root_fingerprint",
+                "record",
+            }:
+                raise ProjectError("project.state-invalid", "legacy project record differs")
+            self._validate_record(item["record"])
+            item["render"] = None
+            item["pending_reconciliation"] = None
+            item["accepted_binding_digests"] = [
+                item["record"]["project_binding_digest"]
+            ]
+        backup = self.state_root / "project-registry.v1.last-good.json"
+        if not backup.exists():
+            temporary = self.state_root / (
+                f".project-registry.v1.last-good.{os.getpid()}."
+                f"{secrets.token_hex(6)}.tmp"
+            )
+            descriptor = os.open(
+                temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+            )
+            try:
+                with os.fdopen(descriptor, "wb") as stream:
+                    stream.write(raw)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, backup)
+                os.chmod(backup, 0o600)
+            finally:
+                if temporary.exists():
+                    temporary.unlink()
+        value["schema_version"] = PROJECT_REGISTRY_SCHEMA_VERSION
+        value["state_revision"] += 1
+        self._write_validated_migration(value)
+
+    def _write_validated_migration(self, value: Mapping[str, Any]) -> None:
+        """Write, validate, then atomically swap an exact migration candidate."""
+
+        temporary = self.state_root / (
+            f".project-registry.migration.{os.getpid()}.{secrets.token_hex(6)}.tmp"
+        )
+        descriptor = os.open(
+            temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+        )
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(canonical_json_bytes(value) + b"\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            original = self.state_path
+            self.state_path = temporary
+            try:
+                self._read_state()
+            finally:
+                self.state_path = original
+            os.replace(temporary, self.state_path)
+            os.chmod(self.state_path, 0o600)
+            directory = os.open(self.state_root, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
 
     def _write_state(self, value: dict[str, Any]) -> None:
         temporary = self.state_root / (
@@ -217,6 +360,7 @@ class ProjectRegistry:
                 exc.retryable,
             ) from exc
         public = self._validate_observation(observed)
+        render = copy.deepcopy(observed.get("render"))
         root_fingerprint = canonical_json_sha256({"canonical_project_path": str(root)})
 
         with self._lock:
@@ -238,11 +382,15 @@ class ProjectRegistry:
             if existing_id is None:
                 project_instance_id = f"project-{uuid.uuid4().hex}"
                 registration_revision = 1
+                accepted_binding_digests: list[str] = []
             else:
                 project_instance_id = existing_id
                 registration_revision = (
                     state["projects"][existing_id]["record"]["registration_revision"]
                     + 1
+                )
+                accepted_binding_digests = copy.deepcopy(
+                    state["projects"][existing_id]["accepted_binding_digests"]
                 )
             record = {
                 "project_instance_id": project_instance_id,
@@ -253,6 +401,13 @@ class ProjectRegistry:
                 "canonical_root": str(root),
                 "canonical_root_fingerprint": root_fingerprint,
                 "record": record,
+                "render": render,
+                "pending_reconciliation": None,
+                "accepted_binding_digests": list(
+                    dict.fromkeys(
+                        [*accepted_binding_digests, record["project_binding_digest"]]
+                    )
+                )[-256:],
             }
             operation_id = f"project-op-{uuid.uuid4().hex}"
             result = {"project": copy.deepcopy(record)}
@@ -280,11 +435,283 @@ class ProjectRegistry:
                 )
             }
 
+    def reconcile(
+        self,
+        *,
+        request_id: str,
+        request_digest: str,
+        project_instance_id: str,
+    ) -> tuple[str, dict[str, Any]]:
+        """Observe drift without silently changing a pinned project contract."""
+
+        if self.adapter is None:
+            raise ProjectError(
+                "project.adapter-unavailable",
+                "project adapter is not configured",
+                retryable=True,
+            )
+        with self._lock:
+            state = self._read_state()
+            previous = state["requests"].get(request_id)
+            if previous is not None:
+                if previous["request_digest"] != request_digest:
+                    raise ProjectError("ipc.request-reused", "request identity was reused")
+                return previous["operation_id"], copy.deepcopy(previous["result"])
+            if project_instance_id not in state["projects"]:
+                raise ProjectError("project.not-found", "project is not registered")
+
+        root = self.canonical_root(project_instance_id)
+        try:
+            if isinstance(self.adapter, ProjectAdapterCommand):
+                observed = self.adapter.call(
+                    "register",
+                    {"canonical_project_path": str(root)},
+                    project_root=root,
+                )
+            else:
+                observed = self.adapter.call(
+                    "register", {"canonical_project_path": str(root)}
+                )
+        except WorkspaceError as exc:
+            raise ProjectError(exc.code, exc.message, exc.retryable) from exc
+        public = self._validate_observation(observed)
+        render = copy.deepcopy(observed.get("render"))
+        availability = (
+            render.get("availability") if isinstance(render, dict) else None
+        )
+        if not isinstance(availability, dict):
+            availability = {
+                "status": "ready",
+                "changes": [],
+                "warnings": [],
+                "fingerprint": canonical_json_sha256(
+                    {"status": "ready", "changes": [], "warnings": []}
+                ),
+            }
+        reconciliation = {
+            "status": availability["status"],
+            "binding_changed": False,
+            "availability_fingerprint": availability["fingerprint"],
+            "changes": copy.deepcopy(availability["changes"]),
+            "warnings": copy.deepcopy(availability["warnings"]),
+        }
+
+        with self._lock:
+            state = self._read_state()
+            previous = state["requests"].get(request_id)
+            if previous is not None:
+                if previous["request_digest"] != request_digest:
+                    raise ProjectError("ipc.request-reused", "request identity was reused")
+                return previous["operation_id"], copy.deepcopy(previous["result"])
+            item = state["projects"].get(project_instance_id)
+            if item is None:
+                raise ProjectError("project.not-found", "project is not registered")
+            current = item["record"]
+            reconciliation["binding_changed"] = any(
+                current[field] != value for field, value in public.items()
+            )
+            if reconciliation["binding_changed"] and render is None:
+                raise ProjectError(
+                    "project.adapter-invalid",
+                    "project adapter changed a binding without a resolved render",
+                )
+            runtime_refresh = reconciliation[
+                "binding_changed"
+            ] and self._is_compatible_runtime_refresh(
+                current=current,
+                previous_render=item["render"],
+                public=public,
+                render=render,
+            )
+            if runtime_refresh:
+                record = {
+                    "project_instance_id": project_instance_id,
+                    "registration_revision": current["registration_revision"] + 1,
+                    **copy.deepcopy(public),
+                }
+                item["record"] = record
+                item["render"] = render
+                item["pending_reconciliation"] = None
+                item["accepted_binding_digests"] = list(
+                    dict.fromkeys(
+                        [
+                            *item["accepted_binding_digests"],
+                            record["project_binding_digest"],
+                        ]
+                    )
+                )[-256:]
+                reconciliation["binding_changed"] = False
+            elif reconciliation["binding_changed"]:
+                reconciliation["status"] = "attention"
+                item["pending_reconciliation"] = {
+                    "public": copy.deepcopy(public),
+                    "render": copy.deepcopy(render),
+                    "reconciliation": copy.deepcopy(reconciliation),
+                }
+                record = current
+            else:
+                record = current
+                item["render"] = render
+                item["pending_reconciliation"] = None
+            operation_id = f"project-op-{uuid.uuid4().hex}"
+            result = {
+                "project": copy.deepcopy(record),
+                "reconciliation": copy.deepcopy(reconciliation),
+            }
+            state["requests"][request_id] = {
+                "request_digest": request_digest,
+                "operation_id": operation_id,
+                "result": copy.deepcopy(result),
+            }
+            state["state_revision"] += 1
+            self._write_state(state)
+            return operation_id, result
+
     @staticmethod
-    def _validate_bootstrap_result(value: Any) -> None:
+    def _is_compatible_runtime_refresh(
+        *,
+        current: Mapping[str, Any],
+        previous_render: Mapping[str, Any] | None,
+        public: Mapping[str, Any],
+        render: Mapping[str, Any] | None,
+    ) -> bool:
+        """Recognize tool-owned upgrades that must not require employee action."""
+
+        if render is None:
+            return False
+        stable_public = {
+            "project_key",
+            "repo_manifest_digest",
+            "participant_driver_contract",
+            "collaboration_policy_schema",
+        }
+        if any(current[field] != public[field] for field in stable_public):
+            return False
+        if previous_render is None:
+            return (
+                current["product_contract_version"] in {"1.0", "3.2"}
+                and current["workspace_adapter_id"]
+                in {"ai-collab-workspace-v1", "ai-collab-edgestudio-workspace-v1"}
+                and current["environment_adapter_id"]
+                in {
+                    "ai-collab-environment-v1",
+                    "ai-collab-edgestudio-environment-v1",
+                }
+            )
+
+        def same_source(left: Any, right: Any) -> bool:
+            if left == right:
+                return True
+            return (
+                isinstance(left, Mapping)
+                and isinstance(right, Mapping)
+                and left.get("kind") == right.get("kind") == "builtin"
+                and left.get("profile_id") == right.get("profile_id")
+            )
+
+        return (
+            previous_render.get("source") == render.get("source")
+            and previous_render.get("repo_manifest_digest")
+            == render.get("repo_manifest_digest")
+            and same_source(previous_render.get("gate"), render.get("gate"))
+            and same_source(
+                previous_render.get("collaboration"), render.get("collaboration")
+            )
+        )
+
+    def accept_reconciliation(
+        self,
+        *,
+        request_id: str,
+        request_digest: str,
+        project_instance_id: str,
+        availability_fingerprint: str,
+    ) -> tuple[str, dict[str, Any]]:
+        """Apply the exact pending private render after an explicit user action."""
+
+        with self._lock:
+            state = self._read_state()
+            previous = state["requests"].get(request_id)
+            if previous is not None:
+                if previous["request_digest"] != request_digest:
+                    raise ProjectError("ipc.request-reused", "request identity was reused")
+                return previous["operation_id"], copy.deepcopy(previous["result"])
+            item = state["projects"].get(project_instance_id)
+            if item is None:
+                raise ProjectError("project.not-found", "project is not registered")
+            pending = item["pending_reconciliation"]
+            if pending is None:
+                raise ProjectError(
+                    "project.reconciliation-unavailable",
+                    "project has no pending configuration update",
+                )
+            reconciliation = pending["reconciliation"]
+            if reconciliation["availability_fingerprint"] != availability_fingerprint:
+                raise ProjectError(
+                    "project.reconciliation-stale",
+                    "project reconciliation changed; check for updates again",
+                    retryable=True,
+                )
+            current = item["record"]
+            record = {
+                "project_instance_id": project_instance_id,
+                "registration_revision": current["registration_revision"] + 1,
+                **copy.deepcopy(pending["public"]),
+            }
+            item["record"] = record
+            item["render"] = copy.deepcopy(pending["render"])
+            item["pending_reconciliation"] = None
+            item["accepted_binding_digests"] = list(
+                dict.fromkeys(
+                    [
+                        *item["accepted_binding_digests"],
+                        record["project_binding_digest"],
+                    ]
+                )
+            )[-256:]
+            operation_id = f"project-op-{uuid.uuid4().hex}"
+            result = {
+                "project": copy.deepcopy(record),
+                "reconciliation": {
+                    **copy.deepcopy(reconciliation),
+                    "binding_changed": False,
+                    "status": "ready" if not reconciliation["changes"] else "attention",
+                },
+            }
+            state["requests"][request_id] = {
+                "request_digest": request_digest,
+                "operation_id": operation_id,
+                "result": copy.deepcopy(result),
+            }
+            state["state_revision"] += 1
+            self._write_state(state)
+            return operation_id, result
+
+    @classmethod
+    def _validate_bootstrap_result(cls, value: Any) -> None:
+        legacy_fields = {"created", "already_configured", "project_key"}
+        if isinstance(value, dict) and set(value) == legacy_fields:
+            if (
+                isinstance(value["created"], list)
+                and all(
+                    isinstance(item, str)
+                    and item
+                    and "/" not in item
+                    and ".." not in item
+                    for item in value["created"]
+                )
+                and isinstance(value["already_configured"], bool)
+                and (
+                    value["project_key"] is None
+                    or isinstance(value["project_key"], str)
+                )
+            ):
+                return
+            raise ValueError
         if (
             not isinstance(value, dict)
-            or set(value) != {"created", "already_configured", "project_key"}
+            or set(value)
+            != {"created", "already_configured", "project_key", "proposal"}
             or not isinstance(value["created"], list)
             or any(
                 not isinstance(item, str) or not item or "/" in item or ".." in item
@@ -294,8 +721,55 @@ class ProjectRegistry:
             or not (
                 value["project_key"] is None or isinstance(value["project_key"], str)
             )
+            or not isinstance(value["proposal"], dict)
+            or set(value["proposal"]) != {"intent_digest", "yaml"}
+            or not cls._is_sha256(value["proposal"]["intent_digest"])
+            or not isinstance(value["proposal"]["yaml"], str)
+            or not value["proposal"]["yaml"]
+            or len(value["proposal"]["yaml"].encode("utf-8")) > 256 * 1024
         ):
             raise ValueError
+
+    @classmethod
+    def _validate_reconciliation(cls, value: Any) -> None:
+        if (
+            not isinstance(value, dict)
+            or set(value)
+            != {
+                "status",
+                "binding_changed",
+                "availability_fingerprint",
+                "changes",
+                "warnings",
+            }
+            or value["status"] not in {"ready", "attention"}
+            or not isinstance(value["binding_changed"], bool)
+            or not cls._is_sha256(value["availability_fingerprint"])
+            or not isinstance(value["changes"], list)
+            or len(value["changes"]) > 256
+            or not isinstance(value["warnings"], list)
+            or len(value["warnings"]) > 256
+            or any(not isinstance(item, str) or not item for item in value["warnings"])
+        ):
+            raise ValueError
+        for change in value["changes"]:
+            if (
+                not isinstance(change, dict)
+                or not {"repo_key", "path", "classification", "status"}.issubset(change)
+                or set(change) - {"repo_key", "path", "classification", "status", "reasons"}
+                or not all(
+                    isinstance(change[field], str) and change[field]
+                    for field in {"repo_key", "path", "classification", "status"}
+                )
+                or (
+                    "reasons" in change
+                    and (
+                        not isinstance(change["reasons"], list)
+                        or any(not isinstance(item, str) or not item for item in change["reasons"])
+                    )
+                )
+            ):
+                raise ValueError
 
     def bootstrap(
         self,
@@ -304,12 +778,7 @@ class ProjectRegistry:
         request_digest: str,
         canonical_project_path: str,
     ) -> tuple[str, dict[str, Any]]:
-        """Ask the adapter to draft declaration files for a bare project.
-
-        The adapter never overwrites an existing file and deletes its own
-        drafts if they fail validation, so this either leaves a registrable
-        project or the directory exactly as it was.
-        """
+        """Return an owner-private intent draft without writing canonical source."""
         if self.adapter is None:
             raise ProjectError(
                 "project.adapter-unavailable",
@@ -431,10 +900,14 @@ class ProjectRegistry:
                 retryable=True,
             )
         root = self.canonical_root(project_instance_id)
+        render = self.resolved_render(project_instance_id)
         try:
             if isinstance(self.adapter, ProjectAdapterCommand):
                 observed = self.adapter.call(
-                    "collaboration_templates", {}, project_root=root
+                    "collaboration_templates",
+                    {},
+                    project_root=root,
+                    project_render=render,
                 )
             else:
                 observed = self.adapter.call("collaboration_templates", {})
@@ -477,10 +950,10 @@ class ProjectRegistry:
             item = state["projects"].get(project_instance_id)
             if item is None:
                 raise ProjectError("project.not-found", "project is not registered")
-            if item["record"]["project_binding_digest"] != project_binding_digest:
+            if project_binding_digest not in item["accepted_binding_digests"]:
                 raise ProjectError(
                     "project.binding-drift",
-                    "project binding differs from its registered descriptor",
+                    "project binding is not an accepted project snapshot",
                 )
 
     def canonical_root(self, project_instance_id: str) -> Path:
@@ -509,6 +982,26 @@ class ProjectRegistry:
                 "project.path-invalid", "registered project root identity differs"
             )
         return resolved
+
+    def resolved_render(
+        self,
+        project_instance_id: str,
+        project_binding_digest: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Return the Host-private deterministic render for adapter dispatch."""
+
+        with self._lock:
+            state = self._read_state()
+            item = state["projects"].get(project_instance_id)
+            if item is None:
+                raise ProjectError("project.not-found", "project is not registered")
+            if (
+                project_binding_digest is None
+                or project_binding_digest
+                == item["record"]["project_binding_digest"]
+            ):
+                return copy.deepcopy(item["render"])
+            return None
 
     @classmethod
     def _validate_collaboration_template(cls, value: Any) -> dict[str, Any]:
@@ -573,6 +1066,38 @@ class ProjectRegistry:
         )
 
     @classmethod
+    def _validate_render(cls, value: Any) -> dict[str, Any] | None:
+        # A migrated v0.1.6.1 registration has no render until the next
+        # successful reconciliation.  The generic adapter can still resolve
+        # its legacy canonical declarations during that compatibility window.
+        if value is None:
+            return None
+        if not isinstance(value, dict) or len(canonical_json_bytes(value)) > 8 * 1024 * 1024:
+            raise ProjectError("project.state-invalid", "project render differs")
+        digest = value.get("render_digest")
+        material = {
+            key: item
+            for key, item in value.items()
+            if key not in {"render_digest", "availability"}
+        }
+        if not cls._is_sha256(digest) or canonical_json_sha256(material) != digest:
+            raise ProjectError("project.state-invalid", "project render digest differs")
+        required = {
+            "render_contract_version",
+            "source",
+            "project",
+            "repo_manifest",
+            "repo_manifest_digest",
+            "gate",
+            "collaboration",
+            "availability",
+            "render_digest",
+        }
+        if set(value) != required or value["render_contract_version"] != 1:
+            raise ProjectError("project.state-invalid", "project render fields differ")
+        return value
+
+    @classmethod
     def _validate_record(cls, value: Any) -> dict[str, Any]:
         public_fields = {
             "project_key",
@@ -614,8 +1139,10 @@ class ProjectRegistry:
             "repo_manifest_digest",
             "adapter_capability_digest",
         }
-        if not isinstance(value, dict) or set(value) != {"project"}:
+        if not isinstance(value, dict) or set(value) not in ({"project"}, {"project", "render"}):
             raise ProjectError("project.adapter-invalid", "project adapter reply differs")
+        if "render" in value:
+            render = ProjectRegistry._validate_render(value["render"])
         project = value["project"]
         if not isinstance(project, dict) or set(project) != fields:
             raise ProjectError("project.adapter-invalid", "project adapter record differs")
@@ -649,4 +1176,28 @@ class ProjectRegistry:
             )
         ):
             raise ProjectError("project.adapter-invalid", "project adapter values differ")
+        if "render" in value:
+            assert render is not None
+            render_project = render.get("project")
+            if (
+                project["project_binding_digest"] != render["render_digest"]
+                or project["repo_manifest_digest"]
+                != render["repo_manifest_digest"]
+                or not isinstance(render_project, dict)
+                or any(
+                    project[field] != render_project.get(field)
+                    for field in {
+                        "project_key",
+                        "product_contract_version",
+                        "workspace_adapter_id",
+                        "environment_adapter_id",
+                        "participant_driver_contract",
+                        "collaboration_policy_schema",
+                    }
+                )
+            ):
+                raise ProjectError(
+                    "project.adapter-invalid",
+                    "project adapter render binding differs",
+                )
         return copy.deepcopy(project)

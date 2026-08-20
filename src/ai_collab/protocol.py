@@ -106,6 +106,19 @@ PROJECT_LIST_RESULT_SCHEMA = {
     "required": ["projects"],
     "properties": {"projects": {"type": "array"}},
 }
+PROJECT_RECONCILE_RESULT_SCHEMA = {
+    "type": "object",
+    "required": ["project", "reconciliation"],
+    "properties": {
+        "project": {"type": "object"},
+        "reconciliation": {"type": "object"},
+    },
+}
+PROJECT_ACCEPT_RECONCILIATION_REQUEST_SCHEMA = {
+    "type": "object",
+    "required": ["availability_fingerprint"],
+    "properties": {"availability_fingerprint": {"type": "sha256"}},
+}
 PROJECT_UNREGISTER_REQUEST_SCHEMA = {
     "type": "object",
     "required": ["project_instance_id"],
@@ -594,6 +607,24 @@ OPERATION_DESCRIPTORS = (
         mutation_class="read_only",
         request_schema=EMPTY_OBJECT_SCHEMA,
         result_schema=PROJECT_LIST_RESULT_SCHEMA,
+    ),
+    _descriptor(
+        "project.reconcile",
+        capability="project.manage",
+        target_scope="project",
+        required_fences=["host_generation", "operation_generation"],
+        mutation_class="durable_state",
+        request_schema=EMPTY_OBJECT_SCHEMA,
+        result_schema=PROJECT_RECONCILE_RESULT_SCHEMA,
+    ),
+    _descriptor(
+        "project.accept-reconciliation",
+        capability="project.manage",
+        target_scope="project",
+        required_fences=["host_generation", "operation_generation"],
+        mutation_class="durable_state",
+        request_schema=PROJECT_ACCEPT_RECONCILIATION_REQUEST_SCHEMA,
+        result_schema=PROJECT_RECONCILE_RESULT_SCHEMA,
     ),
     _descriptor(
         "project.unregister",
@@ -1299,8 +1330,25 @@ def _validate_payload(operation: str, value: Any) -> None:
         "policy.template.list",
         "participant.list",
         "participant.template.list",
+        "project.reconcile",
     }:
         _require_exact_fields(value, set(), label="operation payload")
+        return
+    if operation == "project.accept-reconciliation":
+        payload = _require_exact_fields(
+            value,
+            {"availability_fingerprint"},
+            label="project reconciliation payload",
+        )
+        if (
+            not isinstance(payload["availability_fingerprint"], str)
+            or SHA256_RE.fullmatch(payload["availability_fingerprint"]) is None
+        ):
+            raise ProtocolError(
+                "ipc.operation-schema-mismatch",
+                "protocol",
+                "project reconciliation fingerprint is invalid",
+            )
         return
     if operation in {"project.register", "project.bootstrap"}:
         payload = _require_exact_fields(

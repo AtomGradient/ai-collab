@@ -1,0 +1,9 @@
+schema_version: 1
+project_key: sampleproject
+product_contract_version: "3.2"
+workspace_adapter: ai-collab-edgestudio-workspace-v1
+repo_manifest: repo_manifest.yaml
+environment_adapter: ai-collab-edgestudio-environment-v1
+gate_registry: gates.yaml
+participant_driver_contract: 2
+collaboration_policy_schema: 1

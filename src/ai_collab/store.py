@@ -27,7 +27,8 @@ from .protocol import (
 )
 
 
-STATE_SCHEMA_VERSION = 1
+STATE_SCHEMA_VERSION = 2
+LEGACY_STATE_SCHEMA_VERSION = 1
 RESOURCE_LEASE_SCHEMA_VERSION = 1
 RESOURCE_CLASSES = {
     "port",
@@ -88,6 +89,8 @@ class ScenarioStore:
         with self._lock:
             if not self.state_path.exists():
                 self._write_state(self._empty_state())
+            else:
+                self._migrate_legacy_state()
             self._read_state()
 
     def workspace_path(self, binding_id: str) -> Path:
@@ -144,16 +147,8 @@ class ScenarioStore:
             "journal": [],
         }
 
-    def _read_state(self) -> dict[str, Any]:
-        if self.state_path.is_symlink() or not self.state_path.is_file():
-            raise StoreError("host.state-invalid", "Host state file is unavailable")
-        details = self.state_path.stat()
-        if stat.S_IMODE(details.st_mode) != 0o600 or details.st_uid != os.getuid():
-            raise StoreError("host.state-permission", "Host state permissions are invalid")
-        try:
-            value = json.loads(self.state_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise StoreError("host.state-invalid", "Host state is not valid JSON") from exc
+    @staticmethod
+    def _validate_state_value(value: Any) -> dict[str, Any]:
         expected = {
             "schema_version",
             "host_instance_id",
@@ -166,9 +161,6 @@ class ScenarioStore:
             "requests",
             "journal",
         }
-        legacy_expected = expected - {"scenario_history"}
-        if isinstance(value, dict) and set(value) == legacy_expected:
-            value["scenario_history"] = {}
         if (
             not isinstance(value, dict)
             or set(value) != expected
@@ -184,10 +176,112 @@ class ScenarioStore:
             or not isinstance(value["journal"], list)
         ):
             raise StoreError("host.state-invalid", "Host state schema differs")
+        for collection in (value["scenarios"], value["scenario_history"]):
+            for item in collection.values():
+                if (
+                    not isinstance(item, dict)
+                    or "project_contract_snapshot" not in item
+                ):
+                    raise StoreError(
+                        "host.state-invalid", "Scenario project snapshot differs"
+                    )
+                ScenarioStore._validate_project_contract_snapshot(
+                    item["project_contract_snapshot"]
+                )
         return value
+
+    def _migrate_legacy_state(self) -> None:
+        """Atomically upgrade the v0.1.6.1 Host store and retain last-good."""
+
+        if self.state_path.is_symlink() or not self.state_path.is_file():
+            return
+        details = self.state_path.stat()
+        if stat.S_IMODE(details.st_mode) != 0o600 or details.st_uid != os.getuid():
+            return
+        try:
+            raw = self.state_path.read_bytes()
+            value = json.loads(raw)
+        except (OSError, json.JSONDecodeError):
+            return
+        if not isinstance(value, dict) or value.get("schema_version") != LEGACY_STATE_SCHEMA_VERSION:
+            return
+        expected = {
+            "schema_version",
+            "host_instance_id",
+            "host_generation",
+            "state_revision",
+            "journal_head_sequence",
+            "scenarios",
+            "scenario_history",
+            "operations",
+            "requests",
+            "journal",
+        }
+        if set(value) == expected - {"scenario_history"}:
+            value["scenario_history"] = {}
+        if (
+            set(value) != expected
+            or not isinstance(value["state_revision"], int)
+            or isinstance(value["state_revision"], bool)
+            or value["state_revision"] < 0
+            or not isinstance(value["scenarios"], dict)
+            or not isinstance(value["scenario_history"], dict)
+        ):
+            raise StoreError("host.state-invalid", "legacy Host state differs")
+        for collection in (value["scenarios"], value["scenario_history"]):
+            for item in collection.values():
+                if not isinstance(item, dict):
+                    raise StoreError("host.state-invalid", "legacy Scenario state differs")
+                item["project_contract_snapshot"] = None
+        value["schema_version"] = STATE_SCHEMA_VERSION
+        value["state_revision"] += 1
+        self._validate_state_value(value)
+
+        backup = self.state_root / "host-state.v1.last-good.json"
+        if backup.exists() or backup.is_symlink():
+            if (
+                backup.is_symlink()
+                or not backup.is_file()
+                or backup.stat().st_uid != os.getuid()
+                or stat.S_IMODE(backup.stat().st_mode) != 0o600
+            ):
+                raise StoreError("host.state-invalid", "Host last-good snapshot differs")
+        else:
+            temporary = self.state_root / (
+                f".host-state.v1.last-good.{os.getpid()}.{secrets.token_hex(6)}.tmp"
+            )
+            descriptor = os.open(
+                temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+            )
+            try:
+                with os.fdopen(descriptor, "wb") as stream:
+                    stream.write(raw)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, backup)
+                os.chmod(backup, 0o600)
+            finally:
+                if temporary.exists():
+                    temporary.unlink()
+        self._write_state(value)
+
+    def _read_state(self) -> dict[str, Any]:
+        if self.state_path.is_symlink() or not self.state_path.is_file():
+            raise StoreError("host.state-invalid", "Host state file is unavailable")
+        details = self.state_path.stat()
+        if stat.S_IMODE(details.st_mode) != 0o600 or details.st_uid != os.getuid():
+            raise StoreError("host.state-permission", "Host state permissions are invalid")
+        try:
+            value = json.loads(self.state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise StoreError("host.state-invalid", "Host state is not valid JSON") from exc
+        return self._validate_state_value(value)
 
     def _write_state(self, value: dict[str, Any]) -> None:
         payload = canonical_json_bytes(value) + b"\n"
+        # Validate the exact bytes that will be swapped into place, not only
+        # the caller's mutable object.
+        self._validate_state_value(json.loads(payload))
         temporary = self.state_root / f".host-state.{os.getpid()}.{secrets.token_hex(6)}.tmp"
         descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:
@@ -578,6 +672,48 @@ class ScenarioStore:
                 "scenario_count": len(state["scenarios"]),
             }
 
+    @staticmethod
+    def _validate_project_contract_snapshot(value: Any) -> None:
+        # v0.1.6.1 Scenarios migrate with no render. Their already-frozen
+        # Workspace plan/receipt remains authoritative; every new Scenario
+        # carries the complete private render instead of a registry pointer.
+        if value is None:
+            return
+        required = {
+            "render_contract_version",
+            "source",
+            "project",
+            "repo_manifest",
+            "repo_manifest_digest",
+            "gate",
+            "collaboration",
+            "availability",
+            "render_digest",
+        }
+        if (
+            not isinstance(value, dict)
+            or set(value) != required
+            or value.get("render_contract_version") != 1
+            or len(canonical_json_bytes(value)) > 8 * 1024 * 1024
+        ):
+            raise StoreError(
+                "host.state-invalid", "Scenario project snapshot differs"
+            )
+        digest = value.get("render_digest")
+        material = {
+            key: item
+            for key, item in value.items()
+            if key not in {"render_digest", "availability"}
+        }
+        if (
+            not isinstance(digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+            or canonical_json_sha256(material) != digest
+        ):
+            raise StoreError(
+                "host.state-invalid", "Scenario project snapshot digest differs"
+            )
+
     def create_scenario(
         self,
         *,
@@ -587,7 +723,16 @@ class ScenarioStore:
         project_instance_id: str,
         scenario_id: str,
         project_binding_digest: str,
+        project_contract_snapshot: dict[str, Any] | None = None,
     ) -> tuple[str, dict[str, Any]]:
+        self._validate_project_contract_snapshot(project_contract_snapshot)
+        if (
+            project_contract_snapshot is not None
+            and project_contract_snapshot["render_digest"] != project_binding_digest
+        ):
+            raise StoreError(
+                "project.binding-drift", "Scenario project snapshot binding differs"
+            )
         key = self._scenario_key(project_instance_id, scenario_id)
         binding_digest = hashlib.sha256(
             f"{request_id}\0{request_digest}".encode("utf-8")
@@ -634,6 +779,9 @@ class ScenarioStore:
             }
             state["scenarios"][key] = {
                 "project_instance_id": project_instance_id,
+                "project_contract_snapshot": copy.deepcopy(
+                    project_contract_snapshot
+                ),
                 "record": record,
                 "participants": {},
                 "participant_artifacts": {},
@@ -2504,6 +2652,30 @@ class ScenarioStore:
                     "scenario.workspace-unavailable", "scenario workspace is unavailable"
                 )
             return record, workspace_path
+
+    def scenario_project_contract(
+        self, project_instance_id: str, scenario_id: str
+    ) -> dict[str, Any] | None:
+        """Return the private render pinned into one Scenario at creation."""
+
+        with self._lock:
+            state = self._read_state()
+            item = state["scenarios"].get(
+                self._scenario_key(project_instance_id, scenario_id)
+            )
+            if item is None:
+                raise StoreError("scenario.not-found", "scenario does not exist")
+            snapshot = item["project_contract_snapshot"]
+            self._validate_project_contract_snapshot(snapshot)
+            if (
+                snapshot is not None
+                and snapshot["render_digest"]
+                != item["record"]["project_binding_digest"]
+            ):
+                raise StoreError(
+                    "host.state-invalid", "Scenario project snapshot binding differs"
+                )
+            return copy.deepcopy(snapshot)
 
     def list_scenarios(self, project_instance_id: str) -> dict[str, Any]:
         with self._lock:

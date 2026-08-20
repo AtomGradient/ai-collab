@@ -41,9 +41,42 @@ def test_adapter_environment_allows_standard_proxy_without_vendor_identity() -> 
         "all_proxy",
         "no_proxy",
     }.issubset(ADAPTER_ENVIRONMENT_KEYS)
+    assert {"HOME", "SSH_AUTH_SOCK"}.issubset(ADAPTER_ENVIRONMENT_KEYS)
     assert "PYTHONDONTWRITEBYTECODE" in ADAPTER_ENVIRONMENT_KEYS
     assert "CLAUDE_CODE_SESSION_ID" not in ADAPTER_ENVIRONMENT_KEYS
     assert "CODEX_THREAD_ID" not in ADAPTER_ENVIRONMENT_KEYS
+
+
+def test_host_preserves_actionable_workspace_availability_error() -> None:
+    error = HarnessHost.workspace_error(
+        WorkspaceError(
+            "workspace.git-auth-required",
+            "Git credentials are unavailable to AICollab.",
+        )
+    )
+    assert error.code == "workspace.git-auth-required"
+    assert error.category == "availability"
+    assert error.retryable is False
+    assert error.repair_action == "git.authenticate"
+
+    transient = HarnessHost.workspace_error(
+        WorkspaceError(
+            "workspace.network-unavailable",
+            "The repository network is unavailable.",
+            retryable=True,
+        )
+    )
+    assert transient.retryable is True
+    assert transient.repair_action == "workspace.prepare"
+
+    shallow = HarnessHost.workspace_error(
+        WorkspaceError(
+            "workspace.shallow-source",
+            "Fetch complete Git history.",
+        )
+    )
+    assert shallow.retryable is False
+    assert shallow.repair_action == "git.fetch-full-history"
 
 
 def test_external_workspace_root_preserves_legacy_bindings_and_hosts_new_ones(
@@ -82,6 +115,41 @@ def test_external_workspace_root_preserves_legacy_bindings_and_hosts_new_ones(
     assert not (state_root / "workspaces" / new_binding).exists()
 
 
+def test_v0161_host_state_migrates_atomically_with_scenario_last_good(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    store = ScenarioStore(state_root)
+    store.create_scenario(
+        request_id="legacy-create",
+        request_digest="a" * 64,
+        host_generation=1,
+        project_instance_id="project",
+        scenario_id="legacy",
+        project_binding_digest="b" * 64,
+    )
+    state_path = state_root / "host-state.json"
+    legacy = json.loads(state_path.read_text(encoding="utf-8"))
+    legacy["schema_version"] = 1
+    legacy["state_revision"] -= 1
+    for collection in (legacy["scenarios"], legacy["scenario_history"]):
+        for item in collection.values():
+            del item["project_contract_snapshot"]
+    state_path.write_text(json.dumps(legacy), encoding="utf-8")
+    state_path.chmod(0o600)
+
+    ScenarioStore(state_root)
+    migrated = json.loads(state_path.read_text(encoding="utf-8"))
+    assert migrated["schema_version"] == 2
+    assert next(iter(migrated["scenarios"].values()))[
+        "project_contract_snapshot"
+    ] is None
+    backup = state_root / "host-state.v1.last-good.json"
+    assert backup.is_file()
+    assert stat.S_IMODE(backup.stat().st_mode) == 0o600
+    assert json.loads(backup.read_text(encoding="utf-8"))["schema_version"] == 1
+
+
 class FakeAdapter:
     def __init__(
         self,
@@ -98,6 +166,7 @@ class FakeAdapter:
     def call(self, operation: str, payload: Mapping[str, Any]) -> dict[str, Any]:
         if operation == "plan":
             plan = {
+                "plan_id": f"plan:{payload['operation_id']}",
                 "operation_id": payload["operation_id"],
                 "scenario": payload["scenario"],
                 "project_descriptor_digest": "b" * 64,
@@ -199,6 +268,21 @@ class FakeAdapter:
         raise AssertionError(operation)
 
 
+class FailProvisionOnceAdapter(FakeAdapter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.failed = False
+
+    def call(self, operation: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+        if operation == "provision" and not self.failed:
+            self.failed = True
+            raise WorkspaceError(
+                "workspace.git-auth-required",
+                "Git credentials are unavailable to AICollab.",
+            )
+        return super().call(operation, payload)
+
+
 class FakeSecurityAdapter:
     def __init__(self) -> None:
         self.present_calls = 0
@@ -288,7 +372,7 @@ def running_high_risk_host(
 
 def _coordinator(tmp_path: Path) -> tuple[ScenarioStore, WorkspaceCoordinator, dict[str, Any], Path]:
     store = ScenarioStore(tmp_path / "state")
-    _, created = store.create_scenario(
+    store.create_scenario(
         request_id="create",
         request_digest="a" * 64,
         host_generation=1,
@@ -361,6 +445,75 @@ def test_coordinator_publishes_replays_and_observes(tmp_path: Path) -> None:
     )
     assert observed["workspace"]["state"] == "aligned"
     assert stat.S_IMODE(coordinator.state_path.stat().st_mode) == 0o600
+
+
+def test_retryable_prepare_failure_reuses_the_frozen_plan(tmp_path: Path) -> None:
+    store = ScenarioStore(tmp_path / "state")
+    store.create_scenario(
+        request_id="retry-create",
+        request_digest="1" * 64,
+        host_generation=1,
+        project_instance_id="project",
+        scenario_id="retry-scenario",
+        project_binding_digest="b" * 64,
+    )
+    record, workspace_path = store.scenario_workspace(
+        "project", "retry-scenario"
+    )
+    coordinator = WorkspaceCoordinator(
+        store.state_root, FailProvisionOnceAdapter()
+    )  # type: ignore[arg-type]
+    operation_id, planned = coordinator.plan(
+        request_id="retry-plan-1",
+        request_digest="2" * 64,
+        project_instance_id="project",
+        scenario_id="retry-scenario",
+        scenario_generation=record["scenario_generation"],
+        scenario_state_revision=record["state_revision"],
+        workspace_id=record["workspace_binding_id"],
+        project_binding_digest="b" * 64,
+        requested_component_ids=[],
+        project_payload={},
+    )
+    with pytest.raises(WorkspaceError) as failed:
+        coordinator.provision(
+            request_id="retry-provision-1",
+            request_digest="3" * 64,
+            project_instance_id="project",
+            scenario_id="retry-scenario",
+            scenario_generation=record["scenario_generation"],
+            scenario_state_revision=record["state_revision"],
+            plan_digest=planned["workspace"]["plan_digest"],
+            workspace_path=workspace_path,
+        )
+    assert failed.value.code == "workspace.git-auth-required"
+    assert failed.value.retryable is False
+
+    replay_operation, replay_plan = coordinator.plan(
+        request_id="retry-plan-2",
+        request_digest="4" * 64,
+        project_instance_id="project",
+        scenario_id="retry-scenario",
+        scenario_generation=record["scenario_generation"],
+        scenario_state_revision=record["state_revision"],
+        workspace_id=record["workspace_binding_id"],
+        project_binding_digest="b" * 64,
+        requested_component_ids=[],
+        project_payload={},
+    )
+    assert replay_operation == operation_id
+    assert replay_plan == planned
+    _, ready = coordinator.provision(
+        request_id="retry-provision-2",
+        request_digest="5" * 64,
+        project_instance_id="project",
+        scenario_id="retry-scenario",
+        scenario_generation=record["scenario_generation"],
+        scenario_state_revision=record["state_revision"],
+        plan_digest=planned["workspace"]["plan_digest"],
+        workspace_path=workspace_path,
+    )
+    assert ready["workspace"]["state"] == "ready"
 
 
 def test_adapter_command_rejects_absolute_public_path(tmp_path: Path) -> None:
