@@ -325,3 +325,10 @@ def test_guide_is_a_dismissable_centered_card_deck() -> None:
     assert "guideStep = nil" in deck, "close is always available"
     assert 'Button(S.Guide.reopenHelp, systemImage: "questionmark.circle")' in content
     assert 'AppStorage("AICollabGuideSeen")' in content, "first launch shows once"
+    assert "model.guideStep" in deck, "open state lives on the model, surviving language switches"
+    assert "@State private var guideStep" not in content
+    assert "guideAction(at: index)" in deck, "actions flow through the gated presentation model"
+    view_model = (APP_ROOT / "HarnessViewModel.swift").read_text(encoding="utf-8")
+    presentation = view_model.split("func guidePresentation", 1)[1].split("private var completedMilestoneIndex", 1)[0]
+    assert "case .attend, .working, .inconsistent:" in presentation
+    assert "(completedMilestoneIndex, nil)" in presentation

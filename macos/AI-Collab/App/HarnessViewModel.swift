@@ -105,6 +105,9 @@ final class HarnessViewModel: ObservableObject {
     @Published var workspaceReady = false
     /// One-time "the room is ready" moment, keyed per room generation.
     @Published private(set) var showReadyMoment = false
+    /// The getting-started card's open step. Lives on the model so a language
+    /// switch (which rebuilds the view tree) never closes an open card.
+    @Published var guideStep: Int?
     private let readyMomentDefaults: UserDefaults
     /// Explains why a request could not even be attempted, so no control can
     /// fail silently. Scoped so the reason renders next to the control that
@@ -233,6 +236,34 @@ final class HarnessViewModel: ObservableObject {
         default:
             return .attend(Self.humanState(scenario.observedState))
         }
+    }
+
+    /// Deck positioning and action gating, separated: `index` is where the
+    /// card opens (by completed milestone for non-actionable states), and
+    /// `actionable` is the exact live step whose real action the card may
+    /// embed — attend/working/inconsistent never yield one.
+    func guidePresentation() -> (index: Int, actionable: GuidanceStep?) {
+        switch guidance {
+        case .registerProject: return (0, .registerProject)
+        case .createRoom: return (1, .createRoom)
+        case .prepareWorkspace: return (2, .prepareWorkspace)
+        case .addColleague: return (3, .addColleague)
+        case .resumeRoom: return (4, .resumeRoom)
+        case .startColleagues: return (4, .startColleagues)
+        case .focusAndAssign: return (5, .focusAndAssign)
+        case .attend, .working, .inconsistent:
+            return (completedMilestoneIndex, nil)
+        }
+    }
+
+    /// Honest positioning while blocked or in transition: the furthest step
+    /// whose prerequisite is actually complete — never a claim of step 6.
+    private var completedMilestoneIndex: Int {
+        guard selectedProject != nil else { return 0 }
+        guard selectedScenario != nil else { return 1 }
+        if !workspaceReady { return 2 }
+        if participants.filter(\.isInteractive).isEmpty { return 3 }
+        return 4
     }
 
     /// Show the one-time ready moment when the room first goes all-green.

@@ -210,4 +210,54 @@ final class GuidanceRailTests: XCTestCase {
             "a new generation earns its own one-time moment"
         )
     }
+
+    /// codex deck review root causes: closed-room continuity, fail-closed
+    /// states never yield a card action, and honest milestone positioning.
+    func testGuidePresentationSeparatesPositioningFromActions() {
+        let resume = model(
+            room: "closed", workspaceReady: true,
+            participants: [participant("stopped")]
+        )
+        XCTAssertEqual(resume.guidePresentation().index, 4)
+        XCTAssertEqual(resume.guidePresentation().actionable, .resumeRoom)
+
+        let start = model(
+            room: "running", workspaceReady: true,
+            participants: [participant("stopped")]
+        )
+        XCTAssertEqual(start.guidePresentation().index, 4)
+        XCTAssertEqual(start.guidePresentation().actionable, .startColleagues)
+
+        let inconsistent = model(room: "running", workspaceReady: false)
+        XCTAssertEqual(inconsistent.guidePresentation().index, 2)
+        XCTAssertNil(
+            inconsistent.guidePresentation().actionable,
+            "inconsistent must never offer a card action"
+        )
+
+        let degraded = model(
+            room: "degraded", workspaceReady: true,
+            participants: [participant("stopped")]
+        )
+        XCTAssertEqual(degraded.guidePresentation().index, 4)
+        XCTAssertNil(degraded.guidePresentation().actionable)
+
+        let transitional = model(room: "provisioning")
+        XCTAssertEqual(
+            transitional.guidePresentation().index, 2,
+            "positioning follows completed milestones, never claims step 6"
+        )
+        XCTAssertNil(transitional.guidePresentation().actionable)
+    }
+
+    func testOpenGuideCardSurvivesALanguageSwitch() {
+        let model = HarnessViewModel()
+        model.guideStep = 4
+        L10n.shared.preference = .english
+        XCTAssertTrue(S.Guide.policySay.contains("resume the room if it is closed"))
+        L10n.shared.preference = .simplifiedChinese
+        XCTAssertEqual(model.guideStep, 4, "switching language must not close the card")
+        XCTAssertTrue(S.Guide.policySay.contains("房间休会中先点恢复"))
+        L10n.shared.preference = .english
+    }
 }

@@ -67,7 +67,6 @@ private enum HighRiskIntent: Identifiable {
 struct ContentView: View {
     @EnvironmentObject private var model: HarnessViewModel
     @AppStorage("AICollabGuideSeen") private var guideSeen = false
-    @State private var guideStep: Int?
     @State private var highRiskIntent: HighRiskIntent?
     @State private var pendingDeletion: ParticipantRecord?
 
@@ -88,7 +87,7 @@ struct ContentView: View {
             }
             ToolbarItem {
                 Button(S.Guide.reopenHelp, systemImage: "questionmark.circle") {
-                    guideStep = currentGuideIndex
+                    model.guideStep = model.guidePresentation().index
                 }
                 .help(S.Guide.reopenHelp)
             }
@@ -96,7 +95,7 @@ struct ContentView: View {
         .onAppear {
             if !guideSeen {
                 guideSeen = true
-                guideStep = 0
+                model.guideStep = model.guidePresentation().index
             }
         }
         .disabled(model.isBusy)
@@ -154,48 +153,51 @@ struct ContentView: View {
     /// carries its say and, where meaningful, the existing action it teaches.
     private struct GuideStep {
         let say: String
-        let action: String?
-        let perform: (() -> Void)?
     }
 
     private var guideSteps: [GuideStep] {
         [
-            GuideStep(say: S.Guide.registerSay, action: S.Guide.registerAction) {
-                Task { await model.chooseAndRegisterProject() }
-            },
-            GuideStep(say: S.Guide.createSay, action: S.Guide.createAction) {
-                Task { await model.createScenario() }
-            },
-            GuideStep(say: S.Guide.prepareSay, action: S.Guide.prepareAction) {
-                Task { await model.prepareWorkspace() }
-            },
-            GuideStep(say: S.Guide.addSay, action: S.Guide.addAction) {
-                Task { await model.addParticipant() }
-            },
-            GuideStep(say: S.Guide.policySay, action: nil, perform: nil),
-            GuideStep(say: S.Guide.focusSay, action: S.Guide.focusAction) {
-                Task { await model.focusScenario() }
-            },
+            GuideStep(say: S.Guide.registerSay),
+            GuideStep(say: S.Guide.createSay),
+            GuideStep(say: S.Guide.prepareSay),
+            GuideStep(say: S.Guide.addSay),
+            GuideStep(say: S.Guide.policySay),
+            GuideStep(say: S.Guide.focusSay),
         ]
     }
 
-    /// Where the deck opens when summoned: the user's actual next step.
-    private var currentGuideIndex: Int {
-        switch model.guidance {
-        case .registerProject: 0
-        case .createRoom: 1
-        case .prepareWorkspace, .inconsistent: 2
-        case .addColleague: 3
-        case .resumeRoom, .startColleagues: 4
-        case .focusAndAssign, .attend, .working: 5
+    /// The embedded real action for the exact live actionable step, if the
+    /// open card is showing that step. Blocked/transitional states never
+    /// produce a card action.
+    private func guideAction(at index: Int) -> (label: String, perform: () -> Void)? {
+        let presentation = model.guidePresentation()
+        guard presentation.index == index, let live = presentation.actionable else {
+            return nil
+        }
+        switch live {
+        case .registerProject:
+            return (S.Guide.registerAction, { Task { await model.chooseAndRegisterProject() } })
+        case .createRoom:
+            return (S.Guide.createAction, { Task { await model.createScenario() } })
+        case .prepareWorkspace:
+            return (S.Guide.prepareAction, { Task { await model.prepareWorkspace() } })
+        case .addColleague:
+            return (S.Guide.addAction, { Task { await model.addParticipant() } })
+        case .resumeRoom:
+            return (S.Guide.resumeAction, { Task { await model.openScenario() } })
+        case .startColleagues:
+            return (S.Guide.startAction, { Task { await model.startAllParticipants() } })
+        case .focusAndAssign:
+            return (S.Guide.focusAction, { Task { await model.focusScenario() } })
+        case .attend, .working, .inconsistent:
+            return nil
         }
     }
 
     @ViewBuilder
     private var guideCard: some View {
-        if let index = guideStep, guideSteps.indices.contains(index) {
+        if let index = model.guideStep, guideSteps.indices.contains(index) {
             let step = guideSteps[index]
-            let isCurrent = index == currentGuideIndex
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
                     Text(S.Guide.stepOf(index + 1, guideSteps.count))
@@ -204,30 +206,32 @@ struct ContentView: View {
                         .foregroundStyle(.teal)
                     Spacer()
                     Button {
-                        guideStep = nil
+                        model.guideStep = nil
                     } label: {
                         Image(systemName: "xmark").font(.caption.bold())
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel(S.Common.close)
+                    .help(S.Common.close)
                 }
                 Text(step.say)
                     .font(.title3.weight(.medium))
                     .fixedSize(horizontal: false, vertical: true)
-                if isCurrent, let action = step.action, let perform = step.perform {
-                    Button(action, action: perform)
+                if let action = guideAction(at: index) {
+                    Button(action.label, action: action.perform)
                         .buttonStyle(.borderedProminent)
                         .disabled(model.isBusy)
                 }
                 HStack {
                     if index > 0 {
-                        Button(S.Guide.previous) { guideStep = index - 1 }
+                        Button(S.Guide.previous) { model.guideStep = index - 1 }
                     }
                     Spacer()
                     if index < guideSteps.count - 1 {
-                        Button(S.Guide.next) { guideStep = index + 1 }
+                        Button(S.Guide.next) { model.guideStep = index + 1 }
                             .buttonStyle(.bordered)
                     } else {
-                        Button(S.Guide.done) { guideStep = nil }
+                        Button(S.Guide.done) { model.guideStep = nil }
                             .buttonStyle(.bordered)
                     }
                 }

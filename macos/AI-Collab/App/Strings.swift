@@ -1072,8 +1072,10 @@ enum S {
         static var policySay: String {
             t(
                 "Pick a team template under Collaboration Policy, preview and "
-                    + "apply the plan, then Start All.",
-                "在协作规则区选团队模板，预览并应用方案，然后全部启动。"
+                    + "apply the plan; resume the room if it is closed, then "
+                    + "Start All.",
+                "在协作规则区选团队模板，预览并应用方案；房间休会中先点恢复，"
+                    + "然后全部启动。"
             )
         }
 
