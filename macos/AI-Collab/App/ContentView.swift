@@ -128,9 +128,11 @@ struct ContentView: View {
                             Text(
                                 reconciliation.bindingChanged
                                     ? "Project configuration update available"
-                                    : "\(reconciliation.changes.count) repository change"
-                                        + (reconciliation.changes.count == 1 ? "" : "s")
-                                        + " detected"
+                                    : reconciliation.changes.isEmpty
+                                        ? "Project configuration needs attention"
+                                        : "\(reconciliation.changes.count) repository change"
+                                            + (reconciliation.changes.count == 1 ? "" : "s")
+                                            + " detected"
                             )
                             .font(.caption)
                             .foregroundStyle(.orange)

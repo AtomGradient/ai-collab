@@ -31,7 +31,30 @@ PROJECT_ID = "project-one"
 SCENARIO_ID = "scenario-one"
 SENDER_ID = "sender-one"
 RECEIVER_ID = "receiver-one"
-PROJECT_DIGEST = "a" * 64
+PROJECT_RENDER = {
+    "render_contract_version": 1,
+    "source": {"kind": "fileless", "intent_schema_version": None, "source_digest": "1" * 64},
+    "project": {
+        "project_key": PROJECT_ID,
+        "product_contract_version": "1.0",
+        "workspace_adapter_id": "workspace.test-v1",
+        "environment_adapter_id": "environment.test-v1",
+        "participant_driver_contract": 2,
+        "collaboration_policy_schema": 1,
+    },
+    "repo_manifest": {"schema_version": 1, "project_key": PROJECT_ID, "repos": []},
+    "repo_manifest_digest": "2" * 64,
+    "gate": {"kind": "builtin", "profile_id": "builtin.standard-v1"},
+    "collaboration": {"kind": "builtin", "profile_id": "builtin.standard-v1"},
+    "availability": {"status": "ready", "observations": [], "changes": [], "warnings": []},
+}
+PROJECT_RENDER["availability"]["fingerprint"] = canonical_json_sha256(  # type: ignore[index]
+    PROJECT_RENDER["availability"]
+)
+PROJECT_RENDER["render_digest"] = canonical_json_sha256(
+    {key: value for key, value in PROJECT_RENDER.items() if key != "availability"}
+)
+PROJECT_DIGEST = PROJECT_RENDER["render_digest"]
 CAPABILITY_DIGEST = "b" * 64
 
 
@@ -331,6 +354,11 @@ def running_host(state_root: Path) -> Iterator[tuple[HarnessHost, HarnessClient,
     with tempfile.TemporaryDirectory(prefix="ai-collab-m4-") as runtime:
         host = HarnessHost(state_root, Path(runtime) / "host.sock")
         host.projects.validate_binding = lambda _project, _digest: None  # type: ignore[method-assign]
+        host.projects.resolved_render = (  # type: ignore[method-assign]
+            lambda _project, digest=None: PROJECT_RENDER
+            if digest in {None, PROJECT_DIGEST}
+            else None
+        )
         driver = FakeDeliveryDriver()
         host.participants = ParticipantCoordinator(host.store, driver)  # type: ignore[arg-type]
         host.delivery = DeliveryCoordinator(state_root, host.store, host.participants)

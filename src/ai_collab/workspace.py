@@ -32,6 +32,7 @@ from .protocol import canonical_json_bytes, canonical_json_sha256
 WORKSPACE_STATE_SCHEMA_VERSION = 1
 ADAPTER_PROTOCOL_VERSION = 1
 MAX_ADAPTER_REPLY_BYTES = 8 * 1024 * 1024
+MAX_PROJECT_RENDER_ENV_BYTES = 512 * 1024
 ADAPTER_ERROR_CODE_RE = re.compile(r"^[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*)+$")
 ADAPTER_ENVIRONMENT_KEYS = {
     "HOME",
@@ -173,7 +174,7 @@ class ProjectAdapterCommand:
             )
         if project_render is not None:
             encoded_render = canonical_json_bytes(dict(project_render))
-            if len(encoded_render) > MAX_ADAPTER_REPLY_BYTES:
+            if len(encoded_render) > MAX_PROJECT_RENDER_ENV_BYTES:
                 raise WorkspaceError(
                     "project.render-invalid", "project render exceeds the adapter limit"
                 )

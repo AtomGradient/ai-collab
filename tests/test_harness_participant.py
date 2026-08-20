@@ -23,6 +23,7 @@ from ai_collab.client import HarnessClient, HarnessClientError
 from ai_collab.host import HarnessHost
 from ai_collab.participant import ParticipantCoordinator, ParticipantError
 from ai_collab.participant_auth import ParticipantAuthStore
+from ai_collab.project import ProjectError
 from ai_collab.protocol import canonical_json_sha256
 from ai_collab.security import SecurityCoordinator
 from ai_collab.store import ScenarioStore
@@ -31,7 +32,39 @@ from ai_collab.store import ScenarioStore
 PROJECT_ID = "project-one"
 SCENARIO_ID = "scenario-one"
 PARTICIPANT_ID = "participant-one"
-PROJECT_DIGEST = "a" * 64
+PROJECT_RENDER: dict[str, Any] = {
+    "render_contract_version": 1,
+    "source": {
+        "kind": "fileless",
+        "intent_schema_version": None,
+        "source_digest": "1" * 64,
+    },
+    "project": {
+        "project_key": PROJECT_ID,
+        "product_contract_version": "1.0",
+        "workspace_adapter_id": "workspace.test-v1",
+        "environment_adapter_id": "environment.test-v1",
+        "participant_driver_contract": 2,
+        "collaboration_policy_schema": 1,
+    },
+    "repo_manifest": {"schema_version": 1, "project_key": PROJECT_ID, "repos": []},
+    "repo_manifest_digest": "2" * 64,
+    "gate": {"kind": "builtin", "profile_id": "builtin.standard-v1"},
+    "collaboration": {"kind": "builtin", "profile_id": "builtin.standard-v1"},
+    "availability": {
+        "status": "ready",
+        "observations": [],
+        "changes": [],
+        "warnings": [],
+    },
+}
+PROJECT_RENDER["availability"]["fingerprint"] = canonical_json_sha256(
+    PROJECT_RENDER["availability"]
+)
+PROJECT_RENDER["render_digest"] = canonical_json_sha256(
+    {key: value for key, value in PROJECT_RENDER.items() if key != "availability"}
+)
+PROJECT_DIGEST = PROJECT_RENDER["render_digest"]
 CAPABILITY_DIGEST = "b" * 64
 PROCESS_DIGEST = "c" * 64
 WINDOW_DIGEST = "d" * 64
@@ -684,11 +717,26 @@ def running_host(
     state_root: Path,
     *,
     with_security: bool = False,
+    existing_binding_error: ProjectError | None = None,
 ) -> Iterator[tuple[HarnessHost, HarnessClient, FakeDriver]]:
     with tempfile.TemporaryDirectory(prefix="ai-collab-m3-") as runtime:
         socket_path = Path(runtime) / "host.sock"
         host = HarnessHost(state_root, socket_path)
         host.projects.validate_binding = lambda _project, _digest: None  # type: ignore[method-assign]
+        if existing_binding_error is None:
+            host.projects.validate_existing_binding = (  # type: ignore[method-assign]
+                lambda _project, _digest: None
+            )
+        else:
+            def fail_existing_binding(_project: str, _digest: str) -> None:
+                raise existing_binding_error
+
+            host.projects.validate_existing_binding = fail_existing_binding  # type: ignore[method-assign]
+        host.projects.resolved_render = (  # type: ignore[method-assign]
+            lambda _project, digest=None: PROJECT_RENDER
+            if digest in {None, PROJECT_DIGEST}
+            else None
+        )
         driver = FakeDriver()
         host.participants = ParticipantCoordinator(host.store, driver)  # type: ignore[arg-type]
         if with_security:
@@ -3024,7 +3072,9 @@ def test_scenario_start_participants_progress_and_cooperative_cancel(
         assert driver.start_calls == 1
 
 
-def test_host_restart_finishes_pending_scenario_resume(tmp_path: Path) -> None:
+def test_host_restart_finishes_migrated_pending_scenario_resume(
+    tmp_path: Path,
+) -> None:
     state_root = tmp_path / "state"
     with running_host(state_root) as (host, client, driver):
         created = client.create_scenario(
@@ -3075,6 +3125,12 @@ def test_host_restart_finishes_pending_scenario_resume(tmp_path: Path) -> None:
             (state_root / "host-state.json").read_text(encoding="utf-8")
         )
         assert durable["requests"]["restart-resume-open"]["status"] == "pending"
+        item = next(iter(durable["scenarios"].values()))
+        item["project_contract_snapshot"] = None
+        (state_root / "host-state.json").write_text(
+            json.dumps(durable), encoding="utf-8"
+        )
+        (state_root / "host-state.json").chmod(0o600)
 
     with running_host(state_root) as (_, client, driver):
         resumed = client.scenario_status(
@@ -3094,6 +3150,86 @@ def test_host_restart_finishes_pending_scenario_resume(tmp_path: Path) -> None:
         assert request["status"] == "completed"
         assert request["result"]["resume_summary"]["all_targets_ready"] is True
         assert driver.start_calls == 1
+
+
+@pytest.mark.parametrize(
+    ("failure_kind", "expected_code"),
+    [
+        ("legacy-binding", "project.not-found"),
+        ("snapshot-mismatch", "host.state-invalid"),
+    ],
+)
+def test_host_restart_contains_one_resume_precondition_failure(
+    tmp_path: Path, failure_kind: str, expected_code: str
+) -> None:
+    state_root = tmp_path / "state"
+    with running_host(state_root) as (host, client, _):
+        created = client.create_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            project_binding_digest=PROJECT_DIGEST,
+            request_id="contained-resume-create",
+        )["scenario"]
+        opened = client.open_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=created["scenario_generation"],
+            scenario_state_revision=created["state_revision"],
+            request_id="contained-resume-open-initial",
+        )["scenario"]
+        closed = client.close_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=opened["scenario_generation"],
+            scenario_state_revision=opened["state_revision"],
+            drain_timeout_ms=2_000,
+            request_id="contained-resume-close",
+        )["scenario"]
+        host.store.open_scenario(
+            request_id="contained-resume-open",
+            request_digest="e" * 64,
+            host_generation=host.host_generation,
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=closed["scenario_generation"],
+            scenario_state_revision=closed["state_revision"],
+        )
+        durable = json.loads(
+            (state_root / "host-state.json").read_text(encoding="utf-8")
+        )
+        item = next(iter(durable["scenarios"].values()))
+        if failure_kind == "legacy-binding":
+            item["project_contract_snapshot"] = None
+        else:
+            item["record"]["project_binding_digest"] = "f" * 64
+        (state_root / "host-state.json").write_text(
+            json.dumps(durable), encoding="utf-8"
+        )
+        (state_root / "host-state.json").chmod(0o600)
+
+    existing_binding_error = (
+        ProjectError("project.not-found", "project is not registered")
+        if failure_kind == "legacy-binding"
+        else None
+    )
+    with running_host(
+        state_root, existing_binding_error=existing_binding_error
+    ) as (_, client, _):
+        assert client.host_status()["status"] == "ready"
+        scenario = client.scenario_status(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+        )["scenario"]
+        assert scenario["observed_state"] == "degraded"
+        assert scenario["active_operation_id"] is None
+        assert scenario["degraded"]["reason"] == "participant_restore_incomplete"
+        durable = json.loads(
+            (state_root / "host-state.json").read_text(encoding="utf-8")
+        )
+        request = durable["requests"]["contained-resume-open"]
+        assert request["status"] == "failed"
+        assert request["error"]["code"] == expected_code
+        assert "pending_resume_summary" not in request
 
 
 def test_force_stop_requires_confirmation_and_preserves_sibling(

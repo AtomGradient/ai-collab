@@ -16,7 +16,7 @@ import threading
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from .protocol import canonical_json_bytes, canonical_json_sha256
 from .workspace import ProjectAdapterCommand, WorkspaceError
@@ -237,7 +237,18 @@ class ProjectRegistry:
                 item["record"]["project_binding_digest"]
             ]
         backup = self.state_root / "project-registry.v1.last-good.json"
-        if not backup.exists():
+        if backup.exists() or backup.is_symlink():
+            if (
+                backup.is_symlink()
+                or not backup.is_file()
+                or backup.stat().st_uid != os.getuid()
+                or stat.S_IMODE(backup.stat().st_mode) != 0o600
+            ):
+                raise ProjectError(
+                    "project.state-invalid",
+                    "project registry last-good snapshot differs",
+                )
+        else:
             temporary = self.state_root / (
                 f".project-registry.v1.last-good.{os.getpid()}."
                 f"{secrets.token_hex(6)}.tmp"
@@ -341,6 +352,31 @@ class ProjectRegistry:
             raise ProjectError("project.path-invalid", "project root is unavailable") from exc
         if not root.is_dir() or root.stat().st_uid != os.getuid():
             raise ProjectError("project.path-invalid", "project root owner differs")
+        root_fingerprint = canonical_json_sha256({"canonical_project_path": str(root)})
+
+        # Registering an already-known canonical root is an idempotent lookup,
+        # not an alternate path for accepting a changed project binding.  The
+        # explicit reconcile/accept flow owns those changes so that choosing
+        # the same folder again cannot silently replace team intent.
+        with self._lock:
+            state = self._read_state()
+            previous = state["requests"].get(request_id)
+            if previous is not None:
+                if previous["request_digest"] != request_digest:
+                    raise ProjectError("ipc.request-reused", "request identity was reused")
+                return previous["operation_id"], copy.deepcopy(previous["result"])
+            existing_id = self._find_project_by_root(
+                state,
+                root=str(root),
+                root_fingerprint=root_fingerprint,
+            )
+            if existing_id is not None:
+                return self._record_existing_registration(
+                    state,
+                    request_id=request_id,
+                    request_digest=request_digest,
+                    project_instance_id=existing_id,
+                )
 
         try:
             if isinstance(self.adapter, ProjectAdapterCommand):
@@ -361,7 +397,6 @@ class ProjectRegistry:
             ) from exc
         public = self._validate_observation(observed)
         render = copy.deepcopy(observed.get("render"))
-        root_fingerprint = canonical_json_sha256({"canonical_project_path": str(root)})
 
         with self._lock:
             state = self._read_state()
@@ -370,31 +405,22 @@ class ProjectRegistry:
                 if previous["request_digest"] != request_digest:
                     raise ProjectError("ipc.request-reused", "request identity was reused")
                 return previous["operation_id"], copy.deepcopy(previous["result"])
-            existing_id = next(
-                (
-                    project_id
-                    for project_id, item in state["projects"].items()
-                    if item["canonical_root_fingerprint"] == root_fingerprint
-                    and item["canonical_root"] == str(root)
-                ),
-                None,
+            existing_id = self._find_project_by_root(
+                state,
+                root=str(root),
+                root_fingerprint=root_fingerprint,
             )
-            if existing_id is None:
-                project_instance_id = f"project-{uuid.uuid4().hex}"
-                registration_revision = 1
-                accepted_binding_digests: list[str] = []
-            else:
-                project_instance_id = existing_id
-                registration_revision = (
-                    state["projects"][existing_id]["record"]["registration_revision"]
-                    + 1
+            if existing_id is not None:
+                return self._record_existing_registration(
+                    state,
+                    request_id=request_id,
+                    request_digest=request_digest,
+                    project_instance_id=existing_id,
                 )
-                accepted_binding_digests = copy.deepcopy(
-                    state["projects"][existing_id]["accepted_binding_digests"]
-                )
+            project_instance_id = f"project-{uuid.uuid4().hex}"
             record = {
                 "project_instance_id": project_instance_id,
-                "registration_revision": registration_revision,
+                "registration_revision": 1,
                 **public,
             }
             state["projects"][project_instance_id] = {
@@ -403,11 +429,7 @@ class ProjectRegistry:
                 "record": record,
                 "render": render,
                 "pending_reconciliation": None,
-                "accepted_binding_digests": list(
-                    dict.fromkeys(
-                        [*accepted_binding_digests, record["project_binding_digest"]]
-                    )
-                )[-256:],
+                "accepted_binding_digests": [record["project_binding_digest"]],
             }
             operation_id = f"project-op-{uuid.uuid4().hex}"
             result = {"project": copy.deepcopy(record)}
@@ -419,6 +441,46 @@ class ProjectRegistry:
             state["state_revision"] += 1
             self._write_state(state)
             return operation_id, result
+
+    @staticmethod
+    def _find_project_by_root(
+        state: Mapping[str, Any],
+        *,
+        root: str,
+        root_fingerprint: str,
+    ) -> str | None:
+        return next(
+            (
+                project_id
+                for project_id, item in state["projects"].items()
+                if item["canonical_root_fingerprint"] == root_fingerprint
+                and item["canonical_root"] == root
+            ),
+            None,
+        )
+
+    def _record_existing_registration(
+        self,
+        state: dict[str, Any],
+        *,
+        request_id: str,
+        request_digest: str,
+        project_instance_id: str,
+    ) -> tuple[str, dict[str, Any]]:
+        operation_id = f"project-op-{uuid.uuid4().hex}"
+        result = {
+            "project": copy.deepcopy(
+                state["projects"][project_instance_id]["record"]
+            )
+        }
+        state["requests"][request_id] = {
+            "request_digest": request_digest,
+            "operation_id": operation_id,
+            "result": copy.deepcopy(result),
+        }
+        state["state_revision"] += 1
+        self._write_state(state)
+        return operation_id, result
 
     def list(self) -> dict[str, Any]:
         with self._lock:
@@ -491,7 +553,15 @@ class ProjectRegistry:
         reconciliation = {
             "status": availability["status"],
             "binding_changed": False,
-            "availability_fingerprint": availability["fingerprint"],
+            # This public token fences the complete candidate the employee is
+            # being asked to accept. Availability alone can remain identical
+            # while team intent changes between observation and confirmation.
+            "availability_fingerprint": canonical_json_sha256(
+                {
+                    "availability_fingerprint": availability["fingerprint"],
+                    "project_binding_digest": public["project_binding_digest"],
+                }
+            ),
             "changes": copy.deepcopy(availability["changes"]),
             "warnings": copy.deepcopy(availability["warnings"]),
         }
@@ -532,14 +602,10 @@ class ProjectRegistry:
                 item["record"] = record
                 item["render"] = render
                 item["pending_reconciliation"] = None
-                item["accepted_binding_digests"] = list(
-                    dict.fromkeys(
-                        [
-                            *item["accepted_binding_digests"],
-                            record["project_binding_digest"],
-                        ]
-                    )
-                )[-256:]
+                item["accepted_binding_digests"] = self._retain_accepted_bindings(
+                    item["accepted_binding_digests"],
+                    record["project_binding_digest"],
+                )
                 reconciliation["binding_changed"] = False
             elif reconciliation["binding_changed"]:
                 reconciliation["status"] = "attention"
@@ -661,14 +727,10 @@ class ProjectRegistry:
             item["record"] = record
             item["render"] = copy.deepcopy(pending["render"])
             item["pending_reconciliation"] = None
-            item["accepted_binding_digests"] = list(
-                dict.fromkeys(
-                    [
-                        *item["accepted_binding_digests"],
-                        record["project_binding_digest"],
-                    ]
-                )
-            )[-256:]
+            item["accepted_binding_digests"] = self._retain_accepted_bindings(
+                item["accepted_binding_digests"],
+                record["project_binding_digest"],
+            )
             operation_id = f"project-op-{uuid.uuid4().hex}"
             result = {
                 "project": copy.deepcopy(record),
@@ -686,6 +748,17 @@ class ProjectRegistry:
             state["state_revision"] += 1
             self._write_state(state)
             return operation_id, result
+
+    @staticmethod
+    def _retain_accepted_bindings(
+        existing: list[str], binding_digest: str
+    ) -> list[str]:
+        """Keep the migrated binding plus the newest bounded audit history."""
+
+        accepted = list(dict.fromkeys([*existing, binding_digest]))
+        if len(accepted) <= 256:
+            return accepted
+        return [accepted[0], *accepted[-255:]]
 
     @classmethod
     def _validate_bootstrap_result(cls, value: Any) -> None:
@@ -943,7 +1016,35 @@ class ProjectRegistry:
     def validate_binding(
         self, project_instance_id: str, project_binding_digest: str
     ) -> None:
-        """Require Scenario creation to use the registered project binding."""
+        """Require new Scenarios to use the current registered binding.
+
+        Historical digests remain private audit evidence only. Existing
+        Scenarios recover from their own pinned project snapshot (or the
+        v0.1.6.1 Workspace evidence), so accepting an old digest here would
+        create a new Scenario without a matching self-contained render.
+        """
+
+        with self._lock:
+            state = self._read_state()
+            item = state["projects"].get(project_instance_id)
+            if item is None:
+                raise ProjectError("project.not-found", "project is not registered")
+            if project_binding_digest != item["record"]["project_binding_digest"]:
+                raise ProjectError(
+                    "project.binding-drift",
+                    "project binding is not the current project snapshot",
+                )
+
+    def validate_existing_binding(
+        self, project_instance_id: str, project_binding_digest: str
+    ) -> None:
+        """Validate a binding already pinned by a migrated Scenario.
+
+        v0.1.6.1 Scenarios do not contain a self-contained project render. The
+        registry's accepted set is retained only for validating those existing
+        Scenario bindings; new Scenarios must use :meth:`validate_binding` and
+        therefore cannot select historical configuration.
+        """
 
         with self._lock:
             state = self._read_state()
@@ -953,7 +1054,7 @@ class ProjectRegistry:
             if project_binding_digest not in item["accepted_binding_digests"]:
                 raise ProjectError(
                     "project.binding-drift",
-                    "project binding is not an accepted project snapshot",
+                    "existing Scenario project binding is not accepted",
                 )
 
     def canonical_root(self, project_instance_id: str) -> Path:
@@ -1095,6 +1196,48 @@ class ProjectRegistry:
         }
         if set(value) != required or value["render_contract_version"] != 1:
             raise ProjectError("project.state-invalid", "project render fields differ")
+        availability = value["availability"]
+        if (
+            not isinstance(availability, dict)
+            or set(availability)
+            != {"status", "observations", "changes", "warnings", "fingerprint"}
+            or not isinstance(availability["observations"], list)
+            or len(availability["observations"]) > 256
+            or canonical_json_sha256(
+                {
+                    key: item
+                    for key, item in availability.items()
+                    if key != "fingerprint"
+                }
+            )
+            != availability["fingerprint"]
+        ):
+            raise ProjectError(
+                "project.state-invalid", "project availability differs"
+            )
+        try:
+            cls._validate_reconciliation(
+                {
+                    "status": availability["status"],
+                    "binding_changed": False,
+                    "availability_fingerprint": availability["fingerprint"],
+                    "changes": availability["changes"],
+                    "warnings": availability["warnings"],
+                }
+            )
+            cls._validate_reconciliation(
+                {
+                    "status": availability["status"],
+                    "binding_changed": False,
+                    "availability_fingerprint": availability["fingerprint"],
+                    "changes": availability["observations"],
+                    "warnings": availability["warnings"],
+                }
+            )
+        except ValueError as exc:
+            raise ProjectError(
+                "project.state-invalid", "project availability values differ"
+            ) from exc
         return value
 
     @classmethod

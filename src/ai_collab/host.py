@@ -441,28 +441,50 @@ class HarnessHost:
     def _reconcile_scenario_resumes(self) -> None:
         for pending in self.store.pending_scenario_resume_requests():
             project_binding_digest = pending.pop("project_binding_digest")
-            snapshot = self.store.scenario_project_contract(
-                pending["project_instance_id"], pending["scenario_id"]
-            )
-            if snapshot is None:
-                # Only v0.1.6.1 migrations lack a self-contained render. Its
-                # frozen Workspace plan/receipt is the compatibility snapshot;
-                # require the registered project root, but do not re-interpret
-                # that historical digest through a mutable registry cache.
-                self.projects.canonical_root(pending["project_instance_id"])
-            elif snapshot["render_digest"] != project_binding_digest:
-                raise StoreError(
-                    "scenario.restore-plan-invalid",
-                    "Scenario project snapshot binding differs",
+            restore_started = False
+            try:
+                snapshot = self.store.scenario_project_contract(
+                    pending["project_instance_id"], pending["scenario_id"]
                 )
-            if self.workspace is not None and not self.workspace.is_ready(
-                pending["project_instance_id"], pending["scenario_id"]
-            ):
-                raise StoreError(
-                    "scenario.restore-plan-invalid",
-                    "Scenario workspace and environment are not ready",
+                if snapshot is None:
+                    # Only v0.1.6.1 migrations lack a self-contained render.
+                    # Their accepted registry digest and frozen Workspace
+                    # evidence validate the existing Scenario without making
+                    # Host startup depend on canonical-root availability.
+                    self.projects.validate_existing_binding(
+                        pending["project_instance_id"], project_binding_digest
+                    )
+                elif snapshot["render_digest"] != project_binding_digest:
+                    raise StoreError(
+                        "scenario.restore-plan-invalid",
+                        "Scenario project snapshot binding differs",
+                    )
+                if self.workspace is not None and not self.workspace.is_ready(
+                    pending["project_instance_id"], pending["scenario_id"]
+                ):
+                    raise StoreError(
+                        "scenario.restore-plan-invalid",
+                        "Scenario workspace and environment are not ready",
+                    )
+                restore_started = True
+                self._resume_scenario_participants(**pending)
+            except (
+                ProjectError,
+                StoreError,
+                WorkspaceError,
+                ParticipantAuthError,
+                ParticipantError,
+                DeliveryError,
+                OperationFailed,
+            ) as exc:
+                self.store.fail_scenario_open_resume(
+                    **pending,
+                    failure_code=getattr(
+                        exc, "code", "scenario.restore-plan-invalid"
+                    ),
+                    retryable=getattr(exc, "retryable", False),
+                    cleanup_pending=restore_started,
                 )
-            self._resume_scenario_participants(**pending)
 
     def _resume_scenario_participants(
         self,
@@ -1651,31 +1673,34 @@ class HarnessHost:
                     "scenario creation requires an absent-record fence",
                     retryable=True,
                 )
-            self.projects.validate_binding(
-                target["project_instance_id"],
-                request["payload"]["project_binding_digest"],
+            replayed = self.store.replay_request(
+                request["request_id"], request_digest
             )
-            try:
+            if replayed is not None:
+                operation_id, result = replayed
+            else:
+                self.projects.validate_binding(
+                    target["project_instance_id"],
+                    request["payload"]["project_binding_digest"],
+                )
                 project_contract_snapshot = self.projects.resolved_render(
                     target["project_instance_id"],
                     request["payload"]["project_binding_digest"],
                 )
-            except ProjectError as exc:
-                # Some isolated Host contract fixtures intentionally replace
-                # validate_binding without registering a project. Production
-                # traffic cannot reach this branch with an unknown project.
-                if exc.code != "project.not-found":
-                    raise
-                project_contract_snapshot = None
-            operation_id, result = self.store.create_scenario(
-                request_id=request["request_id"],
-                request_digest=request_digest,
-                host_generation=self.host_generation,
-                project_instance_id=target["project_instance_id"],
-                scenario_id=target["scenario_id"],
-                project_binding_digest=request["payload"]["project_binding_digest"],
-                project_contract_snapshot=project_contract_snapshot,
-            )
+                if project_contract_snapshot is None:
+                    raise ProjectError(
+                        "project.reconciliation-required",
+                        "project upgrade must finish before creating a new Scenario",
+                    )
+                operation_id, result = self.store.create_scenario(
+                    request_id=request["request_id"],
+                    request_digest=request_digest,
+                    host_generation=self.host_generation,
+                    project_instance_id=target["project_instance_id"],
+                    scenario_id=target["scenario_id"],
+                    project_binding_digest=request["payload"]["project_binding_digest"],
+                    project_contract_snapshot=project_contract_snapshot,
+                )
         elif operation == "scenario.open":
             if request["fence"]["operation_generation"] != request["payload"]["scenario_state_revision"]:
                 raise ProtocolError(
@@ -3258,9 +3283,33 @@ class HarnessHost:
             "project.manifest-invalid",
             "project.intent-invalid",
             "project.partial-configuration",
-            "project.intent-too-new",
-            "project.intent-proposal-incomplete",
+        }:
+            return ProtocolError(
+                error.code,
+                "operation",
+                error.message,
+                error.retryable,
+                "project.fix-configuration",
+            )
+        if error.code == "project.intent-too-new":
+            return ProtocolError(
+                error.code,
+                "operation",
+                error.message,
+                error.retryable,
+                "host.update",
+            )
+        if error.code == "project.intent-proposal-incomplete":
+            return ProtocolError(
+                error.code,
+                "operation",
+                error.message,
+                error.retryable,
+                "project.resolve-remote",
+            )
+        if error.code in {
             "project.reconciliation-unavailable",
+            "project.reconciliation-required",
             "project.reconciliation-stale",
         }:
             return ProtocolError(

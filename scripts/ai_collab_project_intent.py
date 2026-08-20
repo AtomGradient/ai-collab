@@ -200,10 +200,12 @@ def _observed_repo(path: Path, *, key: str, placement: str, logical_path: str) -
     }
 
 
-def discover_repositories(root: Path) -> list[dict[str, Any]]:
+def discover_repositories(
+    root: Path, *, root_project_key: str | None = None
+) -> list[dict[str, Any]]:
     if not _is_git_root(root):
         raise IntentError("project.not-git", "selected project is not a Git repository")
-    project_key = project_key_from_root(root)
+    project_key = root_project_key or project_key_from_root(root)
     observed = [
         _observed_repo(
             root, key=project_key, placement="project_root", logical_path="."
@@ -227,8 +229,10 @@ def discover_repositories(root: Path) -> list[dict[str, Any]]:
     return observed
 
 
-def _fileless_manifest(root: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    observed = discover_repositories(root)
+def _fileless_manifest(
+    root: Path, *, project_key: str | None = None
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    observed = discover_repositories(root, root_project_key=project_key)
     project_key = observed[0]["repo_key"]
     rows: list[dict[str, Any]] = []
     order = 0
@@ -348,7 +352,6 @@ def _legacy(root: Path) -> tuple[str, dict[str, Any], dict[str, Any], dict[str, 
     default_manifest = root / manifest_validator.MANIFEST_RELATIVE_PATH
     warnings: list[str] = []
     descriptor: dict[str, Any] | None = None
-    descriptor_digest: str | None = None
     manifest_path = default_manifest
     if descriptor_path.is_file() and not descriptor_path.is_symlink():
         try:
@@ -357,7 +360,6 @@ def _legacy(root: Path) -> tuple[str, dict[str, Any], dict[str, Any], dict[str, 
             )
         except (OSError, descriptor_validator.DescriptorError) as exc:
             raise IntentError("project.descriptor-invalid", str(exc)) from exc
-        descriptor_digest = canonical_json_sha256(descriptor)
         raw_manifest = descriptor.get("repo_manifest")
         if isinstance(raw_manifest, str):
             try:
@@ -371,20 +373,21 @@ def _legacy(root: Path) -> tuple[str, dict[str, Any], dict[str, Any], dict[str, 
         warnings.append("legacy.descriptor-missing")
 
     if manifest_path.is_file() and not manifest_path.is_symlink():
-        manifest, manifest_result = _load_manifest(manifest_path)
+        manifest, _ = _load_manifest(manifest_path)
     else:
         warnings.append("legacy.manifest-missing")
-        manifest, _observed = _fileless_manifest(root)
-        # Fileless rows may lack an origin.  Their render remains valid for
-        # registration and reports that availability separately.
-        manifest_result = {"manifest_digest": canonical_json_sha256(manifest)}
+        manifest, _observed = _fileless_manifest(
+            root,
+            project_key=(
+                descriptor["project_key"] if descriptor is not None else None
+            ),
+        )
 
     if descriptor is not None and descriptor["project_key"] != manifest["project_key"]:
         raise IntentError(
             "project.partial-configuration",
             "legacy descriptor and manifest project keys differ",
         )
-    project_key = manifest["project_key"]
     gate = _builtin_profile(field="gates", profile=BUILTIN_GATE_PROFILE)
     if descriptor is not None:
         raw_gate = descriptor.get("gate_registry")
@@ -408,12 +411,6 @@ def _legacy(root: Path) -> tuple[str, dict[str, Any], dict[str, Any], dict[str, 
             "relative_path": "ai_collab_team_policies.json",
             "digest": sha256_file(policy_path),
         }
-    source_digest = canonical_json_sha256(
-        {
-            "descriptor_digest": descriptor_digest,
-            "manifest_digest": manifest_result["manifest_digest"],
-        }
-    )
     source_kind = "legacy" if not warnings else "legacy-partial"
     return source_kind, manifest, gate, collaboration, warnings
 
@@ -430,6 +427,19 @@ def _observe_against_manifest(
         location = (row["placement"], row["path"])
         declared_locations.add(location)
         item = actual_by_location.get(location)
+        if item is None and row["placement"] == "bundle_sibling":
+            sibling = root.parent / row["path"]
+            if (
+                not sibling.is_symlink()
+                and sibling.is_dir()
+                and _is_git_root(sibling)
+            ):
+                item = _observed_repo(
+                    sibling,
+                    key=row["repo_key"],
+                    placement="bundle_sibling",
+                    logical_path=row["path"],
+                )
         if item is None:
             status = "missing" if row["classification"] != "unmanaged" else "absent"
             observation = {
@@ -449,8 +459,10 @@ def _observe_against_manifest(
                 reasons.append("remote-unavailable")
             if item["remote"] != row.get("remote"):
                 reasons.append("remote")
-            if item["branch"] != row.get("base_branch"):
-                reasons.append("branch")
+            # A present checkout belongs to the employee: feature branches,
+            # detached HEADs, and ahead/behind state are normal WIP, not team
+            # intent drift.  ``base_branch`` is consulted only when the
+            # Workspace adapter must clone a repository that is absent.
         if reasons:
             status = "drift"
         observation = {

@@ -55,8 +55,9 @@ present, missing, or drifted and local discoveries as undeclared. Availability
 changes are refreshed without changing the semantic binding. A changed intent
 or discovered Tier-0 topology becomes a pending update and is applied only
 after the user selects **Apply project update**. Tool-owned compatibility pin
-updates are applied automatically, retain old accepted bindings, and affect
-only Scenarios created afterward.
+updates are applied automatically and affect only Scenarios created afterward;
+existing Scenarios keep recovering from their own pinned snapshot. Historical
+bindings cannot be selected for a newly created Scenario.
 
 For repositories already present locally, arbitrary branches, detached HEAD,
 and ahead/behind state are valid: planning pins the current local HEAD and WIP.

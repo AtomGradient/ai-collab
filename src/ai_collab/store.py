@@ -672,6 +672,15 @@ class ScenarioStore:
                 "scenario_count": len(state["scenarios"]),
             }
 
+    def replay_request(
+        self, request_id: str, request_digest: str
+    ) -> tuple[str, dict[str, Any]] | None:
+        """Replay a durable request before mutable external preconditions."""
+
+        with self._lock:
+            state = self._read_state()
+            return self._previous_request(state, request_id, request_digest)
+
     @staticmethod
     def _validate_project_contract_snapshot(value: Any) -> None:
         # v0.1.6.1 Scenarios migrate with no render. Their already-frozen
@@ -1696,6 +1705,119 @@ class ScenarioStore:
                     False,
                 ) from exc
             return copy.deepcopy(request["result"])
+
+    def fail_scenario_open_resume(
+        self,
+        *,
+        project_instance_id: str,
+        scenario_id: str,
+        request_id: str,
+        request_digest: str,
+        failure_code: str,
+        retryable: bool,
+        cleanup_pending: bool,
+    ) -> None:
+        """Contain one interrupted resume failure to its Scenario.
+
+        This callback is used during Host startup after the desired ``running``
+        state was already committed. It durably clears the active operation so
+        an unavailable legacy binding, Workspace, or restore plan cannot keep
+        the whole Host offline on every subsequent launch.
+        """
+
+        key = self._scenario_key(project_instance_id, scenario_id)
+        with self._lock:
+            state = self._read_state()
+            item = state["scenarios"].get(key)
+            request = state["requests"].get(request_id)
+            if item is None or request is None:
+                raise StoreError(
+                    "scenario.restore-plan-invalid",
+                    "Scenario resume request is unavailable",
+                )
+            operation = state["operations"].get(request["operation_id"])
+            if (
+                request["request_digest"] != request_digest
+                or request["status"] != "pending"
+                or request.get("pending_resume_summary")
+                != {
+                    "project_instance_id": project_instance_id,
+                    "scenario_id": scenario_id,
+                }
+                or not isinstance(operation, dict)
+                or operation["operation_kind"] != "scenario.open"
+            ):
+                raise StoreError(
+                    "scenario.restore-plan-invalid",
+                    "Scenario resume request differs",
+                )
+            record = item["record"]
+            if (
+                record["active_operation_id"] != operation["operation_id"]
+                or record["observed_state"] not in {"opening", "degraded"}
+            ):
+                raise StoreError(
+                    "scenario.restore-plan-invalid",
+                    "Scenario resume callback fence differs",
+                )
+            before_revision = record["state_revision"]
+            self._append_operation_event(
+                state,
+                operation,
+                event="external_failed",
+                before_revision=before_revision,
+                after_revision=before_revision,
+                mutation_state="committed",
+                error_code=failure_code,
+            )
+            evidence = canonical_json_sha256(
+                {
+                    "operation_id": operation["operation_id"],
+                    "request_digest": request_digest,
+                    "failure_code": failure_code,
+                }
+            )
+            record["observed_state"] = "degraded"
+            record["active_operation_id"] = None
+            record["state_revision"] += 1
+            record["degraded"] = {
+                "reason": "participant_restore_incomplete",
+                "cleanup_pending": cleanup_pending,
+                "owned_resource_evidence_sha256": evidence,
+                "repair_action": "scenario.repair",
+            }
+            self._append_operation_event(
+                state,
+                operation,
+                event="finalize_committed",
+                before_revision=before_revision,
+                after_revision=record["state_revision"],
+                mutation_state="committed",
+                error_code=failure_code,
+            )
+            record["journal_head_sequence"] = state["journal_head_sequence"]
+            operation["state"] = "failed"
+            operation["mutation_state"] = "committed"
+            operation["failure_code"] = failure_code
+            request["status"] = "failed"
+            request["error"] = {
+                "code": failure_code,
+                "message": "Scenario resume precondition could not be restored",
+                "mutation_state": "committed",
+                "retryable": retryable,
+            }
+            request.pop("pending_resume_summary", None)
+            state["state_revision"] += 1
+            try:
+                self._write_state(state)
+            except OSError as exc:
+                raise OperationFailed(
+                    operation["operation_id"],
+                    "operation.internal-failure",
+                    "Scenario resume outcome is unknown",
+                    "unknown",
+                    False,
+                ) from exc
 
     def scenario_diagnostic(
         self, project_instance_id: str, scenario_id: str

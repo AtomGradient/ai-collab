@@ -141,6 +141,68 @@ def test_team_intent_is_the_stable_source_and_detects_an_undeclared_repo(
     ]
 
 
+@pytest.mark.parametrize("checkout", ["feature", "detached"])
+def test_present_checkout_branch_does_not_create_team_intent_drift(
+    tmp_path: Path, checkout: str
+) -> None:
+    project = _repo(
+        tmp_path / "sampleproject",
+        remote="https://github.com/example/sampleproject.git",
+    )
+    _write_intent(project)
+    if checkout == "feature":
+        _git(project, "checkout", "-b", "employee-feature")
+    else:
+        _git(project, "checkout", "--detach", "HEAD")
+
+    render = intent.resolve_project(project)
+
+    assert render["availability"]["status"] == "ready"
+    assert render["availability"]["changes"] == []
+
+
+def test_declared_bundle_sibling_is_observed_at_its_exact_location(
+    tmp_path: Path,
+) -> None:
+    bundle = tmp_path / "bundle"
+    project = _repo(
+        bundle / "sampleproject",
+        remote="https://github.com/example/sampleproject.git",
+    )
+    _repo(
+        bundle / "helper",
+        remote="https://github.com/example/helper.git",
+    )
+    _write_intent(project)
+    path = project / ".aicollab" / "project.yaml"
+    value = yaml.safe_load(path.read_text(encoding="utf-8"))
+    value["repos"].append(
+        {
+            "repo_key": "helper",
+            "classification": "required",
+            "placement": "bundle_sibling",
+            "path": "helper",
+            "remote": "https://github.com/example/helper.git",
+            "base_branch": "main",
+            "provision_order": 10,
+            "provision_after": ["sampleproject"],
+            "acceptance_layer": "base",
+            "smoke_policy": "required",
+        }
+    )
+    path.write_text(yaml.safe_dump(value, sort_keys=False), encoding="utf-8")
+
+    render = intent.resolve_project(project)
+
+    assert render["availability"]["status"] == "ready"
+    assert {
+        "repo_key": "helper",
+        "path": "helper",
+        "classification": "required",
+        "status": "present",
+    } in render["availability"]["observations"]
+
+
 def test_intent_min_reader_is_a_forward_compatibility_guard(tmp_path: Path) -> None:
     project = _repo(
         tmp_path / "sampleproject",
@@ -211,6 +273,25 @@ def test_partial_legacy_configuration_registers_with_an_actionable_warning(
     assert render["source"]["kind"] == "legacy-partial"
     assert render["availability"]["warnings"] == ["legacy.descriptor-missing"]
     assert render["availability"]["status"] == "attention"
+
+
+def test_legacy_descriptor_key_survives_missing_manifest_and_renamed_folder(
+    tmp_path: Path,
+) -> None:
+    project = _repo(
+        tmp_path / "renamed-checkout",
+        remote="https://github.com/example/sampleproject.git",
+    )
+    fixture = FIXTURES / "v0161"
+    for name in ("project_descriptor.yaml", "gates.yaml"):
+        (project / name).write_bytes((fixture / name).read_bytes())
+
+    render = intent.resolve_project(project)
+
+    assert render["source"]["kind"] == "legacy-partial"
+    assert render["project"]["project_key"] == "sampleproject"
+    assert render["repo_manifest"]["project_key"] == "sampleproject"
+    assert "legacy.manifest-missing" in render["availability"]["warnings"]
 
 
 def test_draft_is_owner_private_data_and_contains_no_tool_contract_pins(

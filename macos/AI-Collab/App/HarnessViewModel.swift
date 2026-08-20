@@ -290,17 +290,16 @@ final class HarnessViewModel: ObservableObject {
                     payload: [:]
                 )
             )
-            if
+            guard
                 let raw = result["project"] as? [String: Any],
                 let refreshed = ProjectRecord(raw),
                 let reconciliationRaw = result["reconciliation"] as? [String: Any],
                 let reconciliation = ProjectReconciliationRecord(reconciliationRaw)
-            {
-                if let index = projects.firstIndex(where: { $0.id == projectID }) {
-                    projects[index] = refreshed
-                }
-                projectReconciliations[projectID] = reconciliation
+            else { throw HarnessIPCError.invalidReply }
+            if let index = projects.firstIndex(where: { $0.id == projectID }) {
+                projects[index] = refreshed
             }
+            projectReconciliations[projectID] = reconciliation
         } catch {
             // Registration remains usable with its last-good render. A typed
             // reconciliation failure is surfaced only when the employee asks
@@ -494,6 +493,8 @@ final class HarnessViewModel: ObservableObject {
         case "project.resolve-branch": "Correct the declared repository branch"
         case "project.resolve-remote": "Correct repository access or remote"
         case "project.resolve-origin": "Align checkout origin with team intent"
+        case "project.fix-configuration": "Correct project configuration, then check again"
+        case "project.reconcile": "Check project updates again"
         case "disk.free-space": "Free disk space, then prepare again"
         case "participant.recover": "Recover Participant"
         case "scenario.repair": "Use Repair Scenario Below"

@@ -21,6 +21,13 @@ from ai_collab.protocol import canonical_json_sha256
 
 
 def _resolved_render(*, source_digest: str = "d" * 64) -> dict[str, Any]:
+    availability: dict[str, Any] = {
+        "status": "ready",
+        "observations": [],
+        "changes": [],
+        "warnings": [],
+    }
+    availability["fingerprint"] = canonical_json_sha256(availability)
     value: dict[str, Any] = {
         "render_contract_version": 1,
         "source": {
@@ -40,13 +47,7 @@ def _resolved_render(*, source_digest: str = "d" * 64) -> dict[str, Any]:
         "repo_manifest_digest": "b" * 64,
         "gate": {"kind": "builtin", "profile_id": "builtin.standard-v1"},
         "collaboration": {"kind": "builtin", "profile_id": "builtin.standard-v1"},
-        "availability": {
-            "status": "ready",
-            "observations": [],
-            "changes": [],
-            "warnings": [],
-            "fingerprint": "e" * 64,
-        },
+        "availability": availability,
     }
     value["render_digest"] = canonical_json_sha256(
         {key: item for key, item in value.items() if key != "availability"}
@@ -265,6 +266,34 @@ def test_v0161_project_registry_migrates_with_a_last_good_snapshot(
     assert json.loads(backup.read_text(encoding="utf-8"))["schema_version"] == 1
 
 
+def test_v0161_project_registry_rejects_an_untrusted_last_good_target(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    with running_host(state_root) as (_, client):
+        project_id = client.register_project(
+            canonical_project_path=str(project_root), request_id="legacy-register"
+        )["project"]["project_instance_id"]
+
+    registry_path = state_root / "project-registry.json"
+    legacy = json.loads(registry_path.read_text(encoding="utf-8"))
+    legacy["schema_version"] = 1
+    item = legacy["projects"][project_id]
+    del item["render"]
+    del item["pending_reconciliation"]
+    del item["accepted_binding_digests"]
+    registry_path.write_text(json.dumps(legacy), encoding="utf-8")
+    registry_path.chmod(0o600)
+    (state_root / "project-registry.v1.last-good.json").symlink_to(
+        tmp_path / "outside"
+    )
+
+    with pytest.raises(ProjectError, match="last-good snapshot differs"):
+        ProjectRegistry(state_root, None)
+
+
 def test_v0161_tool_pins_refresh_without_employee_acceptance(tmp_path: Path) -> None:
     state_root = tmp_path / "state"
     project_root = tmp_path / "project"
@@ -289,14 +318,56 @@ def test_v0161_tool_pins_refresh_without_employee_acceptance(tmp_path: Path) -> 
     registry_path.chmod(0o600)
 
     with running_host(state_root) as (host, client):
+        with pytest.raises(HarnessClientError) as unresolved:
+            client.create_scenario(
+                project_instance_id=project_id,
+                scenario_id="before-runtime-refresh",
+                project_binding_digest="7" * 64,
+                request_id="create-before-runtime-refresh",
+            )
+        assert unresolved.value.code == "project.reconciliation-required"
+
         refreshed = client.reconcile_project(
             project_instance_id=project_id,
             request_id="upgrade-runtime-pins",
         )
         assert refreshed["reconciliation"]["binding_changed"] is False
         assert refreshed["project"]["project_binding_digest"] == PROJECT_DIGEST
-        host.projects.validate_binding(project_id, "7" * 64)
+        with pytest.raises(ProjectError, match="current project snapshot"):
+            host.projects.validate_binding(project_id, "7" * 64)
         host.projects.validate_binding(project_id, PROJECT_DIGEST)
+
+
+def test_tool_owned_pins_refresh_with_an_existing_render(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    with running_host(state_root) as (_, client):
+        project_id = client.register_project(
+            canonical_project_path=str(project_root), request_id="register-old-pins"
+        )["project"]["project_instance_id"]
+
+    registry_path = state_root / "project-registry.json"
+    state = json.loads(registry_path.read_text(encoding="utf-8"))
+    item = state["projects"][project_id]
+    old_digest = "7" * 64
+    item["record"]["project_binding_digest"] = old_digest
+    item["record"]["product_contract_version"] = "0.9"
+    item["record"]["workspace_adapter_id"] = "workspace.old-v1"
+    item["record"]["environment_adapter_id"] = "environment.old-v1"
+    item["accepted_binding_digests"] = [old_digest]
+    registry_path.write_text(json.dumps(state), encoding="utf-8")
+    registry_path.chmod(0o600)
+
+    with running_host(state_root) as (_, client):
+        refreshed = client.reconcile_project(
+            project_instance_id=project_id,
+            request_id="refresh-existing-render-pins",
+        )
+
+    assert refreshed["reconciliation"]["binding_changed"] is False
+    assert refreshed["project"]["project_binding_digest"] == PROJECT_DIGEST
+    assert refreshed["project"]["registration_revision"] == 2
 
 
 def test_unregistered_project_is_rejected(tmp_path: Path) -> None:
@@ -308,6 +379,57 @@ def test_unregistered_project_is_rejected(tmp_path: Path) -> None:
                 project_binding_digest=PROJECT_DIGEST,
             )
         assert rejected.value.code == "target.project-not-found"
+
+
+def test_migrated_binding_validation_does_not_require_canonical_root_online(
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    with running_host(tmp_path / "state") as (host, client):
+        project = client.register_project(
+            canonical_project_path=str(project_root)
+        )["project"]
+        project_root.rename(tmp_path / "project-offline")
+
+        host.projects.validate_existing_binding(
+            project["project_instance_id"], project["project_binding_digest"]
+        )
+        with pytest.raises(ProjectError, match="unavailable"):
+            host.projects.canonical_root(project["project_instance_id"])
+
+
+def test_accepted_binding_history_always_retains_the_migrated_digest() -> None:
+    original = "0" * 64
+    accepted = [original]
+    for index in range(1, 300):
+        accepted = ProjectRegistry._retain_accepted_bindings(  # noqa: SLF001
+            accepted, f"{index:064x}"
+        )
+
+    assert len(accepted) == 256
+    assert accepted[0] == original
+    assert accepted[-1] == f"{299:064x}"
+
+
+def test_project_configuration_errors_have_contextual_repair_actions() -> None:
+    invalid = HarnessHost.project_error(
+        ProjectError("project.intent-invalid", "project intent is invalid")
+    )
+    assert invalid.repair_action == "project.fix-configuration"
+
+    too_new = HarnessHost.project_error(
+        ProjectError("project.intent-too-new", "newer AICollab required")
+    )
+    assert too_new.repair_action == "host.update"
+
+    incomplete = HarnessHost.project_error(
+        ProjectError(
+            "project.intent-proposal-incomplete",
+            "canonical Git remote is missing",
+        )
+    )
+    assert incomplete.repair_action == "project.resolve-remote"
 
 
 def test_registered_project_exposes_bounded_path_free_collaboration_templates(
@@ -346,12 +468,41 @@ def test_registration_is_idempotent_and_rejects_request_reuse(tmp_path: Path) ->
         assert refreshed["project"]["project_instance_id"] == first["project"][
             "project_instance_id"
         ]
-        assert refreshed["project"]["registration_revision"] == 2
+        assert refreshed["project"]["registration_revision"] == 1
         with pytest.raises(HarnessClientError) as reused:
             client.register_project(
                 canonical_project_path=str(second_root), request_id="same-request"
             )
         assert reused.value.code == "operation.precondition-failed"
+
+
+def test_reregistering_same_root_cannot_bypass_binding_reconciliation(
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    with running_host(tmp_path / "state") as (host, client):
+        first = client.register_project(
+            canonical_project_path=str(project_root), request_id="register-original"
+        )["project"]
+        host.projects.adapter = FakeProjectAdapter(  # type: ignore[assignment]
+            source_digest="9" * 64
+        )
+
+        repeated = client.register_project(
+            canonical_project_path=str(project_root), request_id="register-again"
+        )["project"]
+        assert repeated == first
+        assert host.projects.resolved_render(first["project_instance_id"]) == (
+            _resolved_render()
+        )
+
+        observed = client.reconcile_project(
+            project_instance_id=first["project_instance_id"],
+            request_id="observe-after-reregister",
+        )
+        assert observed["project"] == first
+        assert observed["reconciliation"]["binding_changed"] is True
 
 
 def test_project_reconciliation_refreshes_availability_without_changing_binding(
@@ -370,7 +521,14 @@ def test_project_reconciliation_refreshes_availability_without_changing_binding(
         assert first["reconciliation"] == {
             "status": "ready",
             "binding_changed": False,
-            "availability_fingerprint": "e" * 64,
+            "availability_fingerprint": canonical_json_sha256(
+                {
+                    "availability_fingerprint": _resolved_render()["availability"][
+                        "fingerprint"
+                    ],
+                    "project_binding_digest": PROJECT_DIGEST,
+                }
+            ),
             "changes": [],
             "warnings": [],
         }
@@ -393,7 +551,7 @@ def test_project_binding_update_waits_for_exact_user_acceptance(tmp_path: Path) 
             canonical_project_path=str(project_root), request_id="register-change"
         )["project"]
         original_render = host.projects.resolved_render(project["project_instance_id"])
-        client.create_scenario(
+        created = client.create_scenario(
             project_instance_id=project["project_instance_id"],
             scenario_id="pinned-before-update",
             project_binding_digest=PROJECT_DIGEST,
@@ -430,12 +588,28 @@ def test_project_binding_update_waits_for_exact_user_acceptance(tmp_path: Path) 
             "render_digest"
         ]
         assert accepted["project"]["registration_revision"] == 2
-        # Existing Scenarios remain pinned to—and can resume with—the exact
-        # binding accepted when they were created.
-        host.projects.validate_binding(project["project_instance_id"], PROJECT_DIGEST)
+        assert client.create_scenario(
+            project_instance_id=project["project_instance_id"],
+            scenario_id="pinned-before-update",
+            project_binding_digest=PROJECT_DIGEST,
+            request_id="create-before-change",
+        ) == created
+        # Historical bindings cannot be used for a new Scenario. Existing
+        # Scenarios remain pinned through their own private snapshot below.
+        with pytest.raises(ProjectError, match="current project snapshot"):
+            host.projects.validate_binding(
+                project["project_instance_id"], PROJECT_DIGEST
+            )
         host.projects.validate_binding(
             project["project_instance_id"], changed_render["render_digest"]
         )
+        host.projects.validate_existing_binding(
+            project["project_instance_id"], PROJECT_DIGEST
+        )
+        with pytest.raises(ProjectError, match="not accepted"):
+            host.projects.validate_existing_binding(
+                project["project_instance_id"], "0" * 64
+            )
         assert host.projects.resolved_render(
             project["project_instance_id"], PROJECT_DIGEST
         ) is None
@@ -450,6 +624,42 @@ def test_project_binding_update_waits_for_exact_user_acceptance(tmp_path: Path) 
         assert host.projects.resolved_render(project["project_instance_id"]) == (
             changed_render
         )
+
+
+def test_reconciliation_acceptance_fences_binding_when_availability_is_unchanged(
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    with running_host(tmp_path / "state") as (host, client):
+        project = client.register_project(
+            canonical_project_path=str(project_root), request_id="register-fenced-change"
+        )["project"]
+        host.projects.adapter = FakeProjectAdapter(  # type: ignore[assignment]
+            source_digest="8" * 64
+        )
+        first = client.reconcile_project(
+            project_instance_id=project["project_instance_id"],
+            request_id="observe-fenced-change-1",
+        )["reconciliation"]
+        host.projects.adapter = FakeProjectAdapter(  # type: ignore[assignment]
+            source_digest="9" * 64
+        )
+        second = client.reconcile_project(
+            project_instance_id=project["project_instance_id"],
+            request_id="observe-fenced-change-2",
+        )["reconciliation"]
+
+        assert first["availability_fingerprint"] != second[
+            "availability_fingerprint"
+        ]
+        with pytest.raises(HarnessClientError) as stale:
+            client.accept_project_reconciliation(
+                project_instance_id=project["project_instance_id"],
+                availability_fingerprint=first["availability_fingerprint"],
+                request_id="accept-fenced-change-stale",
+            )
+        assert stale.value.code == "project.reconciliation-stale"
 
 
 def test_corrupt_private_registry_fails_closed(tmp_path: Path) -> None:

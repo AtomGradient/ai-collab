@@ -154,8 +154,10 @@ def _resolved_render() -> dict[str, Any]:
     return value
 
 
-def _project_inputs() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
-    render = _resolved_render()
+def _project_inputs(
+    render: Mapping[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+    render = dict(render) if render is not None else _resolved_render()
     project = render["project"]
     descriptor = {
         "schema_version": 1,
@@ -189,7 +191,7 @@ def _register(payload: Mapping[str, Any]) -> dict[str, Any]:
     if project_root != ROOT or not project_root.is_dir():
         raise AdapterError("canonical project root differs")
     render = _resolved_render()
-    descriptor, descriptor_result, _, manifest_result = _project_inputs()
+    descriptor, descriptor_result, _, manifest_result = _project_inputs(render)
     if (
         descriptor["workspace_adapter"] != WORKSPACE_ADAPTER_ID
         or descriptor["environment_adapter"] != ENVIRONMENT_ADAPTER_ID

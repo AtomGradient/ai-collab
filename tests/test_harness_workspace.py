@@ -30,6 +30,36 @@ from ai_collab.workspace import (
 )
 
 
+HOST_PROJECT_RENDER = {
+    "render_contract_version": 1,
+    "source": {"kind": "fileless", "intent_schema_version": None, "source_digest": "1" * 64},
+    "project": {
+        "project_key": "project",
+        "product_contract_version": "1.0",
+        "workspace_adapter_id": "workspace.test-v1",
+        "environment_adapter_id": "environment.test-v1",
+        "participant_driver_contract": 2,
+        "collaboration_policy_schema": 1,
+    },
+    "repo_manifest": {"schema_version": 1, "project_key": "project", "repos": []},
+    "repo_manifest_digest": "2" * 64,
+    "gate": {"kind": "builtin", "profile_id": "builtin.standard-v1"},
+    "collaboration": {"kind": "builtin", "profile_id": "builtin.standard-v1"},
+    "availability": {"status": "ready", "observations": [], "changes": [], "warnings": []},
+}
+HOST_PROJECT_RENDER["availability"]["fingerprint"] = canonical_json_sha256(  # type: ignore[index]
+    HOST_PROJECT_RENDER["availability"]
+)
+HOST_PROJECT_RENDER["render_digest"] = canonical_json_sha256(
+    {
+        key: value
+        for key, value in HOST_PROJECT_RENDER.items()
+        if key != "availability"
+    }
+)
+HOST_PROJECT_DIGEST = HOST_PROJECT_RENDER["render_digest"]
+
+
 def test_adapter_environment_allows_standard_proxy_without_vendor_identity() -> None:
     assert {
         "HTTP_PROXY",
@@ -169,7 +199,9 @@ class FakeAdapter:
                 "plan_id": f"plan:{payload['operation_id']}",
                 "operation_id": payload["operation_id"],
                 "scenario": payload["scenario"],
-                "project_descriptor_digest": "b" * 64,
+                "project_descriptor_digest": getattr(
+                    self, "project_binding_digest", "b" * 64
+                ),
                 "components": [],
             }
             return {"descriptors": [], "plan": plan}
@@ -342,8 +374,15 @@ def running_high_risk_host(
         socket_path = Path(runtime) / "host.sock"
         host = HarnessHost(state_root, socket_path)
         host.projects.validate_binding = lambda _project, _digest: None  # type: ignore[method-assign]
+        host.projects.resolved_render = (  # type: ignore[method-assign]
+            lambda _project, digest=None: HOST_PROJECT_RENDER
+            if digest in {None, HOST_PROJECT_DIGEST}
+            else None
+        )
+        workspace_adapter = adapter or FakeAdapter()
+        workspace_adapter.project_binding_digest = HOST_PROJECT_DIGEST
         host.workspace = WorkspaceCoordinator(  # type: ignore[arg-type]
-            state_root, adapter or FakeAdapter()
+            state_root, workspace_adapter
         )
         host.security = SecurityCoordinator(state_root, FakeSecurityAdapter())  # type: ignore[arg-type]
         errors: list[BaseException] = []
@@ -627,6 +666,35 @@ def test_adapter_command_receives_project_root_only_in_private_environment(
     assert result == {"root_matches": True}
 
 
+def test_adapter_command_rejects_render_too_large_for_process_environment(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "adapter.py"
+    script.write_text("raise AssertionError('must not spawn')\n", encoding="utf-8")
+    config = tmp_path / "adapter.json"
+    config.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "adapter_id": "test-adapter",
+                "command": ["python3", "adapter.py"],
+                "working_directory": ".",
+            }
+        ),
+        encoding="utf-8",
+    )
+    adapter = ProjectAdapterCommand(config)
+
+    with pytest.raises(WorkspaceError) as exc:
+        adapter.call(
+            "register",
+            {},
+            project_render={"padding": "x" * (600 * 1024)},
+        )
+
+    assert exc.value.code == "project.render-invalid"
+
+
 def test_restart_reconciles_publish_before_final_state_commit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -764,7 +832,7 @@ def _provision_host_workspace(client: HarnessClient) -> tuple[dict[str, Any], Pa
     created = client.create_scenario(
         project_instance_id="project",
         scenario_id="scenario",
-        project_binding_digest="b" * 64,
+        project_binding_digest=HOST_PROJECT_DIGEST,
         request_id="host-create",
     )["scenario"]
     planned = client.plan_workspace(
