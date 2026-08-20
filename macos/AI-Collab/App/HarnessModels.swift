@@ -120,6 +120,11 @@ struct ParticipantRecord: Identifiable, Equatable {
     let runtimeProfileRef: String?
     let continuityMode: String?
     let modelBinding: ModelBindingRecord?
+    /// "tui" or "headless", as projected by the Host record. Only a TUI
+    /// colleague has a window an employee can focus and assign work in.
+    let interactionMode: String?
+
+    var isInteractive: Bool { interactionMode == "tui" }
 
     /// Mirrors `begin_participant_start` in the Host store, which accepts only a
     /// stopped or detached record. The Host additionally gates on the enclosing
@@ -165,6 +170,7 @@ struct ParticipantRecord: Identifiable, Equatable {
         self.desiredState = desiredState
         self.observedState = observedState
         self.runtimeBindingID = value["runtime_binding_id"] as? String
+        self.interactionMode = value["interaction_mode"] as? String
         self.presentationBindingID = value["presentation_binding_id"] as? String
         let degraded = value["degraded"] as? [String: Any]
         self.degradedReason = degraded?["reason"] as? String

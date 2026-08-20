@@ -29,6 +29,21 @@ struct ValidationNotice: Identifiable {
     var message: String { build() }
 }
 
+/// The rail's one next step, derived from live state on every render —
+/// nothing is stored, so it can never drift from reality.
+enum GuidanceStep: Equatable {
+    case registerProject
+    case createRoom
+    case prepareWorkspace
+    case addColleague
+    case resumeRoom
+    case startColleagues
+    case focusAndAssign
+    case attend(String)
+    case working(String)
+    case inconsistent
+}
+
 @MainActor
 final class HarnessViewModel: ObservableObject {
     @Published var hostStatus = "connecting"
@@ -79,6 +94,12 @@ final class HarnessViewModel: ObservableObject {
     /// Confirms a completed mutation. Cleared automatically; see `noteSuccess`.
     @Published private var successBuilder: (() -> String)?
     var successMessage: String? { successBuilder?() }
+    /// True once the selected room's isolated workspace has a publish receipt.
+    /// Internal so state-machine tests can stage it directly.
+    @Published var workspaceReady = false
+    /// One-time "the room is ready" moment, keyed per room generation.
+    @Published private(set) var showReadyMoment = false
+    private let readyMomentDefaults: UserDefaults
     /// Explains why a request could not even be attempted, so no control can
     /// fail silently. Scoped so the reason renders next to the control that
     /// refused, not in a single ambiguous global slot.
@@ -103,10 +124,12 @@ final class HarnessViewModel: ObservableObject {
 
     init(
         client: HarnessIPCClient = HarnessIPCClient(),
-        serviceController: HarnessServiceController? = nil
+        serviceController: HarnessServiceController? = nil,
+        readyMomentDefaults: UserDefaults = .standard
     ) {
         self.client = client
         self.serviceController = serviceController
+        self.readyMomentDefaults = readyMomentDefaults
     }
 
     var selectedProject: ProjectRecord? {
@@ -160,6 +183,58 @@ final class HarnessViewModel: ObservableObject {
             team = S.Headline.someRunning(running, people)
         }
         return "\(Self.humanState(scenario.observedState)) · \(team)"
+    }
+
+    /// The single next step for the guidance rail. Fail-closed over the
+    /// exact Scenario contract: only states the Host declares are handled,
+    /// every offered action satisfies its Host precondition, and anything
+    /// unknown or inconsistent renders guidance without a button.
+    var guidance: GuidanceStep {
+        guard selectedProject != nil else { return .registerProject }
+        guard let scenario = selectedScenario else { return .createRoom }
+        // Only TUI colleagues have a window to work in; a headless-only room
+        // has not completed the "add AI colleagues" stage.
+        let interactive = participants.filter(\.isInteractive)
+        switch scenario.observedState {
+        case "degraded", "provision_failed":
+            return .attend(Self.humanState(scenario.observedState))
+        case "provisioning", "opening", "closing", "repairing", "destroying":
+            return .working(Self.humanState(scenario.observedState))
+        case "closed":
+            // workspace.plan requires a closed Scenario, so Prepare is only
+            // ever offered here.
+            if !workspaceReady { return .prepareWorkspace }
+            if interactive.isEmpty { return .addColleague }
+            return .resumeRoom
+        case "running":
+            if !workspaceReady {
+                // A running room without workspace evidence is inconsistent;
+                // never offer an action the Host must refuse.
+                return .inconsistent
+            }
+            if interactive.isEmpty { return .addColleague }
+            if interactive.contains(where: { $0.observedState == "ready" }) {
+                return .focusAndAssign
+            }
+            return .startColleagues
+        default:
+            return .attend(Self.humanState(scenario.observedState))
+        }
+    }
+
+    /// Show the one-time ready moment when the room first goes all-green.
+    func updateReadyMoment() {
+        guard let project = selectedProject, let scenario = selectedScenario,
+              guidance == .focusAndAssign
+        else { return }
+        let key = "AICollabReadyMoment.\(project.id).\(scenario.id).g\(scenario.generation)"
+        guard !readyMomentDefaults.bool(forKey: key) else { return }
+        readyMomentDefaults.set(true, forKey: key)
+        showReadyMoment = true
+    }
+
+    func dismissReadyMoment() {
+        showReadyMoment = false
     }
 
     /// Machine state to plain language. Presentation only: the Host keeps
@@ -345,6 +420,8 @@ final class HarnessViewModel: ObservableObject {
     }
 
     func selectScenario(_ id: String?) async {
+        workspaceReady = false
+        showReadyMoment = false
         selectedScenarioID = id
         clearDestroyPreview()
         await refreshSelectedScenario()
@@ -1424,7 +1501,11 @@ final class HarnessViewModel: ObservableObject {
             let receipt = workspace["receipt"] as? [String: Any]
         {
             receiptOverride = prettyJSON(receipt)
+            workspaceReady = true
+        } else {
+            workspaceReady = false
         }
+        updateReadyMoment()
         let resourceResult = try await client.call(
             HarnessCall(operation: "resource.list", target: target)
         )

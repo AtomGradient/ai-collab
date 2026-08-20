@@ -1052,6 +1052,75 @@ enum S {
         }
     }
 
+    // MARK: Guidance rail (the one next step)
+
+    enum Guide {
+        static func step(_ index: Int) -> String { t("Step \(index)", "第 \(index) 步") }
+        static var readyTag: String { t("Ready", "就绪") }
+
+        static var registerSay: String {
+            t(
+                "Register your project — pick its folder; nothing is written to it.",
+                "注册你的项目——选中文件夹即可，不会写入任何文件。"
+            )
+        }
+        static var registerAction: String { t("Register Project…", "注册项目…") }
+        static var createSay: String {
+            t("Open the first task room for this project.", "为这个项目开第一个任务房间。")
+        }
+        static var createAction: String { t("Create Room", "创建房间") }
+        static var prepareSay: String {
+            t(
+                "Prepare the workspace — an isolated copy; your originals stay untouched.",
+                "准备工作区——隔离副本，不动你的原始仓库。"
+            )
+        }
+        static var prepareAction: String { t("Prepare Workspace", "准备工作区") }
+        static var addSay: String {
+            t("Invite AI colleagues into the room.", "请 AI 同事进房间。")
+        }
+        static var addAction: String { t("Add AI Colleague", "添加 AI 同事") }
+        static var resumeSay: String {
+            t("The room is closed — resume it to continue.", "房间在休会中——恢复后继续。")
+        }
+        static var resumeAction: String { t("Resume Room", "恢复房间") }
+        static var startSay: String {
+            t("Colleagues are in place — start them working.", "同事已就位，开工。")
+        }
+        static var startAction: String { t("Start All", "全部启动") }
+        static var focusSay: String {
+            t(
+                "Everyone is working — focus a colleague's window and assign the task directly.",
+                "都在工作中——聚焦同事窗口，直接布置任务。"
+            )
+        }
+        static var focusAction: String { t("Focus Colleague Window", "聚焦同事窗口") }
+        static func attendSay(_ stateLabel: String) -> String {
+            t(
+                "The room needs you: \(stateLabel). Use the repair guidance below.",
+                "房间需要处理：\(stateLabel)。请使用下方的修复指引。"
+            )
+        }
+        static func workingSay(_ stateLabel: String) -> String {
+            t("\(stateLabel)…", "\(stateLabel)…")
+        }
+
+        static var inconsistentSay: String {
+            t(
+                "The room's state and its workspace evidence disagree — refresh, "
+                    + "or use the repair guidance below.",
+                "房间状态与工作区证据不一致——请刷新，或使用下方的修复指引。"
+            )
+        }
+        static var readyMomentTitle: String { t("The room is ready", "房间已就绪") }
+        static var readyMomentBody: String {
+            t(
+                "Focus any colleague's window and assign the task directly — that's the whole workflow.",
+                "聚焦任一同事的窗口、直接布置任务——流程就这么多。"
+            )
+        }
+    }
+
     // MARK: Settings
 
     enum Settings {

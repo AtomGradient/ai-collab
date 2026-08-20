@@ -77,6 +77,7 @@ struct ContentView: View {
         } detail: {
             scenarioDetail
         }
+        .safeAreaInset(edge: .top, spacing: 0) { guidanceRail }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button(S.Chrome.registerProject, systemImage: "plus") {
@@ -126,10 +127,126 @@ struct ContentView: View {
             }
         }
         .overlay(alignment: .top) { errorBanner }
+        .overlay(alignment: .bottomTrailing) { readyMomentCard }
         .overlay(alignment: .bottom) { successToast }
         .overlay { activityOverlay }
         .task { await model.bootstrap() }
         .frame(minWidth: 1100, minHeight: 720)
+    }
+
+    // MARK: - Guidance rail (the one next step)
+
+    private struct GuidanceContent {
+        let index: Int?
+        let say: String
+        let action: String?
+        let perform: (() -> Void)?
+    }
+
+    private var guidanceContent: GuidanceContent {
+        switch model.guidance {
+        case .registerProject:
+            GuidanceContent(index: 1, say: S.Guide.registerSay, action: S.Guide.registerAction) {
+                Task { await model.chooseAndRegisterProject() }
+            }
+        case .createRoom:
+            GuidanceContent(index: 2, say: S.Guide.createSay, action: S.Guide.createAction) {
+                Task { await model.createScenario() }
+            }
+        case .prepareWorkspace:
+            GuidanceContent(index: 3, say: S.Guide.prepareSay, action: S.Guide.prepareAction) {
+                Task { await model.prepareWorkspace() }
+            }
+        case .addColleague:
+            GuidanceContent(index: 4, say: S.Guide.addSay, action: S.Guide.addAction) {
+                Task { await model.addParticipant() }
+            }
+        case .resumeRoom:
+            GuidanceContent(index: 5, say: S.Guide.resumeSay, action: S.Guide.resumeAction) {
+                Task { await model.openScenario() }
+            }
+        case .startColleagues:
+            GuidanceContent(index: 5, say: S.Guide.startSay, action: S.Guide.startAction) {
+                Task { await model.startAllParticipants() }
+            }
+        case .focusAndAssign:
+            GuidanceContent(index: nil, say: S.Guide.focusSay, action: S.Guide.focusAction) {
+                Task { await model.focusScenario() }
+            }
+        case let .attend(stateLabel):
+            GuidanceContent(
+                index: nil, say: S.Guide.attendSay(stateLabel), action: nil, perform: nil
+            )
+        case let .working(stateLabel):
+            GuidanceContent(
+                index: nil, say: S.Guide.workingSay(stateLabel), action: nil, perform: nil
+            )
+        case .inconsistent:
+            GuidanceContent(
+                index: nil, say: S.Guide.inconsistentSay, action: nil, perform: nil
+            )
+        }
+    }
+
+    private var guidanceRail: some View {
+        let content = guidanceContent
+        return HStack(spacing: 12) {
+            Text(content.index.map { S.Guide.step($0) } ?? S.Guide.readyTag)
+                .font(.caption.bold())
+                .textCase(.uppercase)
+                .foregroundStyle(.teal)
+            Text(content.say)
+                .font(.callout.weight(.medium))
+                .lineLimit(1)
+            Spacer()
+            if let action = content.action, let perform = content.perform {
+                Button(action, action: perform)
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .disabled(model.isBusy)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(.teal.opacity(0.08))
+        .overlay(alignment: .bottom) { Divider() }
+    }
+
+    private var readyMomentCard: some View {
+        Group {
+            if model.showReadyMoment {
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: "checkmark.seal.fill")
+                        .foregroundStyle(.green)
+                        .font(.title3)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(S.Guide.readyMomentTitle).font(.headline)
+                        Text(S.Guide.readyMomentBody)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Button(S.Guide.focusAction) {
+                            model.dismissReadyMoment()
+                            Task { await model.focusScenario() }
+                        }
+                        .controlSize(.small)
+                        .padding(.top, 3)
+                    }
+                    Button {
+                        model.dismissReadyMoment()
+                    } label: {
+                        Image(systemName: "xmark").font(.caption.bold())
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(14)
+                .frame(maxWidth: 380)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+                .shadow(radius: 10)
+                .padding()
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
     }
 
     // MARK: - Sidebar: Projects
