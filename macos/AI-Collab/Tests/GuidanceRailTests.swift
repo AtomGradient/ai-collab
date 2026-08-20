@@ -254,10 +254,10 @@ final class GuidanceRailTests: XCTestCase {
         let model = HarnessViewModel()
         model.guideStep = 4
         L10n.shared.preference = .english
-        XCTAssertTrue(S.Guide.policySay.contains("resume the room if it is closed"))
+        XCTAssertTrue(S.Guide.policySay.contains("Resume the room first"))
         L10n.shared.preference = .simplifiedChinese
         XCTAssertEqual(model.guideStep, 4, "switching language must not close the card")
-        XCTAssertTrue(S.Guide.policySay.contains("房间休会中先点恢复"))
+        XCTAssertTrue(S.Guide.policySay.contains("房间休会中先点恢复打开房间"))
         L10n.shared.preference = .english
     }
 }

@@ -37,11 +37,14 @@ Host, without disturbing each other:
    immediate retry.
 5. Add AI colleagues (Codex and Claude CLI profiles ship in the box). Added
    the wrong one? Stop it, then delete it from its ⋯ menu.
-6. Pick a team template under Collaboration Policy, **Preview Plan** →
-   **Apply Plan**, then click **Start All**. Once your colleagues are
-   working, focus a window and assign the task — from here they can message
-   each other, each through its own Host-issued `ai-ping` command. A guidance
-   rail points to the next step throughout.
+6. Click **Resume** — a freshly created room starts out closed, and the
+   collaboration policy can only be previewed or applied while the room is
+   open. Then pick a team template under Collaboration Policy,
+   **Preview Plan** → **Apply Plan**, and click **Start All**. Once your
+   colleagues are working, focus a window and assign the task — from here
+   they can message each other, each through its own Host-issued `ai-ping`
+   command. A centered getting-started card deck walks you through these
+   steps and can be reopened anytime from the toolbar **?**.
 
 ## How it works
 

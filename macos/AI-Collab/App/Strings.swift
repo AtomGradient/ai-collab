@@ -1071,11 +1071,12 @@ enum S {
         }
         static var policySay: String {
             t(
-                "Pick a team template under Collaboration Policy, preview and "
-                    + "apply the plan; resume the room if it is closed, then "
-                    + "Start All.",
-                "在协作规则区选团队模板，预览并应用方案；房间休会中先点恢复，"
-                    + "然后全部启动。"
+                "Resume the room first if it is closed — the policy only "
+                    + "applies while the room is open. Then pick a team "
+                    + "template under Collaboration Policy, preview and "
+                    + "apply the plan, and Start All.",
+                "房间休会中先点恢复打开房间——策略只有在房间打开后才能应用。"
+                    + "然后在协作规则区选团队模板，预览并应用方案，最后全部启动。"
             )
         }
 
