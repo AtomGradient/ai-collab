@@ -94,6 +94,12 @@ final class HarnessViewModel: ObservableObject {
     /// Confirms a completed mutation. Cleared automatically; see `noteSuccess`.
     @Published private var successBuilder: (() -> String)?
     var successMessage: String? { successBuilder?() }
+    /// Live per-repository preparation rows (workspace-component-v1).
+    @Published var workspaceProgress: [WorkspaceComponentProgress] = []
+    var workspaceProgressHasFailure: Bool {
+        workspaceProgress.contains { $0.state == "failed" }
+    }
+
     /// True once the selected room's isolated workspace has a publish receipt.
     /// Internal so state-machine tests can stage it directly.
     @Published var workspaceReady = false
@@ -119,7 +125,8 @@ final class HarnessViewModel: ObservableObject {
 
     let client: HarnessIPCClient
     private let serviceController: HarnessServiceController?
-    private var activeProgressSessionID: UUID?
+    /// Internal so progress-session behavior tests can stage a live session.
+    var activeProgressSessionID: UUID?
     private var successToken: UUID?
 
     init(
@@ -562,6 +569,18 @@ final class HarnessViewModel: ObservableObject {
         S.Repair.label(action)
     }
 
+    /// The performable repair button for one error, honoring the approved
+    /// retryable gate: a retry-semantic action is only clickable when the
+    /// Host marked the failure retryable; otherwise the recommendation stays
+    /// text-only.
+    func performableRepairAction(_ error: ActionableErrorRecord) -> String? {
+        guard let action = error.repairAction, canPerformRepairAction(action) else {
+            return nil
+        }
+        if action == "host.retry" && !error.retryable { return nil }
+        return action
+    }
+
     func canPerformRepairAction(_ action: String) -> Bool {
         switch action {
         case "host.retry", "project.register", "scenario.refresh", "scenario.preflight",
@@ -613,11 +632,21 @@ final class HarnessViewModel: ObservableObject {
         guard let project = selectedProject, let scenario = selectedScenario else {
             return refuse(.workspace, S.Msg.selectRoomFirst)
         }
+        let progressSessionID = UUID()
         await performMutation(
             activity: S.Msg.planningWorkspace,
             scope: .workspace,
             success: S.Msg.workspaceReady
         ) {
+            self.activeProgressSessionID = progressSessionID
+            defer {
+                if self.activeProgressSessionID == progressSessionID {
+                    self.activeProgressSessionID = nil
+                    self.activeOperationID = nil
+                    self.operationCanCancel = false
+                    self.progressBuilder = nil
+                }
+            }
             let target = self.scenarioTarget(projectID: project.id, scenarioID: scenario.id)
             let planned = try await self.client.call(
                 HarnessCall(
@@ -649,7 +678,12 @@ final class HarnessViewModel: ObservableObject {
                         "plan_digest": planDigest,
                     ],
                     responseTimeoutSeconds: 360
-                )
+                ),
+                progress: { progress in
+                    Task { @MainActor in
+                        self.applyProgress(progress, progressSessionID: progressSessionID)
+                    }
+                }
             )
             self.receiptOverride = prettyJSON(
                 (provisioned["workspace"] as? [String: Any])?["receipt"]
@@ -1697,13 +1731,16 @@ final class HarnessViewModel: ObservableObject {
         participants = parsed
     }
 
-    private func applyProgress(
+    func applyProgress(
         _ progress: HarnessProgress,
         progressSessionID: UUID
     ) {
         guard activeProgressSessionID == progressSessionID else { return }
         activeOperationID = progress.operationID
         operationCanCancel = progress.cancellable
+        if progress.progressKind == "workspace-component-v1" {
+            applyWorkspaceComponentProgress(progress)
+        }
         let unitText = progress.totalUnits > 0
             ? "\(min(progress.completedUnits, progress.totalUnits))/\(progress.totalUnits)"
             : "0/0"
@@ -1714,6 +1751,37 @@ final class HarnessViewModel: ObservableObject {
                 S.Status.label(capturedState), unitText, capturedParticipant
             )
         }
+    }
+
+    /// One row per repository (and one for the environment), in plan order.
+    func applyWorkspaceComponentProgress(_ progress: HarnessProgress) {
+        if progress.phase == "workspace.prepare",
+           progress.componentState == "complete" {
+            for index in workspaceProgress.indices {
+                workspaceProgress[index].state = "ready"
+            }
+            return
+        }
+        guard
+            let componentID = progress.componentID,
+            let kind = progress.componentKind,
+            let index = progress.componentIndex,
+            let state = progress.componentState,
+            index >= 0, index < 4096
+        else { return }
+        while workspaceProgress.count <= index {
+            workspaceProgress.append(
+                WorkspaceComponentProgress(
+                    index: workspaceProgress.count,
+                    componentID: "",
+                    kind: "repository",
+                    state: "waiting"
+                )
+            )
+        }
+        workspaceProgress[index].componentID = componentID
+        workspaceProgress[index].kind = kind
+        workspaceProgress[index].state = state
     }
 
     /// Read-only refreshes. Deliberately does not take the mutation lock and does
@@ -1745,6 +1813,9 @@ final class HarnessViewModel: ObservableObject {
         }
         isBusy = true
         activityBuilder = activity
+        // Preparation rows belong to one operation only; a new mutation of
+        // any kind must never display a previous Prepare's repositories.
+        workspaceProgress = []
         errorMessage = nil
         actionableError = nil
         validation = nil

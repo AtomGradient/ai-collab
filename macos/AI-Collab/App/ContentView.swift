@@ -1111,21 +1111,66 @@ struct ContentView: View {
         .background(.secondary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
     }
 
+    // MARK: - Workspace preparation rows
+
+    private var workspaceProgressRows: some View {
+        let failed = model.workspaceProgressHasFailure
+        return ScrollView {
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(model.workspaceProgress) { component in
+                    HStack(spacing: 8) {
+                        progressGlyph(component.state, afterFailure: failed)
+                        Text(
+                            component.kind == "environment"
+                                ? S.Prepare.environmentRow
+                                : component.componentID
+                        )
+                        .font(.caption)
+                        .lineLimit(1)
+                        Spacer()
+                        Text(S.Prepare.rowState(component.state, afterFailure: failed))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+        .frame(maxHeight: 180)
+    }
+
+    @ViewBuilder
+    private func progressGlyph(_ state: String, afterFailure: Bool) -> some View {
+        switch state {
+        case "ready":
+            Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+        case "failed":
+            Image(systemName: "xmark.circle.fill").foregroundStyle(.red)
+        case "cloning", "building":
+            ProgressView().controlSize(.small)
+        default:
+            Image(systemName: "circle.dotted")
+                .foregroundStyle(afterFailure ? .quaternary : .secondary)
+        }
+    }
+
     // MARK: - Overlays
 
     @ViewBuilder
     private var errorBanner: some View {
         if let error = model.actionableError {
-            HStack(alignment: .top) {
+            let sentence = S.Fix.sentence(error.code)
+                ?? S.Fix.categoryFallback(error.category)
+            let actionable = error.repairAction != nil
+            HStack(alignment: .top, spacing: 10) {
+                Image(
+                    systemName: actionable
+                        ? "wrench.and.screwdriver.fill"
+                        : "exclamationmark.octagon.fill"
+                )
+                .foregroundStyle(actionable ? Color.orange : Color.red)
+                .font(.title3)
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(error.message).font(.callout.bold())
-                    Text(
-                        S.Banner.machineLine(
-                            error.code, error.category, error.mutationState,
-                            retryable: error.retryable
-                        )
-                    )
-                    .font(.caption.monospaced())
+                    Text(sentence).font(.callout.bold())
                     if let action = error.repairAction {
                         HStack {
                             Text(S.Banner.recommended(model.repairActionLabel(action)))
@@ -1133,14 +1178,31 @@ struct ContentView: View {
                             if action == "scenario.repair" {
                                 Button(S.Banner.reviewRepair) { highRiskIntent = .repairScenario }
                                     .controlSize(.small)
-                            } else if model.canPerformRepairAction(action) {
-                                Button(model.repairActionLabel(action)) {
-                                    Task { await model.performRepairAction(action) }
+                            } else if let performable = model.performableRepairAction(error) {
+                                Button(model.repairActionLabel(performable)) {
+                                    Task { await model.performRepairAction(performable) }
                                 }
                                 .controlSize(.small)
                             }
                         }
                     }
+                    DisclosureGroup(S.Common.details) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(error.message)
+                                .font(.caption)
+                                .textSelection(.enabled)
+                            Text(
+                                S.Banner.machineLine(
+                                    error.code, error.category, error.mutationState,
+                                    retryable: error.retryable
+                                )
+                            )
+                            .font(.caption.monospaced())
+                            .textSelection(.enabled)
+                        }
+                        .padding(.top, 2)
+                    }
+                    .font(.caption)
                 }
                 Spacer()
                 Button {
@@ -1152,8 +1214,14 @@ struct ContentView: View {
                 .buttonStyle(.plain)
             }
             .padding(12)
-            .background(.red.opacity(0.9), in: RoundedRectangle(cornerRadius: 8))
-            .foregroundStyle(.white)
+            .frame(maxWidth: 560)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .strokeBorder(
+                        actionable ? Color.orange.opacity(0.5) : Color.red.opacity(0.5)
+                    )
+            )
             .padding()
             .transition(.move(edge: .top).combined(with: .opacity))
         }
@@ -1191,7 +1259,9 @@ struct ContentView: View {
                 Text(activityText)
                     .font(.callout)
                     .multilineTextAlignment(.center)
-                if let progress = model.operationProgressText {
+                if !model.workspaceProgress.isEmpty {
+                    workspaceProgressRows
+                } else if let progress = model.operationProgressText {
                     Text(progress)
                         .font(.caption.monospaced())
                         .foregroundStyle(.secondary)

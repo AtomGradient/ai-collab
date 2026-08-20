@@ -447,6 +447,15 @@ struct ScenarioTopologyRecord: Equatable {
     }
 }
 
+struct WorkspaceComponentProgress: Identifiable, Equatable {
+    let index: Int
+    var componentID: String
+    var kind: String
+    var state: String
+
+    var id: Int { index }
+}
+
 struct ActionableErrorRecord: Equatable {
     let code: String
     let category: String

@@ -277,3 +277,19 @@ def test_app_offers_colleague_deletion_only_for_stopped_with_confirmation() -> N
     assert "will disappear from this room" in strings
     assert "将从这个房间消失" in strings
     assert "正在工作的成员需要先停止" in strings
+
+
+def test_prepare_workspace_wires_the_progress_session() -> None:
+    """R7: the real provision call must carry the session-bound progress
+    callback, and rows must reset at every mutation start."""
+
+    view_model = (APP_ROOT / "HarnessViewModel.swift").read_text(encoding="utf-8")
+    prepare = view_model.split("func prepareWorkspace", 1)[1].split("func ", 1)[0]
+    assert "let progressSessionID = UUID()" in view_model.split(
+        "func prepareWorkspace", 1
+    )[1][:400]
+    assert 'operation: "workspace.provision"' in prepare
+    assert "progress: { progress in" in prepare
+    assert "self.applyProgress(progress, progressSessionID: progressSessionID)" in prepare
+    mutation = view_model.split("private func performMutation", 1)[1].split("func ", 1)[0]
+    assert "workspaceProgress = []" in mutation

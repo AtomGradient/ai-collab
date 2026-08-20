@@ -1121,6 +1121,142 @@ enum S {
         }
     }
 
+    // MARK: Repair cards — typed code → one human sentence
+
+    enum Fix {
+        /// A human sentence for the codes an employee can plausibly meet.
+        /// Unknown codes return nil and the card falls back to the raw Host
+        /// message (verbatim evidence is better than a wrong translation).
+        static func sentence(_ code: String) -> String? {
+            switch code {
+            case "workspace.shallow-source":
+                return t(
+                    "A repository's Git history is incomplete.",
+                    "有仓库的 Git 历史不完整。"
+                )
+            case "workspace.partial-source", "workspace.partial-source-invalid",
+                 "workspace.alternate-object-source":
+                return t(
+                    "A repository's local Git storage cannot be copied safely.",
+                    "有仓库的本地 Git 存储无法被安全复制。"
+                )
+            case "workspace.git-auth-required":
+                return t(
+                    "Git sign-in is needed before repositories can be downloaded.",
+                    "需要先登录 Git 才能下载仓库。"
+                )
+            case "workspace.network-unavailable":
+                return t(
+                    "The network is unavailable right now.",
+                    "当前网络不可用。"
+                )
+            case "workspace.branch-unavailable":
+                return t(
+                    "A declared repository branch could not be found.",
+                    "声明的仓库分支不存在。"
+                )
+            case "workspace.remote-unavailable", "workspace.remote-download-failed":
+                return t(
+                    "A repository could not be reached at its declared address.",
+                    "按声明地址联系不上某个仓库。"
+                )
+            case "workspace.source-origin-mismatch":
+                return t(
+                    "A local checkout points at a different remote than the team definition.",
+                    "本地仓库的远端地址与团队配置不一致。"
+                )
+            case "workspace.disk-full":
+                return t("There is not enough free disk space.", "磁盘空间不足。")
+            case "project.intent-too-new":
+                return t(
+                    "This project needs a newer AICollab.",
+                    "这个项目需要更新版本的 AICollab。"
+                )
+            case "project.intent-invalid", "project.descriptor-invalid",
+                 "project.manifest-invalid", "project.partial-configuration":
+                return t(
+                    "The project's configuration file has a problem.",
+                    "项目配置文件有问题。"
+                )
+            case "project.reconciliation-required":
+                return t(
+                    "Finish the project update first, then create the room.",
+                    "先完成项目更新，再创建房间。"
+                )
+            case "project.reconciliation-stale":
+                return t(
+                    "The project changed — check for updates again.",
+                    "项目有变化——请重新检查更新。"
+                )
+            case "operation.adapter-crashed":
+                return t(
+                    "A background helper stopped unexpectedly.",
+                    "后台组件异常退出。"
+                )
+            case "availability.adapter-unavailable", "project.adapter-unavailable":
+                return t(
+                    "A required background helper is unavailable.",
+                    "所需的后台组件不可用。"
+                )
+            case "availability.host-unavailable":
+                return t("The background service is not running.", "后台服务未在运行。")
+            default:
+                return nil
+            }
+        }
+
+        /// When no code sentence exists, the card leads with a localized
+        /// category sentence; the raw Host message stays in Technical Details.
+        static func categoryFallback(_ category: String) -> String {
+            // The exact host_ipc_v1 category enum:
+            // protocol | identity | authorization | fencing | availability | operation
+            switch category {
+            case "protocol":
+                return t(
+                    "The App and the service could not understand each other.",
+                    "应用与后台服务的通信出错。"
+                )
+            case "identity":
+                return t("An identity check did not pass.", "身份校验未通过。")
+            case "authorization":
+                return t("This action is not authorized.", "没有执行此操作的授权。")
+            case "fencing":
+                return t(
+                    "The room changed underneath this action — refresh and try again.",
+                    "状态已发生变化——刷新后重试。"
+                )
+            case "availability":
+                return t(
+                    "A required service is not available right now.",
+                    "所需的服务暂时不可用。"
+                )
+            case "operation":
+                return t("The operation could not be completed.", "操作未能完成。")
+            default:
+                return t("Something went wrong.", "发生了一个错误。")
+            }
+        }
+    }
+
+    // MARK: Workspace preparation progress rows
+
+    enum Prepare {
+        static var environmentRow: String { t("Python environment", "Python 环境") }
+        static func rowState(_ state: String, afterFailure: Bool) -> String {
+            switch state {
+            case "waiting":
+                return afterFailure
+                    ? t("not started", "未开始")
+                    : t("waiting", "等待中")
+            case "cloning": return t("cloning…", "克隆中…")
+            case "building": return t("building…", "构建中…")
+            case "ready": return t("done", "完成")
+            case "failed": return t("failed", "失败")
+            default: return t("unknown", "未知")
+            }
+        }
+    }
+
     // MARK: Settings
 
     enum Settings {

@@ -73,6 +73,13 @@ struct HarnessProgress: Sendable, Equatable {
     let totalUnits: Int
     let participantID: String?
     let cancellable: Bool
+    // workspace-component-v1 side channel (optional; absent on other kinds).
+    let progressKind: String?
+    let phase: String?
+    let componentID: String?
+    let componentKind: String?
+    let componentIndex: Int?
+    let componentState: String?
 }
 
 private struct HarnessReply: @unchecked Sendable {
@@ -196,7 +203,13 @@ final class HarnessIPCClient: @unchecked Sendable {
                     completedUnits: completedUnits,
                     totalUnits: totalUnits,
                     participantID: value["participant_id"] as? String,
-                    cancellable: cancellable
+                    cancellable: cancellable,
+                    progressKind: value["progress_kind"] as? String,
+                    phase: value["phase"] as? String,
+                    componentID: value["component_id"] as? String,
+                    componentKind: value["component_kind"] as? String,
+                    componentIndex: value["component_index"] as? Int,
+                    componentState: value["component_state"] as? String
                 )
             )
             reply = try readFrame(descriptor: descriptor)
