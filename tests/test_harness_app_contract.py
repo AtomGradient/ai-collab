@@ -309,3 +309,19 @@ def test_degraded_room_shows_a_visible_repair_entry() -> None:
     assert "healthCard(scenario)" in detail
     assert "Label(S.Sections.health" in card
     assert "Label(S.Sections.activity" in content
+
+
+def test_guide_is_a_dismissable_centered_card_deck() -> None:
+    """User decision 2026-08-21: guidance is a centered card the employee
+    steps through and can always close — never a persistent overlay bar."""
+
+    content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
+    assert ".safeAreaInset(edge: .top" not in content, "no top overlay bar layouts"
+    assert "guidanceRail" not in content, "the rail is gone"
+    deck = content.split("private var guideCard", 1)[1].split("// MARK: ", 1)[0]
+    assert "Button(S.Guide.next)" in deck
+    assert "Button(S.Guide.previous)" in deck
+    assert "Button(S.Guide.done)" in deck
+    assert "guideStep = nil" in deck, "close is always available"
+    assert 'Button(S.Guide.reopenHelp, systemImage: "questionmark.circle")' in content
+    assert 'AppStorage("AICollabGuideSeen")' in content, "first launch shows once"

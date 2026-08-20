@@ -1060,7 +1060,22 @@ enum S {
     enum Guide {
         static func step(_ index: Int) -> String { t("Step \(index)", "第 \(index) 步") }
         static var readyTag: String { t("Ready", "就绪") }
-        static var hide: String { t("Hide the guidance rail", "隐藏引导条") }
+        static var next: String { t("Next", "下一步") }
+        static var previous: String { t("Back", "上一步") }
+        static var done: String { t("Done", "完成") }
+        static func stepOf(_ index: Int, _ total: Int) -> String {
+            t("Step \(index) of \(total)", "第 \(index) 步 · 共 \(total) 步")
+        }
+        static var reopenHelp: String {
+            t("Open the getting-started guide", "打开上手引导")
+        }
+        static var policySay: String {
+            t(
+                "Pick a team template under Collaboration Policy, preview and "
+                    + "apply the plan, then Start All.",
+                "在协作规则区选团队模板，预览并应用方案，然后全部启动。"
+            )
+        }
 
         static var registerSay: String {
             t(
@@ -1304,7 +1319,6 @@ enum S {
         static var languageSystem: String { t("Follow System", "跟随系统") }
         static var languageChinese: String { t("简体中文", "简体中文") }
         static var languageEnglish: String { t("English", "English") }
-        static var showGuidanceRail: String { t("Show guidance rail", "显示引导条") }
         static var languageFootnote: String {
             t(
                 "Applies immediately to the whole app.",

@@ -66,25 +66,18 @@ private enum HighRiskIntent: Identifiable {
 
 struct ContentView: View {
     @EnvironmentObject private var model: HarnessViewModel
-    @AppStorage("AICollabShowGuidanceRail") private var showGuidanceRail = true
+    @AppStorage("AICollabGuideSeen") private var guideSeen = false
+    @State private var guideStep: Int?
     @State private var highRiskIntent: HighRiskIntent?
     @State private var pendingDeletion: ParticipantRecord?
 
     var body: some View {
-        VStack(spacing: 0) {
-            // Real layout space: the rail sits above the columns and can
-            // never overlap or cover interactive content — and it is the
-            // employee's choice: hide it here, bring it back in Settings.
-            if showGuidanceRail {
-                guidanceRail
-            }
-            NavigationSplitView {
-                projectsSidebar
-            } content: {
-                scenariosList
-            } detail: {
-                scenarioDetail
-            }
+        NavigationSplitView {
+            projectsSidebar
+        } content: {
+            scenariosList
+        } detail: {
+            scenarioDetail
         }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
@@ -92,6 +85,18 @@ struct ContentView: View {
                     Task { await model.chooseAndRegisterProject() }
                 }
                 .help(S.Chrome.registerProject)
+            }
+            ToolbarItem {
+                Button(S.Guide.reopenHelp, systemImage: "questionmark.circle") {
+                    guideStep = currentGuideIndex
+                }
+                .help(S.Guide.reopenHelp)
+            }
+        }
+        .onAppear {
+            if !guideSeen {
+                guideSeen = true
+                guideStep = 0
             }
         }
         .disabled(model.isBusy)
@@ -136,97 +141,103 @@ struct ContentView: View {
         }
         .overlay(alignment: .top) { errorBanner }
         .overlay(alignment: .bottomTrailing) { readyMomentCard }
+        .overlay { guideCard }
         .overlay(alignment: .bottom) { successToast }
         .overlay { activityOverlay }
         .task { await model.bootstrap() }
         .frame(minWidth: 1100, minHeight: 720)
     }
 
-    // MARK: - Guidance rail (the one next step)
+    // MARK: - Getting-started guide (centered card deck)
 
-    private struct GuidanceContent {
-        let index: Int?
+    /// The six teachable steps, matching the manual's happy path. Each step
+    /// carries its say and, where meaningful, the existing action it teaches.
+    private struct GuideStep {
         let say: String
         let action: String?
         let perform: (() -> Void)?
     }
 
-    private var guidanceContent: GuidanceContent {
-        switch model.guidance {
-        case .registerProject:
-            GuidanceContent(index: 1, say: S.Guide.registerSay, action: S.Guide.registerAction) {
+    private var guideSteps: [GuideStep] {
+        [
+            GuideStep(say: S.Guide.registerSay, action: S.Guide.registerAction) {
                 Task { await model.chooseAndRegisterProject() }
-            }
-        case .createRoom:
-            GuidanceContent(index: 2, say: S.Guide.createSay, action: S.Guide.createAction) {
+            },
+            GuideStep(say: S.Guide.createSay, action: S.Guide.createAction) {
                 Task { await model.createScenario() }
-            }
-        case .prepareWorkspace:
-            GuidanceContent(index: 3, say: S.Guide.prepareSay, action: S.Guide.prepareAction) {
+            },
+            GuideStep(say: S.Guide.prepareSay, action: S.Guide.prepareAction) {
                 Task { await model.prepareWorkspace() }
-            }
-        case .addColleague:
-            GuidanceContent(index: 4, say: S.Guide.addSay, action: S.Guide.addAction) {
+            },
+            GuideStep(say: S.Guide.addSay, action: S.Guide.addAction) {
                 Task { await model.addParticipant() }
-            }
-        case .resumeRoom:
-            GuidanceContent(index: 5, say: S.Guide.resumeSay, action: S.Guide.resumeAction) {
-                Task { await model.openScenario() }
-            }
-        case .startColleagues:
-            GuidanceContent(index: 5, say: S.Guide.startSay, action: S.Guide.startAction) {
-                Task { await model.startAllParticipants() }
-            }
-        case .focusAndAssign:
-            GuidanceContent(index: nil, say: S.Guide.focusSay, action: S.Guide.focusAction) {
+            },
+            GuideStep(say: S.Guide.policySay, action: nil, perform: nil),
+            GuideStep(say: S.Guide.focusSay, action: S.Guide.focusAction) {
                 Task { await model.focusScenario() }
-            }
-        case let .attend(stateLabel):
-            GuidanceContent(
-                index: nil, say: S.Guide.attendSay(stateLabel), action: nil, perform: nil
-            )
-        case let .working(stateLabel):
-            GuidanceContent(
-                index: nil, say: S.Guide.workingSay(stateLabel), action: nil, perform: nil
-            )
-        case .inconsistent:
-            GuidanceContent(
-                index: nil, say: S.Guide.inconsistentSay, action: nil, perform: nil
-            )
+            },
+        ]
+    }
+
+    /// Where the deck opens when summoned: the user's actual next step.
+    private var currentGuideIndex: Int {
+        switch model.guidance {
+        case .registerProject: 0
+        case .createRoom: 1
+        case .prepareWorkspace, .inconsistent: 2
+        case .addColleague: 3
+        case .resumeRoom, .startColleagues: 4
+        case .focusAndAssign, .attend, .working: 5
         }
     }
 
-    private var guidanceRail: some View {
-        let content = guidanceContent
-        return HStack(spacing: 12) {
-            Text(content.index.map { S.Guide.step($0) } ?? S.Guide.readyTag)
-                .font(.caption.bold())
-                .textCase(.uppercase)
-                .foregroundStyle(.teal)
-            Text(content.say)
-                .font(.callout.weight(.medium))
-                .lineLimit(1)
-            Spacer()
-            if let action = content.action, let perform = content.perform {
-                Button(action, action: perform)
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                    .disabled(model.isBusy)
+    @ViewBuilder
+    private var guideCard: some View {
+        if let index = guideStep, guideSteps.indices.contains(index) {
+            let step = guideSteps[index]
+            let isCurrent = index == currentGuideIndex
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Text(S.Guide.stepOf(index + 1, guideSteps.count))
+                        .font(.caption.bold())
+                        .textCase(.uppercase)
+                        .foregroundStyle(.teal)
+                    Spacer()
+                    Button {
+                        guideStep = nil
+                    } label: {
+                        Image(systemName: "xmark").font(.caption.bold())
+                    }
+                    .buttonStyle(.plain)
+                }
+                Text(step.say)
+                    .font(.title3.weight(.medium))
+                    .fixedSize(horizontal: false, vertical: true)
+                if isCurrent, let action = step.action, let perform = step.perform {
+                    Button(action, action: perform)
+                        .buttonStyle(.borderedProminent)
+                        .disabled(model.isBusy)
+                }
+                HStack {
+                    if index > 0 {
+                        Button(S.Guide.previous) { guideStep = index - 1 }
+                    }
+                    Spacer()
+                    if index < guideSteps.count - 1 {
+                        Button(S.Guide.next) { guideStep = index + 1 }
+                            .buttonStyle(.bordered)
+                    } else {
+                        Button(S.Guide.done) { guideStep = nil }
+                            .buttonStyle(.bordered)
+                    }
+                }
             }
-            Button {
-                showGuidanceRail = false
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.caption2.bold())
-                    .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.plain)
-            .help(S.Guide.hide)
+            .padding(22)
+            .frame(width: 440)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+            .shadow(radius: 18)
+            .transition(.opacity)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
-        .background(.teal.opacity(0.08))
-        .overlay(alignment: .bottom) { Divider() }
     }
 
     private var readyMomentCard: some View {
