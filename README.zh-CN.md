@@ -18,12 +18,16 @@ macOS 上的本地多 Agent Scenario 协作套件。把任何 Git 项目变成�
 ## 快速开始
 
 1. 从 [Releases](../../releases) 下载 `AICollab.dmg`，拖入「应用程序」。
-   首次启动：右键 → **打开**（已签名，未公证）。
+   发布版已签名并完成 Apple 公证，可直接打开。
 2. 安装 [iTerm2](https://iterm2.com) —— Agent 运行在由 Host 拥有并可恢复的
    iTerm2 窗口里。
-3. 点击 **Register Project**，选择任意 Git 目录。如果这个项目从未接入过
-   AI Collab，App 会根据目录里找到的仓库自动起草声明文件，一步完成注册。
-4. 创建一个 Scenario，添加参与者（Codex 与 Claude CLI 的配置开箱即用），
+3. 点击 **Register Project**，选择任意 Git 目录。无配置文件的新项目和旧版
+   AI Collab 声明都能直接注册；注册不会写入所选 checkout。
+4. 创建一个 Scenario，点击 **Prepare Workspace**。在这次明确授权后，Host
+   会自动 clone 缺失仓库、checkout 精确版本并验证隔离 Workspace；凭据、
+   网络、浅克隆、分支和磁盘错误都会保留精确分型与修复说明；只有瞬态错误
+   才提供立即重试。
+5. 添加参与者（Codex 与 Claude CLI 的配置开箱即用），
    它们立刻就能互发消息 —— 每个参与者都会拿到一份由 Host 签发的专属
    `ai-ping` 命令。
 
@@ -32,9 +36,17 @@ macOS 上的本地多 Agent Scenario 协作套件。把任何 Git 项目变成�
 - **Host** 是唯一权威：身份、隔离工作区、消息投递、生命周期、恢复与权限
   全部经过它。App 和 CLI（`ai-collab harness …`）只是同一个 Host 的两个
   入口。
-- 项目用根目录下的四个小文件描述自己（`project_descriptor.yaml`、
-  `repo_manifest.yaml`、门禁登记表和协作模板）。App 会替你起草；想改变
-  Scenario 的装配内容，编辑后重新注册即可。
+- 简单 Git 根仓不需要项目配置。需要稳定多仓意图的团队可追踪
+  `.aicollab/project.yaml`；它只保存项目语义，不保存 AICollab runtime 或
+  adapter 版本。旧 `project_descriptor.yaml` / `repo_manifest.yaml` 仍可读取，
+  但 AICollab 不再生成或重写它们。
+- Host 会在私有状态中保存解析后的 runtime contract，并把完整快照复制进每个
+  新 Scenario。App 在启动、选择项目、
+  Workspace 准备完成后或手动刷新时，侦测缺失、未声明和漂移仓库；涉及语义
+  的变化必须由用户点击 **Apply project update**；工具自身兼容 pin 会自动刷新，
+  但升级永远不会改写已有 Scenario 的自包含契约。
+- `.aicollab/project.yaml` 的 schema 与升级行为见
+  [Project intent and zero-touch onboarding](docs/project-intent.md)。
 - 每个 Scenario 都会拿到所声明仓库的精确版本克隆和一个绑定的 Python
   环境，带漂移检测、保留 WIP 的修复和 fail-closed 销毁。
 

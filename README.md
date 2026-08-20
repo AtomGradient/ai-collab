@@ -20,25 +20,40 @@ without disturbing each other:
 ## Quick start
 
 1. Download `AICollab.dmg` from [Releases](../../releases), drag it into
-   Applications. First launch: right-click → **Open** (signed, not notarized).
+   Applications, and open it. Release builds are signed and notarized.
 2. Install [iTerm2](https://iterm2.com) — agents run in iTerm2 windows the
    Host owns and recovers.
-3. Click **Register Project** and pick any Git directory. If the project has
-   never met AI Collab, the App offers to draft its declaration files from
-   the repositories it finds and registers it in one step.
-4. Create a Scenario, add participants (Codex and Claude CLI profiles ship in
-   the box), and they can message each other immediately — each participant
-   receives its own Host-issued `ai-ping` command.
+3. Click **Register Project** and pick any Git directory. Fileless projects and
+   older AI Collab declarations both register directly; registration never
+   writes the selected checkout.
+4. Create a Scenario and click **Prepare Workspace**. With that explicit
+   action, the Host clones any missing declared repositories, checks out exact
+   revisions, and verifies the isolated Workspace. Credential, network,
+   shallow-clone, branch, and disk failures stay typed and actionable; only
+   transient failures are offered for immediate retry.
+5. Add participants (Codex and Claude CLI profiles ship in the box), and they
+   can message each other immediately — each participant receives its own
+   Host-issued `ai-ping` command.
 
 ## How it works
 
 - The **Host** is the single authority: identity, isolated workspaces, message
   delivery, lifecycle, recovery, and permissions all go through it. The App
   and the CLI (`ai-collab harness …`) are two views of the same Host.
-- A project describes itself in four small files at its root
-  (`project_descriptor.yaml`, `repo_manifest.yaml`, a gate registry, and
-  collaboration templates). The App drafts them for you; edit and re-register
-  to change what a Scenario provisions.
+- A simple Git root needs no project files. Teams that need stable multi-repo
+  intent can commit `.aicollab/project.yaml`; it contains semantic project
+  intent, not AICollab runtime or adapter pins. Historical
+  `project_descriptor.yaml` / `repo_manifest.yaml` checkouts remain readable
+  but are no longer generated or rewritten.
+- The Host stores a resolved runtime contract privately and copies the complete
+  snapshot into every new Scenario. On launch, project
+  selection, post-provision, or manual refresh, the App detects missing,
+  undeclared, and drifted repositories. Semantic changes wait for the visible
+  **Apply project update** action. Tool-owned compatibility pins refresh
+  automatically, while an App upgrade can never rewrite an existing
+  Scenario's self-contained contract.
+- See [Project intent and zero-touch onboarding](docs/project-intent.md) for
+  the tracked intent schema and upgrade behavior.
 - Each Scenario gets exact-revision clones of the declared repositories plus a
   bound Python environment, with drift detection, WIP-preserving repair, and
   fail-closed destroy.
