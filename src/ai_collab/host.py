@@ -3167,14 +3167,40 @@ class HarnessHost:
                 error.message,
                 repair_action="project.register",
             )
-        if error.code in {
-            "project.adapter-unavailable",
-            "adapter.unavailable",
-            "adapter.execution-failed",
-        }:
+        if error.code in {"project.adapter-unavailable", "adapter.unavailable"}:
             return ProtocolError(
                 "availability.adapter-unavailable",
                 "availability",
+                error.message,
+                error.retryable,
+                "project.register",
+            )
+        if error.code == "adapter.crashed":
+            return ProtocolError(
+                "operation.adapter-crashed",
+                "operation",
+                error.message,
+                error.retryable,
+                "project.register",
+            )
+        if error.code in {
+            "project.descriptor-invalid",
+            "project.manifest-invalid",
+            "project.intent-invalid",
+            "project.partial-configuration",
+            "project.intent-too-new",
+        }:
+            return ProtocolError(
+                error.code,
+                "operation",
+                error.message,
+                error.retryable,
+                "project.reconcile",
+            )
+        if error.code.startswith("adapter."):
+            return ProtocolError(
+                error.code,
+                "operation",
                 error.message,
                 error.retryable,
                 "project.register",

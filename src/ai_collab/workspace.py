@@ -14,6 +14,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 import secrets
 import stat
 import subprocess
@@ -30,6 +31,7 @@ from .protocol import canonical_json_bytes, canonical_json_sha256
 WORKSPACE_STATE_SCHEMA_VERSION = 1
 ADAPTER_PROTOCOL_VERSION = 1
 MAX_ADAPTER_REPLY_BYTES = 8 * 1024 * 1024
+ADAPTER_ERROR_CODE_RE = re.compile(r"^[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*)+$")
 ADAPTER_ENVIRONMENT_KEYS = {
     "PATH",
     "TMPDIR",
@@ -182,11 +184,16 @@ class ProjectAdapterCommand:
                 "project adapter is unavailable",
                 retryable=True,
             ) from exc
-        if completed.returncode != 0 or completed.stderr:
+        if completed.returncode != 0:
             raise WorkspaceError(
-                "adapter.execution-failed",
-                "project adapter execution failed",
+                "adapter.crashed",
+                "project adapter process exited without a typed reply",
                 retryable=True,
+            )
+        if completed.stderr:
+            raise WorkspaceError(
+                "adapter.protocol-invalid",
+                "project adapter wrote unexpected diagnostic output",
             )
         if not completed.stdout or len(completed.stdout) > MAX_ADAPTER_REPLY_BYTES:
             raise WorkspaceError("adapter.invalid-reply", "project adapter reply is invalid")
@@ -204,10 +211,39 @@ class ProjectAdapterCommand:
         if (
             value["adapter_protocol_version"] != ADAPTER_PROTOCOL_VERSION
             or value["adapter_id"] != self.adapter_id
-            or value["outcome"] != "completed"
+            or value["outcome"] not in {"completed", "failed"}
             or not isinstance(value["result"], dict)
         ):
             raise WorkspaceError("adapter.invalid-reply", "project adapter rejected the operation")
+        if value["outcome"] == "failed":
+            error = value["result"].get("error")
+            if (
+                not isinstance(error, dict)
+                or set(error)
+                != {"code", "message", "retryable", "mutation_state"}
+                or not isinstance(error["code"], str)
+                or ADAPTER_ERROR_CODE_RE.fullmatch(error["code"]) is None
+                or not isinstance(error["message"], str)
+                or not error["message"]
+                or len(error["message"]) > 512
+                or not isinstance(error["retryable"], bool)
+                or error["mutation_state"] not in {
+                    "not_started",
+                    "started",
+                    "committed",
+                    "unknown",
+                }
+            ):
+                raise WorkspaceError(
+                    "adapter.invalid-reply", "project adapter error reply differs"
+                )
+            _reject_public_absolute_paths(error)
+            raise WorkspaceError(
+                error["code"],
+                error["message"],
+                retryable=error["retryable"],
+                mutation_state=error["mutation_state"],
+            )
         _reject_public_absolute_paths(value["result"])
         return value["result"]
 

@@ -154,6 +154,19 @@ def _call(
     return completed.returncode, reply, completed.stderr
 
 
+def _assert_failed(
+    result: tuple[int, dict[str, Any] | None, bytes], expected_code: str
+) -> dict[str, Any]:
+    code, reply, stderr = result
+    assert code == 0, stderr
+    assert reply is not None
+    assert reply["outcome"] == "failed"
+    error = reply["result"]["error"]
+    assert error["code"] == expected_code
+    assert error["mutation_state"] == "not_started"
+    return error
+
+
 def test_register_returns_declared_project_identity(tmp_path: Path) -> None:
     project = _build_project(tmp_path)
     code, reply, stderr = _call(
@@ -201,8 +214,10 @@ def test_register_rejects_descriptor_naming_a_different_adapter(
         ),
         encoding="utf-8",
     )
-    code, _, _ = _call(project, "register", {"canonical_project_path": str(project)})
-    assert code == 1
+    _assert_failed(
+        _call(project, "register", {"canonical_project_path": str(project)}),
+        "adapter.rejected",
+    )
 
 
 def test_register_rejects_descriptor_manifest_project_key_mismatch(
@@ -214,19 +229,23 @@ def test_register_rejects_descriptor_manifest_project_key_mismatch(
         "project_key: sampleproject", "project_key: renamedproj", 1
     )
     manifest.write_text(text, encoding="utf-8")
-    code, _, _ = _call(project, "register", {"canonical_project_path": str(project)})
-    assert code == 1
+    _assert_failed(
+        _call(project, "register", {"canonical_project_path": str(project)}),
+        "project.manifest-invalid",
+    )
 
 
 def test_adapter_rejects_a_request_for_another_adapter_id(tmp_path: Path) -> None:
     project = _build_project(tmp_path)
-    code, _, _ = _call(
-        project,
-        "register",
-        {"canonical_project_path": str(project)},
-        adapter_id="ai-collab-edgestudio-bundle-v1",
+    _assert_failed(
+        _call(
+            project,
+            "register",
+            {"canonical_project_path": str(project)},
+            adapter_id="ai-collab-edgestudio-bundle-v1",
+        ),
+        "adapter.rejected",
     )
-    assert code == 1
 
 
 def test_collaboration_templates_come_from_the_project_root(tmp_path: Path) -> None:
@@ -361,19 +380,21 @@ def test_plan_provision_status_destroy_full_cycle(tmp_path: Path) -> None:
         for item in dirty_observation["components"]
     }
     assert dirty_flags["sampleproject"] is True
-    code, _, _ = _call(
-        project,
-        "destroy",
-        {
-            "operation_id": "destroy-e2e-blocked",
-            "bundle_path": str(staging),
-            "plan": plan,
-            "receipt": receipt,
-            "expected_wip_summary_digest": observation["wip_summary_digest"],
-            "force": False,
-        },
+    _assert_failed(
+        _call(
+            project,
+            "destroy",
+            {
+                "operation_id": "destroy-e2e-blocked",
+                "bundle_path": str(staging),
+                "plan": plan,
+                "receipt": receipt,
+                "expected_wip_summary_digest": observation["wip_summary_digest"],
+                "force": False,
+            },
+        ),
+        "adapter.rejected",
     )
-    assert code == 1
     assert staging.is_dir()
 
     code, destroy_reply, stderr = _call(
@@ -517,8 +538,10 @@ def test_bootstrap_leaves_no_residue_when_the_draft_cannot_validate(
     )
     # No origin remote: the manifest contract cannot be satisfied.
     project = bare.resolve()
-    code, _, _ = _call(project, "bootstrap", {"canonical_project_path": str(project)})
-    assert code == 1
+    _assert_failed(
+        _call(project, "bootstrap", {"canonical_project_path": str(project)}),
+        "adapter.rejected",
+    )
     assert not (project / "project_descriptor.yaml").exists()
     assert not (project / "repo_manifest.yaml").exists()
     assert not (project / "gates.yaml").exists()

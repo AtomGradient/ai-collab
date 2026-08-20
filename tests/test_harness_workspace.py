@@ -390,6 +390,59 @@ def test_adapter_command_rejects_absolute_public_path(tmp_path: Path) -> None:
     assert exc.value.code == "adapter.private-data-leak"
 
 
+def test_adapter_command_preserves_a_typed_adapter_refusal(tmp_path: Path) -> None:
+    script = tmp_path / "adapter.py"
+    script.write_text(
+        "import json,sys\n"
+        "json.load(sys.stdin)\n"
+        "json.dump({'adapter_protocol_version':1,'adapter_id':'test-adapter',"
+        "'outcome':'failed','result':{'error':{"
+        "'code':'project.intent-invalid','message':'project intent is invalid',"
+        "'retryable':False,'mutation_state':'not_started'}}},sys.stdout)\n",
+        encoding="utf-8",
+    )
+    config = tmp_path / "adapter.json"
+    config.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "adapter_id": "test-adapter",
+                "command": ["python3", "adapter.py"],
+                "working_directory": ".",
+            }
+        ),
+        encoding="utf-8",
+    )
+    adapter = ProjectAdapterCommand(config)
+    with pytest.raises(WorkspaceError) as exc:
+        adapter.call("register", {})
+    assert exc.value.code == "project.intent-invalid"
+    assert exc.value.message == "project intent is invalid"
+    assert exc.value.retryable is False
+
+
+def test_adapter_command_distinguishes_a_process_crash(tmp_path: Path) -> None:
+    script = tmp_path / "adapter.py"
+    script.write_text("raise SystemExit(9)\n", encoding="utf-8")
+    config = tmp_path / "adapter.json"
+    config.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "adapter_id": "test-adapter",
+                "command": ["python3", "adapter.py"],
+                "working_directory": ".",
+            }
+        ),
+        encoding="utf-8",
+    )
+    adapter = ProjectAdapterCommand(config)
+    with pytest.raises(WorkspaceError) as exc:
+        adapter.call("register", {})
+    assert exc.value.code == "adapter.crashed"
+    assert exc.value.retryable is True
+
+
 def test_adapter_command_receives_project_root_only_in_private_environment(
     tmp_path: Path,
 ) -> None:

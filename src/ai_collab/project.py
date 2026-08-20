@@ -213,7 +213,7 @@ class ProjectRegistry:
         except WorkspaceError as exc:
             raise ProjectError(
                 exc.code,
-                "project registration validation failed",
+                exc.message,
                 exc.retryable,
             ) from exc
         public = self._validate_observation(observed)
@@ -348,7 +348,7 @@ class ProjectRegistry:
         except WorkspaceError as exc:
             raise ProjectError(
                 exc.code,
-                "project bootstrap failed",
+                exc.message,
                 exc.retryable,
             ) from exc
         if not isinstance(observed, dict) or set(observed) != {"bootstrap"}:
@@ -441,7 +441,7 @@ class ProjectRegistry:
         except WorkspaceError as exc:
             raise ProjectError(
                 exc.code,
-                "collaboration template discovery failed",
+                exc.message,
                 exc.retryable,
             ) from exc
         templates = observed.get("templates") if isinstance(observed, dict) else None

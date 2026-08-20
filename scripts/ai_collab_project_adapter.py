@@ -62,7 +62,20 @@ SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 class AdapterError(ValueError):
-    pass
+    """A safe, typed project-adapter refusal returned to the Host."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "adapter.rejected",
+        retryable: bool = False,
+        mutation_state: str = "not_started",
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.retryable = retryable
+        self.mutation_state = mutation_state
 
 
 def _canonical_bytes(value: Any) -> bytes:
@@ -1691,12 +1704,46 @@ def _handle(request: Any) -> dict[str, Any]:
     }
 
 
+def _failed_response(error: AdapterError) -> dict[str, Any]:
+    return {
+        "adapter_protocol_version": 1,
+        "adapter_id": ADAPTER_ID,
+        "outcome": "failed",
+        "result": {
+            "error": {
+                "code": error.code,
+                "message": str(error),
+                "retryable": error.retryable,
+                "mutation_state": error.mutation_state,
+            }
+        },
+    }
+
+
 def main() -> int:
     try:
         request = json.loads(sys.stdin.buffer.read())
         response = _handle(request)
-    except (AdapterError, OSError, subprocess.SubprocessError, ValueError):
-        return 1
+    except descriptor_validator.DescriptorError as exc:
+        error = AdapterError(str(exc), code="project.descriptor-invalid")
+        response = _failed_response(error)
+    except manifest_validator.ManifestError as exc:
+        error = AdapterError(str(exc), code="project.manifest-invalid")
+        response = _failed_response(error)
+    except AdapterError as exc:
+        response = _failed_response(exc)
+    except (OSError, subprocess.SubprocessError) as exc:
+        response = _failed_response(
+            AdapterError(
+                "project adapter could not access a required local resource",
+                code="adapter.io-failed",
+                retryable=True,
+            )
+        )
+    except (json.JSONDecodeError, ValueError):
+        response = _failed_response(
+            AdapterError("project adapter request is invalid", code="adapter.request-invalid")
+        )
     sys.stdout.buffer.write(_canonical_bytes(response) + b"\n")
     return 0
 
