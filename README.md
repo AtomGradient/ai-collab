@@ -2,20 +2,23 @@ English | [简体中文](README.zh-CN.md)
 
 # AI Collab
 
-Local multi-agent Scenario harness for macOS. Turn any Git project into
-durable task rooms where multiple AI agents work in isolated workspaces and
-talk to each other through a typed, audited Host.
+Local multi-agent task room harness for macOS. Turn any Git project into
+durable task rooms where AI colleagues work in isolated workspaces and talk
+to each other through a typed, audited Host. The interface speaks English
+and Simplified Chinese (Settings → General → Language) and uses the task
+room vocabulary throughout: a Scenario appears as a **Task Room**, a
+Participant as an **AI Colleague**.
 
 Read the story behind it on our blog:
 [AI Collab — open-source multi-AI collaboration](https://www.atomgradient.com/en/blog/ai-collab-open-source-multi-ai-collaboration)
 ([中文](https://www.atomgradient.com/zh/blog/ai-collab-open-source-multi-ai-collaboration))
 
-![The AI Collab App: a running Scenario with two participants, its collaboration policy, and the delivery journal](ai-collab.png)
+![The AI Collab App: a running task room with two AI colleagues, its collaboration policy, and the delivery journal](ai-collab.png)
 
-Four agents across two Scenarios messaging each other through the Host,
-without disturbing each other:
+Four AI colleagues across two task rooms messaging each other through the
+Host, without disturbing each other:
 
-![Four participant TUIs across two Scenarios exchanging typed deliveries next to the App](ai-collab-with-tuis.png)
+![Four colleague TUIs across two task rooms exchanging typed deliveries next to the App](ai-collab-with-tuis.png)
 
 ## Quick start
 
@@ -26,14 +29,19 @@ without disturbing each other:
 3. Click **Register Project** and pick any Git directory. Fileless projects and
    older AI Collab declarations both register directly; registration never
    writes the selected checkout.
-4. Create a Scenario and click **Prepare Workspace**. With that explicit
+4. Create a task room and click **Prepare Workspace**. With that explicit
    action, the Host clones any missing declared repositories, checks out exact
-   revisions, and verifies the isolated Workspace. Credential, network,
-   shallow-clone, branch, and disk failures stay typed and actionable; only
-   transient failures are offered for immediate retry.
-5. Add participants (Codex and Claude CLI profiles ship in the box), and they
-   can message each other immediately — each participant receives its own
-   Host-issued `ai-ping` command.
+   revisions, and verifies the isolated Workspace — one live progress row per
+   repository. Credential, network, shallow-clone, branch, and disk failures
+   stay typed and actionable; only transient failures are offered for
+   immediate retry.
+5. Add AI colleagues (Codex and Claude CLI profiles ship in the box). Added
+   the wrong one? Stop it, then delete it from its ⋯ menu.
+6. Pick a team template under Collaboration Policy, **Preview Plan** →
+   **Apply Plan**, then click **Start All**. Once your colleagues are
+   working, focus a window and assign the task — from here they can message
+   each other, each through its own Host-issued `ai-ping` command. A guidance
+   rail points to the next step throughout.
 
 ## How it works
 

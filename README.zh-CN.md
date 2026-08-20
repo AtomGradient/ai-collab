@@ -2,18 +2,19 @@
 
 # AI Collab
 
-macOS 上的本地多 Agent Scenario 协作套件。把任何 Git 项目变成可长期保存的
-任务房间：多个 AI Agent 在各自隔离的工作区里干活，并通过一个类型化、可审计
-的 Host 相互通信。
+macOS 上的本地多 AI 任务房间协作套件。把任何 Git 项目变成可长期保存的
+任务房间：多位 AI 同事在各自隔离的工作区里干活，并通过一个类型化、可审计
+的 Host（后台服务）相互通信。界面支持中英文（设置 → 通用 → 语言），并全面
+使用任务房间词汇：Scenario 在界面里叫**任务房间**，Participant 叫 **AI 同事**。
 
 博客文章：[AI Collab — 开源多 AI 协作](https://www.atomgradient.com/zh/blog/ai-collab-open-source-multi-ai-collaboration)
 （[English](https://www.atomgradient.com/en/blog/ai-collab-open-source-multi-ai-collaboration)）
 
-![AI Collab App：一个运行中的 Scenario、两个参与者、协作策略与投递日志](ai-collab.png)
+![AI Collab App：一个运行中的任务房间、两位 AI 同事、协作规则与投递日志](ai-collab.png)
 
-四个 Agent 分属两个 Scenario，通过 Host 互发消息、互不干扰：
+四位 AI 同事分属两个任务房间，互发消息、互不干扰：
 
-![两个 Scenario 的四个参与者 TUI 与 App 并排，交换类型化投递](ai-collab-with-tuis.png)
+![两个任务房间的四位 AI 同事 TUI 与 App 并排，交换类型化投递](ai-collab-with-tuis.png)
 
 ## 快速开始
 
@@ -21,15 +22,17 @@ macOS 上的本地多 Agent Scenario 协作套件。把任何 Git 项目变成�
    发布版已签名并完成 Apple 公证，可直接打开。
 2. 安装 [iTerm2](https://iterm2.com) —— Agent 运行在由 Host 拥有并可恢复的
    iTerm2 窗口里。
-3. 点击 **Register Project**，选择任意 Git 目录。无配置文件的新项目和旧版
+3. 点击 **注册项目**，选择任意 Git 目录。无配置文件的新项目和旧版
    AI Collab 声明都能直接注册；注册不会写入所选 checkout。
-4. 创建一个 Scenario，点击 **Prepare Workspace**。在这次明确授权后，Host
-   会自动 clone 缺失仓库、checkout 精确版本并验证隔离 Workspace；凭据、
-   网络、浅克隆、分支和磁盘错误都会保留精确分型与修复说明；只有瞬态错误
-   才提供立即重试。
-5. 添加参与者（Codex 与 Claude CLI 的配置开箱即用），
-   它们立刻就能互发消息 —— 每个参与者都会拿到一份由 Host 签发的专属
-   `ai-ping` 命令。
+4. 创建一个任务房间，点击 **准备工作区**。在这次明确授权后，Host
+   会自动 clone 缺失仓库、checkout 精确版本并验证隔离工作区，界面按仓库逐行
+   显示进度；凭据、网络、浅克隆、分支和磁盘错误都会保留精确分型与修复说明；
+   只有瞬态错误才提供立即重试。
+5. 添加 AI 同事（Codex 与 Claude CLI 的配置开箱即用）。加错了？先停止，
+   再从它的 ⋯ 菜单删除。
+6. 在协作规则区选团队模板，**预览方案** → **应用方案**，然后点 **全部启动**。
+   同事进入工作后，聚焦任一窗口直接布置任务——此后它们即可互发消息，每位
+   同事都持有 Host 签发的专属 `ai-ping` 命令。顶部引导条会全程指出下一步。
 
 ## 工作原理
 
