@@ -65,6 +65,7 @@ struct AICollabApp: App {
 /// settings surface.
 struct SettingsView: View {
     @EnvironmentObject private var language: L10n
+    @AppStorage("AICollabShowGuidanceRail") private var showGuidanceRail = true
 
     var body: some View {
         TabView {
@@ -87,6 +88,8 @@ struct SettingsView: View {
             Text(S.Settings.languageFootnote)
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            Divider()
+            Toggle(S.Settings.showGuidanceRail, isOn: $showGuidanceRail)
         }
         .padding(24)
     }

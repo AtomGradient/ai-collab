@@ -66,18 +66,26 @@ private enum HighRiskIntent: Identifiable {
 
 struct ContentView: View {
     @EnvironmentObject private var model: HarnessViewModel
+    @AppStorage("AICollabShowGuidanceRail") private var showGuidanceRail = true
     @State private var highRiskIntent: HighRiskIntent?
     @State private var pendingDeletion: ParticipantRecord?
 
     var body: some View {
-        NavigationSplitView {
-            projectsSidebar
-        } content: {
-            scenariosList
-        } detail: {
-            scenarioDetail
+        VStack(spacing: 0) {
+            // Real layout space: the rail sits above the columns and can
+            // never overlap or cover interactive content — and it is the
+            // employee's choice: hide it here, bring it back in Settings.
+            if showGuidanceRail {
+                guidanceRail
+            }
+            NavigationSplitView {
+                projectsSidebar
+            } content: {
+                scenariosList
+            } detail: {
+                scenarioDetail
+            }
         }
-        .safeAreaInset(edge: .top, spacing: 0) { guidanceRail }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button(S.Chrome.registerProject, systemImage: "plus") {
@@ -205,6 +213,15 @@ struct ContentView: View {
                     .controlSize(.small)
                     .disabled(model.isBusy)
             }
+            Button {
+                showGuidanceRail = false
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.caption2.bold())
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help(S.Guide.hide)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 8)

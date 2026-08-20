@@ -1060,6 +1060,7 @@ enum S {
     enum Guide {
         static func step(_ index: Int) -> String { t("Step \(index)", "第 \(index) 步") }
         static var readyTag: String { t("Ready", "就绪") }
+        static var hide: String { t("Hide the guidance rail", "隐藏引导条") }
 
         static var registerSay: String {
             t(
@@ -1303,6 +1304,7 @@ enum S {
         static var languageSystem: String { t("Follow System", "跟随系统") }
         static var languageChinese: String { t("简体中文", "简体中文") }
         static var languageEnglish: String { t("English", "English") }
+        static var showGuidanceRail: String { t("Show guidance rail", "显示引导条") }
         static var languageFootnote: String {
             t(
                 "Applies immediately to the whole app.",
