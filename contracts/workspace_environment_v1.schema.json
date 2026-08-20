@@ -7,7 +7,8 @@
     {"$ref": "#/$defs/workspace_environment_plan"},
     {"$ref": "#/$defs/operation_journal"},
     {"$ref": "#/$defs/workspace_environment_receipt"},
-    {"$ref": "#/$defs/workspace_environment_observation"}
+    {"$ref": "#/$defs/workspace_environment_observation"},
+    {"$ref": "#/$defs/workspace_progress_event"}
   ],
   "$defs": {
     "opaque_id": {
@@ -126,6 +127,17 @@
         "supports_resume": {"type": "boolean"},
         "supports_repair": {"type": "boolean"},
         "supports_destroy": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "workspace_progress_event": {
+      "type": "object",
+      "required": ["component_id", "index", "total", "state"],
+      "properties": {
+        "component_id": {"$ref": "#/$defs/opaque_id"},
+        "index": {"$ref": "#/$defs/nonnegative_integer"},
+        "total": {"$ref": "#/$defs/generation"},
+        "state": {"enum": ["waiting", "cloning", "building", "ready", "failed"]}
       },
       "additionalProperties": false
     },
@@ -565,6 +577,16 @@
       "all_components_and_environment_verify_before_atomic_publish": true,
       "source_wip_before_and_after_must_match": true,
       "automatic_commit_push_rebase_or_merge_is_forbidden": true
+    },
+    "progress_protocol": {
+      "side_channel_version_v1_is_explicitly_declared": true,
+      "undeclared_adapters_are_never_probed": true,
+      "final_stdout_json_contract_is_unchanged": true,
+      "events_are_bounded_observations_not_durable_authority": true,
+      "component_membership_order_and_state_are_plan_bound": true,
+      "physical_paths_remotes_and_credentials_are_forbidden": true,
+      "repository_failure_is_fail_fast_and_prevents_partial_publish": true,
+      "disconnect_converges_through_workspace_status_refresh": true
     },
     "status_protocol": {
       "every_observation_joins_a_completed_status_or_destroy_journal": true,

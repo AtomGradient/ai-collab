@@ -265,6 +265,9 @@ def add_harness_parser(subparsers: Any) -> None:
     _add_workspace_identity_options(prepare)
     prepare.add_argument("--component", action="append", default=[])
     prepare.add_argument("--project-payload-json", default="{}")
+    prepare.add_argument(
+        "--progress", action="store_true", help="Emit progress events to stderr"
+    )
     _add_connection_options(prepare)
 
     provision = workspace_commands.add_parser(
@@ -273,6 +276,9 @@ def add_harness_parser(subparsers: Any) -> None:
     _add_workspace_identity_options(provision)
     provision.add_argument("--plan-digest", required=True)
     provision.add_argument("--request-id")
+    provision.add_argument(
+        "--progress", action="store_true", help="Emit progress events to stderr"
+    )
     _add_connection_options(provision)
 
     workspace_status = workspace_commands.add_parser(
@@ -684,6 +690,15 @@ def run_harness_command(args: argparse.Namespace) -> int:
                     scenario_generation=args.scenario_generation,
                     scenario_state_revision=args.state_revision,
                     plan_digest=plan_digest,
+                    progress_callback=(
+                        lambda event: print(
+                            json.dumps(event, ensure_ascii=False, sort_keys=True),
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                        if args.progress
+                        else None
+                    ),
                 )
                 result = {
                     "plan": workspace,
@@ -713,6 +728,15 @@ def run_harness_command(args: argparse.Namespace) -> int:
                 scenario_state_revision=args.state_revision,
                 plan_digest=args.plan_digest,
                 request_id=args.request_id,
+                progress_callback=(
+                    lambda event: print(
+                        json.dumps(event, ensure_ascii=False, sort_keys=True),
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    if args.progress
+                    else None
+                ),
             )
         elif args.harness_command == "workspace" and args.workspace_command == "status":
             result = client.workspace_status(

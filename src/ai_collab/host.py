@@ -3306,11 +3306,88 @@ class HarnessHost:
                         "operation",
                         "workspace provisioning requires a closed Scenario",
                     )
+                workspace_progress_sequence = 0
+                ready_component_ids: set[str] = set()
+                workspace_progress_seen = False
+                workspace_progress_total = 0
+
+                def emit_workspace_progress(
+                    workspace_operation_id: str,
+                    event: dict[str, Any],
+                ) -> None:
+                    nonlocal workspace_progress_sequence
+                    nonlocal workspace_progress_seen
+                    nonlocal workspace_progress_total
+                    workspace_progress_seen = True
+                    workspace_progress_total = event["total"]
+                    if event["state"] == "ready":
+                        ready_component_ids.add(event["component_id"])
+                    if progress_callback is not None:
+                        try:
+                            progress_callback(
+                                progress_event(
+                                    workspace_operation_id,
+                                    workspace_progress_sequence,
+                                    {
+                                        "waiting": "waiting",
+                                        "cloning": "running",
+                                        "building": "running",
+                                        "ready": "running",
+                                        "failed": "failed",
+                                    }[event["state"]],
+                                    self.host_generation,
+                                    {
+                                        "progress_kind": "workspace-component-v1",
+                                        "phase": (
+                                            "workspace.environment"
+                                            if event["component_kind"] == "environment"
+                                            else "workspace.repositories"
+                                        ),
+                                        "completed_units": len(ready_component_ids),
+                                        "total_units": event["total"],
+                                        "participant_id": None,
+                                        "cancellable": False,
+                                        "component_id": event["component_id"],
+                                        "component_kind": event["component_kind"],
+                                        "component_index": event["index"],
+                                        "component_state": event["state"],
+                                    },
+                                )
+                            )
+                        except OSError:
+                            pass
+                    workspace_progress_sequence += 1
+
                 operation_id, result = self.workspace.provision(
                     **common,
                     plan_digest=payload["plan_digest"],
                     workspace_path=workspace_path,
+                    progress_callback=emit_workspace_progress,
                 )
+                if workspace_progress_seen and progress_callback is not None:
+                    try:
+                        progress_callback(
+                            progress_event(
+                                operation_id,
+                                workspace_progress_sequence,
+                                "completed",
+                                self.host_generation,
+                                {
+                                    "progress_kind": "workspace-component-v1",
+                                    "phase": "workspace.prepare",
+                                    "completed_units": workspace_progress_total,
+                                    "total_units": workspace_progress_total,
+                                    "participant_id": None,
+                                    "cancellable": False,
+                                    "component_id": None,
+                                    "component_kind": None,
+                                    "component_index": None,
+                                    "component_state": "complete",
+                                },
+                            )
+                        )
+                    except OSError:
+                        pass
             else:
                 operation_id, result = self.workspace.status(
                     **common,

@@ -189,6 +189,41 @@ def _call(
     return completed.returncode, reply, completed.stderr
 
 
+def _call_with_progress(
+    project_root: Path,
+    operation: str,
+    payload: dict[str, Any],
+) -> tuple[int, dict[str, Any] | None, bytes, list[dict[str, Any]]]:
+    request = {
+        "adapter_protocol_version": 1,
+        "adapter_id": ADAPTER_ID,
+        "operation": operation,
+        "payload": payload,
+    }
+    read_descriptor, write_descriptor = os.pipe()
+    try:
+        completed = subprocess.run(
+            [sys.executable, str(ADAPTER)],
+            input=json.dumps(request).encode("utf-8"),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env={
+                **os.environ,
+                "AI_COLLAB_PROJECT_ROOT": str(project_root),
+                "AI_COLLAB_PROGRESS_FD": str(write_descriptor),
+            },
+            pass_fds=(write_descriptor,),
+        )
+    finally:
+        os.close(write_descriptor)
+    with os.fdopen(read_descriptor, "rb") as stream:
+        progress = [json.loads(line) for line in stream]
+    reply = None
+    if completed.returncode == 0:
+        reply = json.loads(completed.stdout)
+    return completed.returncode, reply, completed.stderr, progress
+
+
 def _remote_only_helper(project: Path, tmp_path: Path) -> tuple[str, dict[str, str]]:
     helper = project.parent / "helper-lib"
     bare = tmp_path / "helper-remote.git"
@@ -460,6 +495,59 @@ def _assert_not_started_adapter_error(adapter: ModuleType, call: Any) -> Any:
     assert raised.value.mutation_state == "not_started"
     assert raised.value.retryable is False
     return raised.value
+
+
+def test_repository_progress_is_fail_fast_before_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _load_adapter_module()
+    observed: list[tuple[str, int, int, str]] = []
+    attempted: list[str] = []
+
+    monkeypatch.setattr(
+        adapter,
+        "_emit_progress",
+        lambda component_id, index, total, state: observed.append(
+            (component_id, index, total, state)
+        ),
+    )
+
+    def materialize_one(
+        _staging: Path,
+        plan: Mapping[str, Any],
+        _rows: Mapping[str, Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        component_id = plan["components"][0]["component_id"]
+        attempted.append(component_id)
+        if component_id == "repo-b":
+            raise adapter.AdapterError("injected repository failure")
+        return [{"component_id": component_id}]
+
+    monkeypatch.setattr(
+        adapter, "_materialize_components_unobserved", materialize_one
+    )
+    plan = {
+        "components": [
+            {"component_id": "repo-a"},
+            {"component_id": "repo-b"},
+            {"component_id": "repo-c"},
+        ]
+    }
+    with pytest.raises(adapter.AdapterError):
+        adapter._materialize_components(  # noqa: SLF001
+            tmp_path,
+            plan,
+            {},
+            progress_total=4,
+        )
+    assert attempted == ["repo-a", "repo-b"]
+    assert observed == [
+        ("repo-a", 0, 4, "cloning"),
+        ("repo-a", 0, 4, "ready"),
+        ("repo-b", 1, 4, "cloning"),
+        ("repo-b", 1, 4, "failed"),
+    ]
 
 
 def test_descriptor_declares_manual_recover_operation() -> None:
@@ -1775,7 +1863,7 @@ def test_plan_provision_status_destroy_full_cycle(tmp_path: Path) -> None:
     scenario_root = tmp_path / "scenario"
     scenario_root.mkdir(mode=0o700)
     staging = scenario_root / "bundle"
-    code, provision_reply, stderr = _call(
+    code, provision_reply, stderr, progress = _call_with_progress(
         project,
         "provision",
         {
@@ -1787,6 +1875,30 @@ def test_plan_provision_status_destroy_full_cycle(tmp_path: Path) -> None:
     )
     assert code == 0, stderr
     assert provision_reply is not None
+    expected_progress_items = [
+        item["component_id"] for item in plan["components"]
+    ] + [plan["environment"]["environment_id"]]
+    assert [event for event in progress if event["state"] == "waiting"] == [
+        {
+            "component_id": component_id,
+            "index": index,
+            "total": len(expected_progress_items),
+            "state": "waiting",
+        }
+        for index, component_id in enumerate(expected_progress_items)
+    ]
+    assert [(event["component_id"], event["state"]) for event in progress] == [
+        *[(component_id, "waiting") for component_id in expected_progress_items],
+        *[
+            pair
+            for component_id in expected_progress_items[:-1]
+            for pair in ((component_id, "cloning"), (component_id, "ready"))
+        ],
+        (expected_progress_items[-1], "building"),
+        (expected_progress_items[-1], "ready"),
+    ]
+    assert all(set(event) == {"component_id", "index", "total", "state"} for event in progress)
+    assert "/" not in json.dumps(progress)
     receipt = provision_reply["result"]["receipt"]
     journal = provision_reply["result"]["journal"]
     snapshot = provision_reply["result"]["review_snapshot"]

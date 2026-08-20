@@ -18,6 +18,7 @@ from typing import Any, Iterator, Mapping
 
 import pytest
 
+from ai_collab import cli as cli_main
 from ai_collab.protocol import canonical_json_sha256
 from ai_collab.client import HarnessClient, HarnessClientError
 from ai_collab.host import HarnessHost
@@ -366,6 +367,109 @@ class FakeAdapter:
                 "recovery": recovery,
             }
         raise AssertionError(operation)
+
+
+class ProgressFakeAdapter(FakeAdapter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.progress_side_channel = "v1"
+
+    def call(
+        self,
+        operation: str,
+        payload: Mapping[str, Any],
+        *,
+        progress_callback: Any = None,
+    ) -> dict[str, Any]:
+        if operation == "plan":
+            result = super().call(operation, payload)
+            result["plan"]["components"] = [
+                {"component_id": "project"},
+                {"component_id": "helper-lib"},
+            ]
+            result["plan"]["environment"] = {
+                "environment_id": "environment:test"
+            }
+            return result
+        if operation == "provision" and progress_callback is not None:
+            events = [
+                ("project", 0, "waiting"),
+                ("helper-lib", 1, "waiting"),
+                ("environment:test", 2, "waiting"),
+                ("project", 0, "cloning"),
+                ("project", 0, "ready"),
+                ("helper-lib", 1, "cloning"),
+                ("helper-lib", 1, "ready"),
+                ("environment:test", 2, "building"),
+                ("environment:test", 2, "ready"),
+            ]
+            for component_id, index, state in events:
+                progress_callback(
+                    {
+                        "component_id": component_id,
+                        "index": index,
+                        "total": 3,
+                        "state": state,
+                    }
+                )
+        return super().call(operation, payload)
+
+
+class FailFastProgressAdapter(ProgressFakeAdapter):
+    def call(
+        self,
+        operation: str,
+        payload: Mapping[str, Any],
+        *,
+        progress_callback: Any = None,
+    ) -> dict[str, Any]:
+        if operation == "plan":
+            result = super().call(operation, payload)
+            result["plan"]["components"] = [
+                {"component_id": "repo-a"},
+                {"component_id": "repo-b"},
+                {"component_id": "repo-c"},
+            ]
+            result["plan"]["environment"] = {
+                "environment_id": "environment:fail-fast"
+            }
+            return result
+        if operation == "provision":
+            assert progress_callback is not None
+            items = ["repo-a", "repo-b", "repo-c", "environment:fail-fast"]
+            for index, component_id in enumerate(items):
+                progress_callback(
+                    {
+                        "component_id": component_id,
+                        "index": index,
+                        "total": 4,
+                        "state": "waiting",
+                    }
+                )
+            for component_id, index, state in (
+                ("repo-a", 0, "cloning"),
+                ("repo-a", 0, "ready"),
+                ("repo-b", 1, "cloning"),
+                ("repo-b", 1, "failed"),
+            ):
+                progress_callback(
+                    {
+                        "component_id": component_id,
+                        "index": index,
+                        "total": 4,
+                        "state": state,
+                    }
+                )
+            staging = Path(payload["staging_path"])
+            staging.mkdir(mode=0o700)
+            (staging / "partial-clone").write_text("scratch\n", encoding="utf-8")
+            raise WorkspaceError(
+                "workspace.git-auth-required",
+                "repository authentication is required",
+                retryable=False,
+                mutation_state="started",
+            )
+        return FakeAdapter.call(self, operation, payload)
 
 
 class FailProvisionOnceAdapter(FakeAdapter):
@@ -2022,6 +2126,174 @@ def _provision_host_workspace(client: HarnessClient) -> tuple[dict[str, Any], Pa
     return created, Path()
 
 
+def test_workspace_provision_streams_validated_component_progress(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    with running_high_risk_host(
+        state_root, adapter=ProgressFakeAdapter()
+    ) as (_host, client):
+        created = client.create_scenario(
+            project_instance_id="project",
+            scenario_id="progress-room",
+            project_binding_digest=HOST_PROJECT_DIGEST,
+            request_id="progress-create",
+        )["scenario"]
+        planned = client.plan_workspace(
+            project_instance_id="project",
+            scenario_id="progress-room",
+            scenario_generation=created["scenario_generation"],
+            scenario_state_revision=created["state_revision"],
+            requested_component_ids=[],
+            project_payload={},
+            request_id="progress-plan",
+        )["workspace"]
+        observed: list[dict[str, Any]] = []
+        ready = client.provision_workspace(
+            project_instance_id="project",
+            scenario_id="progress-room",
+            scenario_generation=created["scenario_generation"],
+            scenario_state_revision=created["state_revision"],
+            plan_digest=planned["plan_digest"],
+            request_id="progress-provision",
+            progress_callback=observed.append,
+        )
+        assert ready["workspace"]["state"] == "ready"
+
+    assert [event["sequence"] for event in observed] == list(range(10))
+    assert [event["progress"]["component_state"] for event in observed] == [
+        "waiting",
+        "waiting",
+        "waiting",
+        "cloning",
+        "ready",
+        "cloning",
+        "ready",
+        "building",
+        "ready",
+        "complete",
+    ]
+    assert [
+        event["progress"]["component_kind"] for event in observed[:3]
+    ] == ["repository", "repository", "environment"]
+    assert observed[-1]["state"] == "completed"
+    assert observed[-1]["progress"]["completed_units"] == 3
+    assert all(
+        event["progress"]["progress_kind"] == "workspace-component-v1"
+        for event in observed
+    )
+    serialized = json.dumps(observed)
+    assert str(tmp_path) not in serialized
+    assert "remote" not in serialized
+
+
+def test_workspace_prepare_cli_emits_component_progress_to_stderr(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    state_root = tmp_path / "state"
+    with running_high_risk_host(
+        state_root, adapter=ProgressFakeAdapter()
+    ) as (host, client):
+        created = client.create_scenario(
+            project_instance_id="project",
+            scenario_id="cli-progress-room",
+            project_binding_digest=HOST_PROJECT_DIGEST,
+            request_id="cli-progress-create",
+        )["scenario"]
+        assert (
+            cli_main.main(
+                [
+                    "harness",
+                    "workspace",
+                    "prepare",
+                    "cli-progress-room",
+                    "--project-instance-id",
+                    "project",
+                    "--scenario-generation",
+                    str(created["scenario_generation"]),
+                    "--state-revision",
+                    str(created["state_revision"]),
+                    "--progress",
+                    "--state-root",
+                    str(state_root),
+                    "--socket-path",
+                    str(host.socket_path),
+                    "--json",
+                ]
+            )
+            == 0
+        )
+    captured = capsys.readouterr()
+    result = json.loads(captured.out)
+    progress = [json.loads(line) for line in captured.err.splitlines()]
+    assert result["workspace"]["state"] == "ready"
+    assert len(progress) == 10
+    assert progress[0]["progress"]["component_state"] == "waiting"
+    assert progress[-1]["state"] == "completed"
+
+
+def test_repository_failure_stops_provision_and_preserves_waiting_rows(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    with running_high_risk_host(
+        state_root, adapter=FailFastProgressAdapter()
+    ) as (_host, client):
+        created = client.create_scenario(
+            project_instance_id="project",
+            scenario_id="fail-fast-room",
+            project_binding_digest=HOST_PROJECT_DIGEST,
+            request_id="fail-fast-create",
+        )["scenario"]
+        planned = client.plan_workspace(
+            project_instance_id="project",
+            scenario_id="fail-fast-room",
+            scenario_generation=created["scenario_generation"],
+            scenario_state_revision=created["state_revision"],
+            requested_component_ids=[],
+            project_payload={},
+            request_id="fail-fast-plan",
+        )["workspace"]
+        observed: list[dict[str, Any]] = []
+        with pytest.raises(HarnessClientError) as raised:
+            client.provision_workspace(
+                project_instance_id="project",
+                scenario_id="fail-fast-room",
+                scenario_generation=created["scenario_generation"],
+                scenario_state_revision=created["state_revision"],
+                plan_digest=planned["plan_digest"],
+                request_id="fail-fast-provision",
+                progress_callback=observed.append,
+            )
+        assert raised.value.code == "workspace.git-auth-required"
+        workspace_path = (
+            state_root / "workspaces" / created["workspace_binding_id"]
+        )
+        assert list(workspace_path.iterdir()) == []
+
+    assert [event["progress"]["component_state"] for event in observed] == [
+        "waiting",
+        "waiting",
+        "waiting",
+        "waiting",
+        "cloning",
+        "ready",
+        "cloning",
+        "failed",
+    ]
+    assert not any(
+        event["progress"]["component_id"] == "repo-c"
+        and event["progress"]["component_state"] != "waiting"
+        for event in observed
+    )
+    assert not any(
+        event["progress"]["component_kind"] == "environment"
+        and event["progress"]["component_state"] == "building"
+        for event in observed
+    )
+
+
 def test_host_repair_is_conservative_and_destroy_unregisters_with_audit(
     tmp_path: Path,
 ) -> None:
@@ -3340,3 +3612,132 @@ def test_workspace_husk_removal_is_fail_closed(tmp_path: Path) -> None:
     assert store._remove_workspace_husk("workspace-husk-absent") is False
     assert store._remove_workspace_husk(None) is False
     assert store._remove_workspace_husk("../escape") is False
+
+
+def test_declared_adapter_progress_fd_is_bounded_and_ordered(tmp_path: Path) -> None:
+    script = tmp_path / "adapter.py"
+    script.write_text(
+        "import json,os,sys\n"
+        "request=json.load(sys.stdin)\n"
+        "fd=int(os.environ['AI_COLLAB_PROGRESS_FD'])\n"
+        "events=["
+        "{'component_id':'repo-a','index':0,'total':2,'state':'waiting'},"
+        "{'component_id':'environment:1','index':1,'total':2,'state':'waiting'},"
+        "{'component_id':'repo-a','index':0,'total':2,'state':'cloning'},"
+        "{'component_id':'repo-a','index':0,'total':2,'state':'ready'},"
+        "{'component_id':'environment:1','index':1,'total':2,'state':'building'},"
+        "{'component_id':'environment:1','index':1,'total':2,'state':'ready'}]\n"
+        "for event in events: os.write(fd,(json.dumps(event,sort_keys=True,separators=(',',':'))+'\\n').encode())\n"
+        "json.dump({'adapter_protocol_version':1,'adapter_id':'test-adapter',"
+        "'outcome':'completed','result':{}},sys.stdout)\n",
+        encoding="utf-8",
+    )
+    config = tmp_path / "adapter.json"
+    config.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "adapter_id": "test-adapter",
+                "command": ["python3", "adapter.py"],
+                "progress_side_channel": "v1",
+                "working_directory": ".",
+            }
+        ),
+        encoding="utf-8",
+    )
+    adapter = ProjectAdapterCommand(config)
+    observed: list[dict[str, Any]] = []
+    result = adapter.call(
+        "provision",
+        {
+            "plan": {
+                "components": [{"component_id": "repo-a"}],
+                "environment": {"environment_id": "environment:1"},
+            }
+        },
+        progress_callback=observed.append,
+    )
+    assert result == {}
+    assert [(event["component_id"], event["state"]) for event in observed] == [
+        ("repo-a", "waiting"),
+        ("environment:1", "waiting"),
+        ("repo-a", "cloning"),
+        ("repo-a", "ready"),
+        ("environment:1", "building"),
+        ("environment:1", "ready"),
+    ]
+
+
+def test_adapter_progress_fd_requires_an_explicit_v1_capability(tmp_path: Path) -> None:
+    script = tmp_path / "adapter.py"
+    script.write_text(
+        "import json,os,sys\n"
+        "json.load(sys.stdin)\n"
+        "json.dump({'adapter_protocol_version':1,'adapter_id':'test-adapter',"
+        "'outcome':'completed','result':{'progress_fd_present':"
+        "'AI_COLLAB_PROGRESS_FD' in os.environ}},sys.stdout)\n",
+        encoding="utf-8",
+    )
+    config = tmp_path / "adapter.json"
+    base = {
+        "schema_version": 1,
+        "adapter_id": "test-adapter",
+        "command": ["python3", "adapter.py"],
+        "working_directory": ".",
+    }
+    config.write_text(json.dumps(base), encoding="utf-8")
+    adapter = ProjectAdapterCommand(config)
+    observed: list[dict[str, Any]] = []
+    assert adapter.call("provision", {}, progress_callback=observed.append) == {
+        "progress_fd_present": False
+    }
+    assert observed == []
+
+    config.write_text(
+        json.dumps({**base, "progress_side_channel": "v2"}), encoding="utf-8"
+    )
+    with pytest.raises(WorkspaceError) as raised:
+        ProjectAdapterCommand(config)
+    assert raised.value.code == "adapter.config-invalid"
+
+
+def test_completed_adapter_reply_rejects_invalid_progress(tmp_path: Path) -> None:
+    script = tmp_path / "adapter.py"
+    script.write_text(
+        "import json,os,sys\n"
+        "json.load(sys.stdin)\n"
+        "event={'component_id':'repo-a','index':0,'total':2,'state':'ready','path':'/private/leak'}\n"
+        "os.write(int(os.environ['AI_COLLAB_PROGRESS_FD']),(json.dumps(event)+'\\n').encode())\n"
+        "json.dump({'adapter_protocol_version':1,'adapter_id':'test-adapter',"
+        "'outcome':'completed','result':{}},sys.stdout)\n",
+        encoding="utf-8",
+    )
+    config = tmp_path / "adapter.json"
+    config.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "adapter_id": "test-adapter",
+                "command": ["python3", "adapter.py"],
+                "progress_side_channel": "v1",
+                "working_directory": ".",
+            }
+        ),
+        encoding="utf-8",
+    )
+    adapter = ProjectAdapterCommand(config)
+    observed: list[dict[str, Any]] = []
+    with pytest.raises(WorkspaceError) as raised:
+        adapter.call(
+            "provision",
+            {
+                "plan": {
+                    "components": [{"component_id": "repo-a"}],
+                    "environment": {"environment_id": "environment:1"},
+                }
+            },
+            progress_callback=observed.append,
+        )
+    assert raised.value.code == "adapter.progress-invalid"
+    assert raised.value.mutation_state == "started"
+    assert observed == []

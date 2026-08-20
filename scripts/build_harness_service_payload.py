@@ -317,6 +317,7 @@ def build(destination: Path, integration_root: Path | None) -> None:
                 project_adapter_config["script"],
             ],
             "idempotent_join_operations": ["destroy", "recover", "repair"],
+            "progress_side_channel": "v1",
             "working_directory": ".",
         },
         "ai_collab_security_adapter.json": {

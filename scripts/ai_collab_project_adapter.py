@@ -97,6 +97,54 @@ def _canonical_bytes(value: Any) -> bytes:
     ).encode("utf-8")
 
 
+def _emit_progress(
+    component_id: str,
+    index: int,
+    total: int,
+    state: str,
+) -> None:
+    """Write one bounded logical progress event to the declared inherited FD."""
+
+    raw_descriptor = os.environ.get("AI_COLLAB_PROGRESS_FD")
+    if raw_descriptor is None:
+        return
+    if not raw_descriptor.isascii() or not raw_descriptor.isdecimal():
+        raise AdapterError(
+            "progress side channel is invalid",
+            code="adapter.progress-invalid",
+        )
+    descriptor = int(raw_descriptor)
+    if descriptor < 3:
+        raise AdapterError(
+            "progress side channel is invalid",
+            code="adapter.progress-invalid",
+        )
+    encoded = _canonical_bytes(
+        {
+            "component_id": component_id,
+            "index": index,
+            "total": total,
+            "state": state,
+        }
+    ) + b"\n"
+    if len(encoded) > 2048:
+        raise AdapterError(
+            "progress event exceeds its bound",
+            code="adapter.progress-invalid",
+        )
+    try:
+        written = os.write(descriptor, encoded)
+    except OSError:
+        # The progress observer is not operation authority. Losing it cannot
+        # cancel repository materialization or alter the final JSON reply.
+        return
+    if written != len(encoded):
+        raise AdapterError(
+            "progress event could not be written atomically",
+            code="adapter.progress-invalid",
+        )
+
+
 def _git_environment(**overrides: str) -> dict[str, str]:
     """Return a private Git environment with optional metadata writes disabled."""
 
@@ -865,7 +913,7 @@ def _component_content(repo: Path) -> str:
     )
 
 
-def _materialize_components(
+def _materialize_components_unobserved(
     staging: Path,
     plan: Mapping[str, Any],
     rows: Mapping[str, Mapping[str, Any]],
@@ -960,6 +1008,32 @@ def _materialize_components(
                 "clean_at_provision": True,
             }
         )
+    return receipts
+
+
+def _materialize_components(
+    staging: Path,
+    plan: Mapping[str, Any],
+    rows: Mapping[str, Mapping[str, Any]],
+    *,
+    progress_total: int,
+) -> list[dict[str, Any]]:
+    receipts: list[dict[str, Any]] = []
+    for index, component in enumerate(plan["components"]):
+        component_id = component["component_id"]
+        _emit_progress(component_id, index, progress_total, "cloning")
+        try:
+            receipts.extend(
+                _materialize_components_unobserved(
+                    staging,
+                    {**plan, "components": [component]},
+                    rows,
+                )
+            )
+        except Exception:
+            _emit_progress(component_id, index, progress_total, "failed")
+            raise
+        _emit_progress(component_id, index, progress_total, "ready")
     return receipts
 
 
@@ -1171,10 +1245,29 @@ def _provision(payload: Mapping[str, Any]) -> dict[str, Any]:
     del descriptor
     rows = {row["repo_key"]: row for row in manifest["repos"]}
     planned_rows = [rows[item["component_id"]] for item in plan["components"]]
+    progress_total = len(plan["components"]) + 1
+    progress_items = [item["component_id"] for item in plan["components"]] + [
+        plan["environment"]["environment_id"]
+    ]
+    for progress_index, component_id in enumerate(progress_items):
+        _emit_progress(component_id, progress_index, progress_total, "waiting")
     if _source_wip_digest(planned_rows, plan["components"]) != plan["source_wip_snapshot_digest"]:
         raise AdapterError("canonical source changed after planning")
-    components = _materialize_components(staging, plan, rows)
-    environment = _materialize_environment(staging, plan, components, rows)
+    components = _materialize_components(
+        staging,
+        plan,
+        rows,
+        progress_total=progress_total,
+    )
+    environment_index = progress_total - 1
+    environment_id = plan["environment"]["environment_id"]
+    _emit_progress(environment_id, environment_index, progress_total, "building")
+    try:
+        environment = _materialize_environment(staging, plan, components, rows)
+    except Exception:
+        _emit_progress(environment_id, environment_index, progress_total, "failed")
+        raise
+    _emit_progress(environment_id, environment_index, progress_total, "ready")
     if _source_wip_digest(planned_rows, plan["components"]) != plan["source_wip_snapshot_digest"]:
         raise AdapterError("canonical source WIP changed during provisioning")
     workspace_binding_digest = canonical_json_sha256(

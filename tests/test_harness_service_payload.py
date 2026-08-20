@@ -119,6 +119,7 @@ def test_public_payload_embeds_generic_adapters_and_no_integration_content(
             "scripts/ai_collab_project_adapter.py",
         ],
         "idempotent_join_operations": ["destroy", "recover", "repair"],
+        "progress_side_channel": "v1",
         "schema_version": 1,
         "working_directory": ".",
     }
@@ -156,6 +157,7 @@ def test_integration_payload_embeds_the_integration_adapters(
             "scripts/ai_collab_edgestudio_adapter.py",
         ],
         "idempotent_join_operations": ["destroy", "recover", "repair"],
+        "progress_side_channel": "v1",
         "schema_version": 1,
         "working_directory": ".",
     }

@@ -513,6 +513,7 @@ class HarnessClient:
         scenario_state_revision: int,
         plan_digest: str,
         request_id: str | None = None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         return self._call(
             "workspace.provision",
@@ -528,6 +529,7 @@ class HarnessClient:
                 "plan_digest": plan_digest,
             },
             request_id=request_id,
+            progress_callback=progress_callback,
         )
 
     def workspace_status(

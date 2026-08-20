@@ -33,7 +33,11 @@ WORKSPACE_STATE_SCHEMA_VERSION = 1
 ADAPTER_PROTOCOL_VERSION = 1
 MAX_ADAPTER_REPLY_BYTES = 8 * 1024 * 1024
 MAX_PROJECT_RENDER_ENV_BYTES = 512 * 1024
+MAX_ADAPTER_PROGRESS_BYTES = 256 * 1024
+MAX_ADAPTER_PROGRESS_LINE_BYTES = 2 * 1024
+MAX_ADAPTER_PROGRESS_EVENTS = 4096
 ADAPTER_ERROR_CODE_RE = re.compile(r"^[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*)+$")
+PROGRESS_COMPONENT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 ADAPTER_ENVIRONMENT_KEYS = {
     "HOME",
     "PATH",
@@ -86,13 +90,16 @@ class ProjectAdapterCommand:
             "command",
             "working_directory",
         }
-        if not isinstance(value, dict) or frozenset(value) not in {
-            frozenset(base_fields),
-            frozenset(base_fields | {"idempotent_join_operations"}),
-        }:
+        optional_fields = {"idempotent_join_operations", "progress_side_channel"}
+        if (
+            not isinstance(value, dict)
+            or not base_fields.issubset(value)
+            or set(value) - base_fields - optional_fields
+        ):
             raise WorkspaceError("adapter.config-invalid", "adapter config fields differ")
         command = value["command"]
         idempotent_join_operations = value.get("idempotent_join_operations", [])
+        progress_side_channel = value.get("progress_side_channel")
         if (
             value["schema_version"] != 1
             or not isinstance(value["adapter_id"], str)
@@ -107,6 +114,7 @@ class ProjectAdapterCommand:
                 item not in {"destroy", "recover", "repair"}
                 for item in idempotent_join_operations
             )
+            or progress_side_channel not in {None, "v1"}
         ):
             raise WorkspaceError("adapter.config-invalid", "adapter config values are invalid")
         base = path.parent
@@ -123,6 +131,7 @@ class ProjectAdapterCommand:
         self.config_path = path
         self.adapter_id = value["adapter_id"]
         self.idempotent_join_operations = frozenset(idempotent_join_operations)
+        self.progress_side_channel = progress_side_channel
         self.command = tuple(arguments)
         self.working_directory = work
 
@@ -169,6 +178,7 @@ class ProjectAdapterCommand:
         project_root: Path | None = None,
         project_render: Mapping[str, Any] | None = None,
         timeout_seconds: float = 300,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         request = {
             "adapter_protocol_version": ADAPTER_PROTOCOL_VERSION,
@@ -193,6 +203,19 @@ class ProjectAdapterCommand:
                 )
             environment["AI_COLLAB_PROJECT_RENDER"] = encoded_render.decode("utf-8")
         mutation_may_have_started = operation in {"repair", "destroy", "recover"}
+        progress_reader: _AdapterProgressReader | None = None
+        progress_write_descriptor: int | None = None
+        pass_fds: tuple[int, ...] = ()
+        if (
+            operation == "provision"
+            and self.progress_side_channel == "v1"
+            and progress_callback is not None
+        ):
+            progress_reader = _AdapterProgressReader(payload, progress_callback)
+            read_descriptor, progress_write_descriptor = os.pipe()
+            environment["AI_COLLAB_PROGRESS_FD"] = str(progress_write_descriptor)
+            pass_fds = (progress_write_descriptor,)
+            progress_reader.start(read_descriptor)
         try:
             completed = subprocess.run(
                 self.command,
@@ -203,6 +226,7 @@ class ProjectAdapterCommand:
                 stderr=subprocess.PIPE,
                 timeout=timeout_seconds,
                 check=False,
+                pass_fds=pass_fds,
             )
         except OSError as exc:
             raise WorkspaceError(
@@ -219,6 +243,11 @@ class ProjectAdapterCommand:
                     "unknown" if mutation_may_have_started else "not_started"
                 ),
             ) from exc
+        finally:
+            if progress_write_descriptor is not None:
+                os.close(progress_write_descriptor)
+            if progress_reader is not None:
+                progress_reader.join()
         if completed.returncode != 0:
             raise WorkspaceError(
                 "adapter.crashed",
@@ -313,8 +342,174 @@ class ProjectAdapterCommand:
                 retryable=error["retryable"],
                 mutation_state=error["mutation_state"],
             )
+        if progress_reader is not None:
+            progress_reader.require_complete()
         _reject_public_absolute_paths(value["result"])
         return value["result"]
+
+
+class _AdapterProgressReader:
+    """Drain and validate one declared, observation-only adapter FD."""
+
+    def __init__(
+        self,
+        payload: Mapping[str, Any],
+        callback: Callable[[dict[str, Any]], None],
+    ) -> None:
+        plan = payload.get("plan")
+        components = plan.get("components") if isinstance(plan, Mapping) else None
+        environment = plan.get("environment") if isinstance(plan, Mapping) else None
+        if not isinstance(components, list) or not isinstance(environment, Mapping):
+            raise WorkspaceError(
+                "adapter.progress-invalid", "adapter progress membership is invalid"
+            )
+        expected: list[tuple[str, str]] = []
+        for component in components:
+            component_id = (
+                component.get("component_id")
+                if isinstance(component, Mapping)
+                else None
+            )
+            if (
+                not isinstance(component_id, str)
+                or PROGRESS_COMPONENT_ID_RE.fullmatch(component_id) is None
+            ):
+                raise WorkspaceError(
+                    "adapter.progress-invalid", "adapter progress membership is invalid"
+                )
+            expected.append((component_id, "cloning"))
+        environment_id = environment.get("environment_id")
+        if (
+            not isinstance(environment_id, str)
+            or PROGRESS_COMPONENT_ID_RE.fullmatch(environment_id) is None
+        ):
+            raise WorkspaceError(
+                "adapter.progress-invalid", "adapter progress membership is invalid"
+            )
+        expected.append((environment_id, "building"))
+        if len(expected) > 1024 or len({item[0] for item in expected}) != len(expected):
+            raise WorkspaceError(
+                "adapter.progress-invalid", "adapter progress membership is invalid"
+            )
+        self.expected = expected
+        self.callback = callback
+        self._thread: threading.Thread | None = None
+        self._error: str | None = None
+        self._states = ["new"] * len(expected)
+        self._waiting_index = 0
+        self._active_index = 0
+        self._event_count = 0
+        self._byte_count = 0
+
+    def start(self, descriptor: int) -> None:
+        self._thread = threading.Thread(
+            target=self._read,
+            args=(descriptor,),
+            name="ai-collab-adapter-progress",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def join(self) -> None:
+        assert self._thread is not None
+        self._thread.join()
+
+    def _read(self, descriptor: int) -> None:
+        with os.fdopen(descriptor, "rb") as stream:
+            while True:
+                raw = stream.readline(MAX_ADAPTER_PROGRESS_LINE_BYTES + 1)
+                if not raw:
+                    return
+                self._event_count += 1
+                self._byte_count += len(raw)
+                if self._error is not None:
+                    continue
+                if (
+                    len(raw) > MAX_ADAPTER_PROGRESS_LINE_BYTES
+                    or self._event_count > MAX_ADAPTER_PROGRESS_EVENTS
+                    or self._byte_count > MAX_ADAPTER_PROGRESS_BYTES
+                ):
+                    self._error = "adapter progress exceeds its bound"
+                    continue
+                try:
+                    event = json.loads(raw)
+                    self._accept(event)
+                except (UnicodeDecodeError, json.JSONDecodeError, WorkspaceError):
+                    self._error = "adapter progress event is invalid"
+
+    def _accept(self, event: Any) -> None:
+        if not isinstance(event, dict) or set(event) != {
+            "component_id",
+            "index",
+            "total",
+            "state",
+        }:
+            raise WorkspaceError(
+                "adapter.progress-invalid", "adapter progress fields differ"
+            )
+        index = event["index"]
+        total = event["total"]
+        state = event["state"]
+        if (
+            not isinstance(index, int)
+            or isinstance(index, bool)
+            or not isinstance(total, int)
+            or isinstance(total, bool)
+            or total != len(self.expected)
+            or index < 0
+            or index >= total
+            or event["component_id"] != self.expected[index][0]
+            or state not in {"waiting", "cloning", "building", "ready", "failed"}
+        ):
+            raise WorkspaceError(
+                "adapter.progress-invalid", "adapter progress values differ"
+            )
+        current = self._states[index]
+        if state == "waiting":
+            if index != self._waiting_index or current != "new":
+                raise WorkspaceError(
+                    "adapter.progress-invalid", "adapter progress order differs"
+                )
+            self._states[index] = "waiting"
+            self._waiting_index += 1
+        elif state in {"cloning", "building"}:
+            if (
+                self._waiting_index != total
+                or index != self._active_index
+                or current != "waiting"
+                or state != self.expected[index][1]
+            ):
+                raise WorkspaceError(
+                    "adapter.progress-invalid", "adapter progress order differs"
+                )
+            self._states[index] = state
+        else:
+            if (
+                self._waiting_index != total
+                or index != self._active_index
+                or current != self.expected[index][1]
+            ):
+                raise WorkspaceError(
+                    "adapter.progress-invalid", "adapter progress order differs"
+                )
+            self._states[index] = state
+            if state == "ready":
+                self._active_index += 1
+        try:
+            self.callback(copy.deepcopy(event))
+        except Exception:
+            # Progress is an observation. A disconnected or faulty observer
+            # cannot cancel or alter the durable Workspace operation.
+            pass
+
+    def require_complete(self) -> None:
+        if self._error is not None or any(state != "ready" for state in self._states):
+            raise WorkspaceError(
+                "adapter.progress-invalid",
+                self._error or "adapter progress ended before completion",
+                retryable=False,
+                mutation_state="started",
+            )
 
 
 class WorkspaceCoordinator:
@@ -354,9 +549,21 @@ class WorkspaceCoordinator:
         payload: Mapping[str, Any],
         *,
         project_binding_digest: str | None = None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
+        adapter_progress = (
+            progress_callback
+            if getattr(self.adapter, "progress_side_channel", None) == "v1"
+            else None
+        )
         if self.project_root_resolver is None:
-            return self.adapter.call(operation, payload)
+            if adapter_progress is None:
+                return self.adapter.call(operation, payload)
+            return self.adapter.call(
+                operation,
+                payload,
+                progress_callback=adapter_progress,
+            )
         if project_binding_digest is None:
             plan = payload.get("plan")
             if isinstance(plan, Mapping):
@@ -376,18 +583,19 @@ class WorkspaceCoordinator:
             ):
                 scenario_id = scenario["scenario_id"]
                 break
-        return self.adapter.call(
-            operation,
-            payload,
-            project_root=self.project_root_resolver(project_instance_id),
-            project_render=(
+        adapter_arguments = {
+            "project_root": self.project_root_resolver(project_instance_id),
+            "project_render": (
                 self.project_render_resolver(
                     project_instance_id, scenario_id, project_binding_digest
                 )
                 if self.project_render_resolver is not None
                 else None
             ),
-        )
+        }
+        if adapter_progress is not None:
+            adapter_arguments["progress_callback"] = adapter_progress
+        return self.adapter.call(operation, payload, **adapter_arguments)
 
     def _adapter_join_capability(self, operation_kind: str) -> dict[str, Any]:
         adapter_id = getattr(self.adapter, "adapter_id", None)
@@ -747,6 +955,7 @@ class WorkspaceCoordinator:
         scenario_state_revision: int,
         plan_digest: str,
         workspace_path: Path,
+        progress_callback: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> tuple[str, dict[str, Any]]:
         key = _binding_key(project_instance_id, scenario_id)
         with self._lock:
@@ -782,6 +991,11 @@ class WorkspaceCoordinator:
             self._write_state(state)
             plan = copy.deepcopy(binding["plan"])
             descriptors = copy.deepcopy(binding["descriptors"])
+            environment_id = (
+                plan.get("environment", {}).get("environment_id")
+                if isinstance(plan.get("environment"), Mapping)
+                else None
+            )
         publish_evidence: dict[str, Any] | None = None
         result_digest: str | None = None
         try:
@@ -794,6 +1008,23 @@ class WorkspaceCoordinator:
                     "plan": plan,
                     "descriptors": descriptors,
                 },
+                progress_callback=(
+                    (
+                        lambda event: progress_callback(
+                            operation_id,
+                            {
+                                **event,
+                                "component_kind": (
+                                    "environment"
+                                    if event["component_id"] == environment_id
+                                    else "repository"
+                                ),
+                            },
+                        )
+                    )
+                    if progress_callback is not None
+                    else None
+                ),
             )
             if set(external) != {"journal", "receipt", "review_snapshot"}:
                 raise WorkspaceError("adapter.invalid-reply", "provision result fields differ")
