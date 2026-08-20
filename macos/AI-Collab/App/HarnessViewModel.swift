@@ -1641,6 +1641,9 @@ final class HarnessViewModel: ObservableObject {
         actionableError = actionable
         errorMessage = actionable.message
         if case HarnessIPCError.hostUnavailable = error { hostStatus = "unavailable" }
+        // A registration-stage failure must not leave the header on the
+        // initial "Connecting…" — that reads as still in progress.
+        if error is HarnessServiceError { hostStatus = "registration failed" }
     }
 
     /// Explains why a control could not act. Every branch that used to `return`

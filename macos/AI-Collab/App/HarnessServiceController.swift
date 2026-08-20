@@ -25,36 +25,65 @@ enum HarnessServiceStatus: Equatable, Sendable {
 
 enum HarnessServiceError: LocalizedError {
     case approvalRequired
-    case serviceMissing
+    case registrationFailed(underlying: Error)
+    case serviceUnresolved(status: HarnessServiceStatus)
     case buildIdentityMissing
     case registrationStateUnavailable
 
     var errorDescription: String? {
         switch self {
         case .approvalRequired:
-            "Harness Host requires approval in System Settings → General → Login Items."
-        case .serviceMissing:
-            "The signed App does not contain its Harness Host service."
+            return "Harness Host requires approval in System Settings → General → Login Items."
+        case let .registrationFailed(underlying):
+            let value = underlying as NSError
+            return "Harness Host registration failed (\(value.domain) \(value.code)): "
+                + value.localizedDescription
+        case let .serviceUnresolved(status):
+            return "macOS Service Management could not resolve the Harness Host "
+                + "service after registration (status: \(status.label)). Make sure "
+                + "the App runs from /Applications, then quit and reopen it."
         case .buildIdentityMissing:
-            "The signed App does not contain its Harness service build identity."
+            return "The signed App does not contain its Harness service build identity."
         case .registrationStateUnavailable:
-            "Harness Host registration state could not be stored securely."
+            return "Harness Host registration state could not be stored securely."
         }
     }
 }
+
+/// The slice of SMAppService the controller uses. Injected so the
+/// registration state machine is testable without touching launchd/BTM.
+@available(macOS 13.0, *)
+protocol HarnessServiceManaging {
+    var status: SMAppService.Status { get }
+    func register() throws
+    func unregister() async throws
+}
+
+@available(macOS 13.0, *)
+extension SMAppService: HarnessServiceManaging {}
 
 @available(macOS 13.0, *)
 final class HarnessServiceController: @unchecked Sendable {
     static let launchAgentPlistName = "com.atomgradient.aicollab.host.plist"
     static let serviceBuildDigestKey = "AICollabServiceBuildDigest"
-    private let service: SMAppService
+    private let service: any HarnessServiceManaging
     private let registrationReceipt: URL
+    private let appBundleURL: URL
+    private let buildDigest: String?
 
     init(
-        service: SMAppService = .agent(plistName: launchAgentPlistName),
-        stateRoot: URL = HarnessServiceController.defaultStateRoot()
+        service: any HarnessServiceManaging = SMAppService.agent(
+            plistName: launchAgentPlistName
+        ),
+        stateRoot: URL = HarnessServiceController.defaultStateRoot(),
+        appBundleURL: URL = Bundle.main.bundleURL,
+        buildDigest: String? = Bundle.main.object(
+            forInfoDictionaryKey: HarnessServiceController.serviceBuildDigestKey
+        ) as? String
     ) {
         self.service = service
+        self.appBundleURL = appBundleURL
+        self.buildDigest = buildDigest
         registrationReceipt = stateRoot
             .appending(path: "installation", directoryHint: .isDirectory)
             .appending(path: "service-registration.json")
@@ -63,12 +92,9 @@ final class HarnessServiceController: @unchecked Sendable {
     var status: HarnessServiceStatus { Self.status(service.status) }
 
     func ensureRegistered() async throws -> HarnessServiceStatus {
-        guard
-            let buildDigest = Bundle.main.object(
-                forInfoDictionaryKey: Self.serviceBuildDigestKey
-            ) as? String,
-            Self.isSHA256(buildDigest)
-        else { throw HarnessServiceError.buildIdentityMissing }
+        guard let buildDigest, Self.isSHA256(buildDigest) else {
+            throw HarnessServiceError.buildIdentityMissing
+        }
 
         if status == .enabled, !registrationMatches(buildDigest: buildDigest) {
             try await service.unregister()
@@ -76,24 +102,32 @@ final class HarnessServiceController: @unchecked Sendable {
         switch status {
         case .enabled:
             break
-        case .notRegistered:
-            try service.register()
+        case .notRegistered, .notFound, .unknown:
+            // `.notFound` is also the clean pre-registration state on a
+            // machine whose Background Task Management store has never seen
+            // this agent (every fresh install). It must attempt a normal
+            // registration exactly like `.notRegistered` — the spike
+            // contract validates both as "clean before registration". It
+            // must never be translated into a missing-bundle claim.
+            do {
+                try service.register()
+            } catch {
+                throw HarnessServiceError.registrationFailed(underlying: error)
+            }
         case .requiresApproval:
             throw HarnessServiceError.approvalRequired
-        case .notFound:
-            throw HarnessServiceError.serviceMissing
-        case .unknown:
-            try service.register()
         }
         let current = status
-        if current == .requiresApproval {
-            throw HarnessServiceError.approvalRequired
-        }
-        if current == .notFound {
-            throw HarnessServiceError.serviceMissing
-        }
-        if current == .enabled {
+        switch current {
+        case .enabled:
             try storeRegistrationReceipt(buildDigest: buildDigest)
+        case .requiresApproval:
+            throw HarnessServiceError.approvalRequired
+        case .notRegistered, .notFound, .unknown:
+            // register() returned without throwing, yet launchd/BTM still
+            // does not resolve the agent. Fail closed with the observed
+            // status instead of guessing at a cause.
+            throw HarnessServiceError.serviceUnresolved(status: current)
         }
         return current
     }
@@ -113,7 +147,7 @@ final class HarnessServiceController: @unchecked Sendable {
             let appBundlePath = value["app_bundle_path"] as? String
         else { return false }
         return URL(filePath: appBundlePath, directoryHint: .isDirectory)
-            .standardizedFileURL.path == Bundle.main.bundleURL.standardizedFileURL.path
+            .standardizedFileURL.path == appBundleURL.standardizedFileURL.path
     }
 
     private func storeRegistrationReceipt(buildDigest: String) throws {
@@ -130,7 +164,7 @@ final class HarnessServiceController: @unchecked Sendable {
             let value: [String: Any] = [
                 "schema_version": 1,
                 "service_build_digest": buildDigest,
-                "app_bundle_path": Bundle.main.bundleURL.path,
+                "app_bundle_path": appBundleURL.path,
             ]
             let data = try JSONSerialization.data(
                 withJSONObject: value, options: [.sortedKeys]
