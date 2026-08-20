@@ -29,6 +29,8 @@ APP_OPERATIONS = (
     "environment.probe",
     "project.register",
     "project.list",
+    "project.reconcile",
+    "project.accept-reconciliation",
     "project.unregister",
     "project.bootstrap",
     "scenario.create",

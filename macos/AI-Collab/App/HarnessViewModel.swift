@@ -31,8 +31,9 @@ struct ValidationNotice: Identifiable, Equatable {
 final class HarnessViewModel: ObservableObject {
     @Published var hostStatus = "Connecting…"
     @Published var projects: [ProjectRecord] = []
+    @Published var projectReconciliations: [String: ProjectReconciliationRecord] = [:]
     @Published var selectedProjectID: String?
-    @Published var pendingBootstrap: URL?
+    @Published var pendingRegistrationURL: URL?
     @Published var scenarios: [ScenarioRecord] = []
     @Published var selectedScenarioID: String?
     @Published var participants: [ParticipantRecord] = []
@@ -180,6 +181,7 @@ final class HarnessViewModel: ObservableObject {
             )
             self.hostStatus = status["status"] as? String ?? "ready"
             try await self.reloadProjects()
+            await self.refreshProjectReconciliations()
             try await self.reloadTemplates()
             try await self.reloadPolicyTemplates()
             await self.refreshPresentationPermission()
@@ -198,39 +200,16 @@ final class HarnessViewModel: ObservableObject {
         panel.allowsMultipleSelection = false
         panel.prompt = "Register Project"
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        // Cold start: a project that has never met the Harness has no
-        // declaration files. Offer to draft them instead of failing the
-        // registration with an opaque adapter error.
-        let descriptor = url.appendingPathComponent("project_descriptor.yaml")
-        if !FileManager.default.fileExists(atPath: descriptor.path) {
-            pendingBootstrap = url
-            return
-        }
+        pendingRegistrationURL = url
+    }
+
+    func confirmProjectRegistration(_ url: URL) async {
         await performMutation(
             activity: "Registering \(url.lastPathComponent)…",
             scope: .project,
             success: "Registered \(url.lastPathComponent)."
         ) {
             try self.client.grantProjectDirectoryAccess(url)
-            try await self.registerGrantedProject(url)
-        }
-    }
-
-    func bootstrapAndRegisterProject(_ url: URL) async {
-        await performMutation(
-            activity: "Preparing \(url.lastPathComponent)…",
-            scope: .project,
-            success: "Drafted project files and registered \(url.lastPathComponent)."
-        ) {
-            try self.client.grantProjectDirectoryAccess(url)
-            _ = try await self.client.call(
-                HarnessCall(
-                    operation: "project.bootstrap",
-                    target: ["scope": "host"],
-                    fence: ["operation_generation": 0],
-                    payload: ["canonical_project_path": url.path]
-                )
-            )
             try await self.registerGrantedProject(url)
         }
     }
@@ -251,6 +230,7 @@ final class HarnessViewModel: ObservableObject {
         else { throw HarnessIPCError.invalidReply }
         try await self.reloadProjects()
         self.selectedProjectID = project.id
+        await self.reconcileProject(project.id)
         try await self.reloadScenarios()
         try await self.reloadPolicyTemplates()
     }
@@ -296,6 +276,71 @@ final class HarnessViewModel: ObservableObject {
         await performRead {
             try await self.reloadScenarios()
             try await self.reloadPolicyTemplates()
+        }
+        if let id { await reconcileProject(id) }
+    }
+
+    func reconcileProject(_ projectID: String, surfaceErrors: Bool = false) async {
+        do {
+            let result = try await client.call(
+                HarnessCall(
+                    operation: "project.reconcile",
+                    target: ["scope": "project", "project_instance_id": projectID],
+                    fence: ["operation_generation": 0],
+                    payload: [:]
+                )
+            )
+            if
+                let raw = result["project"] as? [String: Any],
+                let refreshed = ProjectRecord(raw),
+                let reconciliationRaw = result["reconciliation"] as? [String: Any],
+                let reconciliation = ProjectReconciliationRecord(reconciliationRaw)
+            {
+                if let index = projects.firstIndex(where: { $0.id == projectID }) {
+                    projects[index] = refreshed
+                }
+                projectReconciliations[projectID] = reconciliation
+            }
+        } catch {
+            // Registration remains usable with its last-good render. A typed
+            // reconciliation failure is surfaced only when the employee asks
+            // to refresh this project explicitly.
+            if surfaceErrors { report(error) }
+        }
+    }
+
+    func refreshProjectReconciliations() async {
+        for project in projects {
+            await reconcileProject(project.id)
+        }
+    }
+
+    func acceptProjectReconciliation(_ projectID: String) async {
+        guard let reconciliation = projectReconciliations[projectID],
+              reconciliation.bindingChanged else { return }
+        await performMutation(
+            activity: "Applying project update…",
+            scope: .project,
+            success: "Project update applied"
+        ) {
+            let result = try await self.client.call(
+                HarnessCall(
+                    operation: "project.accept-reconciliation",
+                    target: ["scope": "project", "project_instance_id": projectID],
+                    fence: ["operation_generation": 0],
+                    payload: ["availability_fingerprint": reconciliation.fingerprint]
+                )
+            )
+            if let raw = result["project"] as? [String: Any],
+               let refreshed = ProjectRecord(raw) {
+                if let index = self.projects.firstIndex(where: { $0.id == projectID }) {
+                    self.projects[index] = refreshed
+                }
+            }
+            if let raw = result["reconciliation"] as? [String: Any],
+               let accepted = ProjectReconciliationRecord(raw) {
+                self.projectReconciliations[projectID] = accepted
+            }
         }
     }
 
@@ -443,6 +488,13 @@ final class HarnessViewModel: ObservableObject {
         case "scenario.refresh": "Refresh Scenario"
         case "scenario.preflight": "Run Preflight Again"
         case "workspace.prepare": "Prepare Workspace"
+        case "git.authenticate": "Sign in to Git, then prepare again"
+        case "git.fetch-full-history": "Fetch complete Git history"
+        case "git.materialize-full-clone": "Use a complete standalone Git clone"
+        case "project.resolve-branch": "Correct the declared repository branch"
+        case "project.resolve-remote": "Correct repository access or remote"
+        case "project.resolve-origin": "Align checkout origin with team intent"
+        case "disk.free-space": "Free disk space, then prepare again"
         case "participant.recover": "Recover Participant"
         case "scenario.repair": "Use Repair Scenario Below"
         case "system-settings.automation": "Open Automation Settings"
@@ -552,6 +604,7 @@ final class HarnessViewModel: ObservableObject {
                 (provisioned["workspace"] as? [String: Any])?["receipt"]
             )
             try await self.refreshSelectedScenarioValues()
+            await self.reconcileProject(project.id)
         }
     }
 

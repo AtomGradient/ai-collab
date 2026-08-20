@@ -123,9 +123,39 @@ struct ContentView: View {
                         Text("Contract \(project.productContractVersion)")
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                        if let reconciliation = model.projectReconciliations[project.id],
+                           reconciliation.status == "attention" {
+                            Text(
+                                reconciliation.bindingChanged
+                                    ? "Project configuration update available"
+                                    : "\(reconciliation.changes.count) repository change"
+                                        + (reconciliation.changes.count == 1 ? "" : "s")
+                                        + " detected"
+                            )
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                            if reconciliation.bindingChanged {
+                                Button("Apply project update") {
+                                    Task {
+                                        await model.acceptProjectReconciliation(project.id)
+                                    }
+                                }
+                                .buttonStyle(.link)
+                                .font(.caption)
+                            }
+                        }
                     }
                     .tag(project.id)
                     .contextMenu {
+                        Button("Check Project Updates") {
+                            Task { await model.reconcileProject(project.id, surfaceErrors: true) }
+                        }
+                        if let reconciliation = model.projectReconciliations[project.id],
+                           reconciliation.bindingChanged {
+                            Button("Apply Detected Project Update") {
+                                Task { await model.acceptProjectReconciliation(project.id) }
+                            }
+                        }
                         Button("Unregister Project…", role: .destructive) {
                             highRiskIntent = .unregisterProject(project)
                         }
@@ -135,28 +165,27 @@ struct ContentView: View {
         }
         .navigationTitle("AI Collab")
         .confirmationDialog(
-            "Prepare this project?",
+            "Register this Git project?",
             isPresented: Binding(
-                get: { model.pendingBootstrap != nil },
-                set: { if !$0 { model.pendingBootstrap = nil } }
+                get: { model.pendingRegistrationURL != nil },
+                set: { if !$0 { model.pendingRegistrationURL = nil } }
             ),
             titleVisibility: .visible
         ) {
-            if let url = model.pendingBootstrap {
-                Button("Draft project files and register") {
-                    model.pendingBootstrap = nil
-                    Task { await model.bootstrapAndRegisterProject(url) }
+            if let url = model.pendingRegistrationURL {
+                Button("Register Project") {
+                    model.pendingRegistrationURL = nil
+                    Task { await model.confirmProjectRegistration(url) }
                 }
                 Button("Cancel", role: .cancel) {}
             }
         } message: {
-            if let url = model.pendingBootstrap {
+            if let url = model.pendingRegistrationURL {
                 Text(
-                    "\(url.lastPathComponent) has no project declaration files yet. "
-                        + "AI Collab drafts project_descriptor.yaml, repo_manifest.yaml, "
-                        + "a gate registry, and starter collaboration templates from the "
-                        + "directory's Git repositories, then registers it. Existing "
-                        + "files are never overwritten."
+                    "AICollab will use \(url.lastPathComponent)'s tracked team intent "
+                        + "when present, read older project contracts compatibly, or pin "
+                        + "a built-in default for a fileless project. Registration never "
+                        + "writes to the selected repository."
                 )
             }
         }

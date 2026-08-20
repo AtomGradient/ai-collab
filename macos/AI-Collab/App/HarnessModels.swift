@@ -28,6 +28,55 @@ struct ProjectRecord: Identifiable, Equatable {
     }
 }
 
+struct ProjectRepositoryChange: Identifiable, Equatable {
+    let repoKey: String
+    let path: String
+    let classification: String
+    let status: String
+    let reasons: [String]
+
+    var id: String { "\(status):\(path):\(repoKey)" }
+
+    init?(_ value: [String: Any]) {
+        guard
+            let repoKey = value["repo_key"] as? String,
+            let path = value["path"] as? String,
+            let classification = value["classification"] as? String,
+            let status = value["status"] as? String
+        else { return nil }
+        self.repoKey = repoKey
+        self.path = path
+        self.classification = classification
+        self.status = status
+        self.reasons = value["reasons"] as? [String] ?? []
+    }
+}
+
+struct ProjectReconciliationRecord: Equatable {
+    let status: String
+    let bindingChanged: Bool
+    let fingerprint: String
+    let changes: [ProjectRepositoryChange]
+    let warnings: [String]
+
+    init?(_ value: [String: Any]) {
+        guard
+            let status = value["status"] as? String,
+            let bindingChanged = value["binding_changed"] as? Bool,
+            let fingerprint = value["availability_fingerprint"] as? String,
+            let warnings = value["warnings"] as? [String]
+        else { return nil }
+        let rawChanges = dictionaries(value["changes"])
+        let changes = rawChanges.compactMap(ProjectRepositoryChange.init)
+        guard changes.count == rawChanges.count else { return nil }
+        self.status = status
+        self.bindingChanged = bindingChanged
+        self.fingerprint = fingerprint
+        self.changes = changes
+        self.warnings = warnings
+    }
+}
+
 struct ScenarioRecord: Identifiable, Equatable {
     let id: String
     let generation: Int
