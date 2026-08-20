@@ -293,3 +293,19 @@ def test_prepare_workspace_wires_the_progress_session() -> None:
     assert "self.applyProgress(progress, progressSessionID: progressSessionID)" in prepare
     mutation = view_model.split("private func performMutation", 1)[1].split("func ", 1)[0]
     assert "workspaceProgress = []" in mutation
+
+
+def test_degraded_room_shows_a_visible_repair_entry() -> None:
+    """R6: a durable degraded/provision_failed room must offer repair in the
+    always-visible Health card, not only inside the collapsed technical fold."""
+
+    content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
+    card = content.split("private func healthCard", 1)[1].split("private ", 1)[0]
+    assert '"degraded", "provision_failed"' in card
+    assert "Button(S.Risk.repairScenario)" in card
+    assert "highRiskIntent = .repairScenario" in card
+    assert "Button(S.Preflight.runButton)" in card
+    detail = content.split("private var scenarioDetail", 1)[1].split("private ", 1)[0]
+    assert "healthCard(scenario)" in detail
+    assert "Label(S.Sections.health" in card
+    assert "Label(S.Sections.activity" in content

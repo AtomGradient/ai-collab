@@ -198,4 +198,44 @@ final class RepairAndProgressTests: XCTestCase {
             "retryable=false must never render a Retry button"
         )
     }
+
+    func testLeaseStatesAndResourceClassesSpeakHumanWords() {
+        for (token, english) in [
+            ("active", "In use"), ("stale", "Stale"), ("released", "Released"),
+        ] {
+            XCTAssertEqual(S.Status.label(token), english)
+        }
+        XCTAssertEqual(S.Sections.resourceClassLabel("exclusive_runtime"), "exclusive runtime")
+        L10n.shared.preference = .simplifiedChinese
+        XCTAssertEqual(S.Status.label("active"), "使用中")
+        XCTAssertEqual(S.Status.label("stale"), "已失效")
+        XCTAssertEqual(S.Status.label("released"), "已释放")
+        XCTAssertEqual(S.Sections.resourceClassLabel("exclusive_runtime"), "独占运行时")
+        L10n.shared.preference = .english
+    }
+
+    func testReleasedLeasesStayOutOfTheOverview() {
+        let model = HarnessViewModel()
+        func lease(_ id: String, status: String) -> ResourceLeaseRecord? {
+            ResourceLeaseRecord([
+                "lease_id": String(repeating: id, count: 64),
+                "lease_revision": 1,
+                "resource_class": "port",
+                "status": status,
+                "holder": [
+                    "participant_id": "analyst",
+                    "participant_generation": 1,
+                ],
+            ])
+        }
+        let released = lease("a", status: "released")
+        let active = lease("b", status: "active")
+        model.resources = [released, active].compactMap { $0 }
+        XCTAssertEqual(model.visibleResources.map(\.status), ["active"])
+        model.resources = [released].compactMap { $0 }
+        XCTAssertTrue(
+            model.visibleResources.isEmpty,
+            "released-only history must show the empty state, not a held claim"
+        )
+    }
 }

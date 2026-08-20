@@ -401,15 +401,19 @@ struct ContentView: View {
             if let scenario = model.selectedScenario {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
+                        // Employee order: who is here, what happened, is it
+                        // healthy, how we collaborate, what is held — and the
+                        // machine view folded at the end, nothing removed.
                         scenarioHeader(scenario)
                         validationBanner(for: .scenarioLifecycle)
+                        healthCard(scenario)
                         participantsSection
+                        deliveriesSection
                         preflightSection
                         topologySection
                         policySection
-                        deliveriesSection
-                        inspectorSection
-                        highRiskSection(scenario)
+                        resourcesSection
+                        technicalSection(scenario)
                     }
                     .padding(20)
                 }
@@ -1017,7 +1021,7 @@ struct ContentView: View {
             .padding(.vertical, 6)
         } label: {
             HStack {
-                Label(S.Deliveries.sectionTitle, systemImage: "envelope.fill")
+                Label(S.Sections.activity, systemImage: "envelope.fill")
                     .font(.headline)
                 Spacer()
                 if model.deliveryTotal > 0 {
@@ -1151,6 +1155,104 @@ struct ContentView: View {
             Image(systemName: "circle.dotted")
                 .foregroundStyle(afterFailure ? .quaternary : .secondary)
         }
+    }
+
+    // MARK: - Health card (durable degraded state, always visible)
+
+    @ViewBuilder
+    private func healthCard(_ scenario: ScenarioRecord) -> some View {
+        if ["degraded", "provision_failed"].contains(scenario.observedState) {
+            GroupBox {
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: "cross.case.fill")
+                        .foregroundStyle(.orange)
+                        .font(.title3)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(
+                            S.Sections.healthNeedsRepair(
+                                HarnessViewModel.humanState(scenario.observedState)
+                            )
+                        )
+                        .font(.callout)
+                        HStack {
+                            Button(S.Risk.repairScenario) {
+                                highRiskIntent = .repairScenario
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+                            Button(S.Preflight.runButton) {
+                                Task { await model.runPreflight() }
+                            }
+                            .controlSize(.small)
+                        }
+                    }
+                    Spacer()
+                }
+                .padding(6)
+            } label: {
+                Label(S.Sections.health, systemImage: "heart.text.square")
+                    .font(.headline)
+                    .foregroundStyle(.orange)
+            }
+        }
+    }
+
+    // MARK: - Resources (read-only overview)
+
+    private var resourcesSection: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 6) {
+                if model.visibleResources.isEmpty {
+                    Text(S.Sections.noResources)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding(.vertical, 6)
+                } else {
+                    // Released history stays in Technical Details; the
+                    // overview never claims a released lease is still held.
+                    ForEach(model.visibleResources) { resource in
+                        HStack {
+                            StateBadge(state: resource.status)
+                            Text(
+                                S.Sections.resourceRow(
+                                    resource.resourceClass, resource.participantID
+                                )
+                            )
+                            .font(.callout)
+                            Spacer()
+                            Text(String(resource.id.prefix(12)))
+                                .font(.caption.monospaced())
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                }
+            }
+            .padding(6)
+        } label: {
+            Label(S.Sections.resources, systemImage: "cpu")
+                .font(.headline)
+        }
+    }
+
+    // MARK: - Technical fold (machine view, complete and collapsed)
+
+    @State private var showTechnical = false
+
+    private func technicalSection(_ scenario: ScenarioRecord) -> some View {
+        DisclosureGroup(isExpanded: $showTechnical) {
+            VStack(alignment: .leading, spacing: 16) {
+                inspectorSection
+                highRiskSection(scenario)
+            }
+            .padding(.top, 8)
+        } label: {
+            Label(S.Sections.technical, systemImage: "terminal")
+                .font(.headline)
+                .foregroundStyle(.secondary)
+        }
+        .padding(10)
+        .background(.secondary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
     }
 
     // MARK: - Overlays
@@ -1430,14 +1532,14 @@ private struct StateBadge: View {
     private var color: Color {
         switch state {
         case "ready", "running", "delivered", "consumed", "current", "passed",
-             "available", "granted":
+             "available", "granted", "active":
             .green
-        case "stopped", "detached", "not_requested":
+        case "stopped", "detached", "not_requested", "released":
             .gray
         case "starting", "stopping", "recovering", "repairing", "replacing",
              "destroying", "queued", "pending":
             .blue
-        case "degraded", "re-plan required", "blocked", "not_determined":
+        case "degraded", "re-plan required", "blocked", "not_determined", "stale":
             .orange
         case "provision_failed", "failed", "rejected", "missing", "denied":
             .red

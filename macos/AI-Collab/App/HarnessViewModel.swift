@@ -168,6 +168,12 @@ final class HarnessViewModel: ObservableObject {
         templates.filter(\.isHeadless)
     }
 
+    /// The resources overview shows current holds only; released history
+    /// stays in the Technical Details ledger.
+    var visibleResources: [ResourceLeaseRecord] {
+        resources.filter { $0.status != "released" }
+    }
+
     var runningParticipantCount: Int {
         participants.filter { $0.observedState == "ready" }.count
     }

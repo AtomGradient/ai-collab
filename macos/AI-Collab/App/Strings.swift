@@ -204,6 +204,9 @@ enum S {
             case "granted": return t("Granted", "已授权")
             case "denied": return t("Denied", "被拒绝")
             case "not_determined": return t("Not asked yet", "尚未询问")
+            case "active": return t("In use", "使用中")
+            case "stale": return t("Stale", "已失效")
+            case "released": return t("Released", "已释放")
             case "unknown": return t("Unknown state", "未知状态")
             default:
                 // Approved rule: employee surfaces show a localized unknown;
@@ -1253,6 +1256,40 @@ enum S {
             case "ready": return t("done", "完成")
             case "failed": return t("failed", "失败")
             default: return t("unknown", "未知")
+            }
+        }
+    }
+
+    // MARK: Room detail sections
+
+    enum Sections {
+        static var activity: String { t("Activity", "最近活动") }
+        static var health: String { t("Health", "健康") }
+        static var resources: String { t("Resources", "资源") }
+        static var technical: String { t("Technical Details", "技术详情") }
+        static var noResources: String { t("Nothing is held.", "无占用。") }
+        static func healthNeedsRepair(_ stateLabel: String) -> String {
+            t(
+                "This room needs repair: \(stateLabel). Repair keeps all work and history.",
+                "这个房间需要修复：\(stateLabel)。修复会保留全部工作内容和历史。"
+            )
+        }
+        static func resourceRow(_ resourceClass: String, _ holder: String) -> String {
+            t(
+                "\(resourceClassLabel(resourceClass)) · held by \(holder)",
+                "\(resourceClassLabel(resourceClass)) · 由 \(holder) 持有"
+            )
+        }
+        /// The Host's exact resource classes, in employee words; raw tokens
+        /// stay in Technical Details.
+        static func resourceClassLabel(_ token: String) -> String {
+            switch token {
+            case "port": return t("network port", "网络端口")
+            case "device": return t("device", "设备")
+            case "compute": return t("compute", "算力")
+            case "accelerator": return t("accelerator", "加速器")
+            case "exclusive_runtime": return t("exclusive runtime", "独占运行时")
+            default: return t("resource", "资源")
             }
         }
     }
