@@ -750,6 +750,7 @@ def _record_launch_failure(
     stage: str,
     exc: BaseException,
     cleanup_outcome: str,
+    process_observation: Mapping[str, Any] | None = None,
 ) -> None:
     """Persist a bounded owner-private launch reason without raw TUI or paths."""
 
@@ -766,6 +767,25 @@ def _record_launch_failure(
         if isinstance(provider_error_code, str) and isinstance(remediation_ref, str):
             value["provider_error_code"] = provider_error_code
             value["remediation_ref"] = remediation_ref
+        if isinstance(process_observation, Mapping):
+            pid = process_observation.get("pid")
+            pgid = process_observation.get("pgid")
+            identity = process_observation.get("identity_sha256")
+            if (
+                isinstance(pid, int)
+                and not isinstance(pid, bool)
+                and pid > 1
+                and isinstance(pgid, int)
+                and not isinstance(pgid, bool)
+                and pgid > 1
+                and isinstance(identity, str)
+                and re.fullmatch(r"[0-9a-f]{64}", identity) is not None
+            ):
+                value["process_observation"] = {
+                    "pid": pid,
+                    "pgid": pgid,
+                    "identity_sha256": identity,
+                }
         _write_private(
             _launch_diagnostic_path(private_root),
             value,
@@ -1611,34 +1631,6 @@ def _process_observation(pid: int) -> dict[str, Any]:
     return {**value, "identity_sha256": digest(value)}
 
 
-def _matching_process_observations(process_match: str) -> list[dict[str, Any]]:
-    if not isinstance(process_match, str) or not process_match:
-        raise DriverError("process match is invalid")
-    try:
-        completed = subprocess.run(
-            ("/bin/ps", "-axo", "pid=", "-o", "command="),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            timeout=3,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise DriverError("owned process observation is unavailable") from exc
-    if completed.returncode != 0:
-        raise DriverError("owned process observation is unavailable")
-    observations: list[dict[str, Any]] = []
-    for line in completed.stdout.splitlines():
-        fields = line.strip().split(None, 1)
-        if len(fields) != 2 or process_match not in fields[1]:
-            continue
-        try:
-            observations.append(_process_observation(int(fields[0])))
-        except (ValueError, DriverError):
-            continue
-    return sorted(observations, key=lambda value: value["pid"])
-
-
 def _matching_process_group_observations(
     process_group_id: int, process_match: str
 ) -> list[dict[str, Any]]:
@@ -2310,6 +2302,7 @@ async def _iterm_start_async(
     marker_verified = False
     marker: dict[str, Any] | None = None
     state: dict[str, Any] | None = None
+    pid: int | None = None
     try:
         connection, app = await _connect_iterm_application(module)
         before_ids = {
@@ -2469,6 +2462,12 @@ async def _iterm_start_async(
                 cleanup_outcome = "close-requested"
             except Exception:
                 pass
+        failure_process_observation = None
+        if isinstance(pid, int) and not isinstance(pid, bool) and pid > 1:
+            try:
+                failure_process_observation = _process_observation(pid)
+            except DriverError:
+                failure_process_observation = None
         if state is not None:
             try:
                 _terminate_exact(state)
@@ -2479,6 +2478,7 @@ async def _iterm_start_async(
             stage=stage,
             exc=exc,
             cleanup_outcome=cleanup_outcome,
+            process_observation=failure_process_observation,
         )
         raise
     finally:
@@ -3796,6 +3796,7 @@ def _startup_gate_recovery_evidence(
     if not required <= set(diagnostic) or set(diagnostic) - required - {
         "provider_error_code",
         "remediation_ref",
+        "process_observation",
     }:
         return None
     if (
@@ -3826,13 +3827,32 @@ def _startup_gate_recovery_evidence(
         if observation["identity_sha256"] == state.get("process_identity_sha256"):
             raise DriverError("repair stopped binding still has live process")
         exact_process_absent = True
-    matching_process_count = 0
     if diagnostic["cleanup_outcome"] == "unconfirmed":
-        profile = _runtime_profile(payload["launch_spec"])
-        matches = _matching_process_observations(profile["process_match"])
-        matching_process_count = len(matches)
-        if matches:
-            raise DriverError("repair startup cleanup is unconfirmed")
+        launch_process = diagnostic.get("process_observation")
+        if not isinstance(launch_process, dict):
+            return None
+        launch_pid = launch_process.get("pid")
+        launch_pgid = launch_process.get("pgid")
+        launch_identity = launch_process.get("identity_sha256")
+        if (
+            not isinstance(launch_pid, int)
+            or isinstance(launch_pid, bool)
+            or launch_pid <= 1
+            or not isinstance(launch_pgid, int)
+            or isinstance(launch_pgid, bool)
+            or launch_pgid <= 1
+            or not isinstance(launch_identity, str)
+            or re.fullmatch(r"[0-9a-f]{64}", launch_identity) is None
+        ):
+            return None
+        try:
+            observation = _process_observation(launch_pid)
+        except DriverError as exc:
+            if str(exc) != "owned process is absent":
+                raise
+        else:
+            if observation["identity_sha256"] == launch_identity:
+                raise DriverError("repair startup cleanup is unconfirmed")
     return digest(
         {
             "recovery": "startup_gate_stopped_binding",
@@ -3846,7 +3866,7 @@ def _startup_gate_recovery_evidence(
             ),
             "state_stop_evidence_sha256": state.get("stop_evidence_sha256"),
             "exact_process_absent": exact_process_absent,
-            "matching_process_count": matching_process_count,
+            "launch_process": diagnostic.get("process_observation"),
         }
     )
 

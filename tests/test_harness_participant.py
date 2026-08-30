@@ -3705,29 +3705,6 @@ def test_scenario_close_treats_settled_cleanup_pending_as_inactive(
         assert result["close_summary"]["all_closed"] is True
 
 
-def test_host_restart_settles_closed_cleanup_pending_without_resources(
-    tmp_path: Path,
-) -> None:
-    state_root = tmp_path / "state"
-    with running_host(state_root) as (host, client, _driver):
-        _start_ready_participant(client)
-        _mark_closed_cleanup_pending_without_external_resources(host)
-
-    with running_host(state_root) as (_host, client, _driver):
-        scenario = client.scenario_status(
-            project_instance_id=PROJECT_ID,
-            scenario_id=SCENARIO_ID,
-        )["scenario"]
-        assert scenario["observed_state"] == "closed"
-        assert scenario["degraded"] is None
-        participant = client.list_participants(
-            project_instance_id=PROJECT_ID,
-            scenario_id=SCENARIO_ID,
-        )["participants"][0]
-        assert participant["observed_state"] == "stopped"
-        assert participant["degraded"] is None
-
-
 def test_force_destroy_cleanup_rejects_unproven_live_binding(tmp_path: Path) -> None:
     store = ScenarioStore(tmp_path / "state")
     driver = FakeDriver()

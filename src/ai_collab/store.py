@@ -605,7 +605,6 @@ class ScenarioStore:
                 else set(),
             )
             self._reconcile_scenario_participant_faults(state)
-            self._reconcile_settled_cleanup_pending_participants(state)
             state["state_revision"] += 1
             self._write_state(state)
             return {
@@ -3592,11 +3591,14 @@ class ScenarioStore:
             participants, artifacts = self._participant_maps(item)
             if record["desired_state"] in {"closed", "destroyed"}:
                 for participant_id, participant in participants.items():
+                    artifact = artifacts.get(participant_id)
+                    if not isinstance(artifact, dict):
+                        continue
                     self._settle_cleanup_pending_participant(
                         state,
                         item,
                         participant,
-                        artifacts[participant_id],
+                        artifact,
                     )
             degraded = self._scenario_participant_fault_payload(
                 record,
@@ -7277,46 +7279,6 @@ class ScenarioStore:
             scenario["observed_state"] = "degraded"
             scenario["state_revision"] += 1
             scenario["degraded"] = degraded
-
-    def _reconcile_settled_cleanup_pending_participants(
-        self, state: dict[str, Any]
-    ) -> None:
-        """Clear legacy closed cleanup-pending rows after resources disappeared."""
-
-        for item in state["scenarios"].values():
-            scenario = item["record"]
-            if (
-                scenario["desired_state"] not in {"closed", "destroyed"}
-                or scenario.get("active_operation_id") is not None
-            ):
-                continue
-            participants, artifacts = self._participant_maps(item)
-            changed = False
-            for participant_id, participant in participants.items():
-                changed |= self._settle_cleanup_pending_participant(
-                    state,
-                    item,
-                    participant,
-                    artifacts[participant_id],
-                )
-            if not changed:
-                continue
-            degraded = self._scenario_participant_fault_payload(
-                scenario,
-                participants,
-                evidence_context={"host_restart": True},
-            )
-            if degraded is None:
-                scenario["observed_state"] = {
-                    "closed": "closed",
-                    "destroyed": "destroying",
-                }[scenario["desired_state"]]
-                scenario["degraded"] = None
-            else:
-                scenario["observed_state"] = "degraded"
-                scenario["degraded"] = degraded
-            scenario["state_revision"] += 1
-            scenario["journal_head_sequence"] = state["journal_head_sequence"]
 
     @staticmethod
     def _workspace_is_ready(path: Path) -> bool:

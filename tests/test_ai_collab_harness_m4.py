@@ -1916,13 +1916,17 @@ def test_repair_accepts_startup_gate_stopped_binding_when_processes_are_absent(
         stage="startup-gate",
         exc=participant_driver.DriverError("runtime TUI did not become input-ready"),
         cleanup_outcome="unconfirmed",
+        process_observation={
+            "pid": 999_993,
+            "pgid": 999_993,
+            "identity_sha256": "3" * 64,
+        },
     )
 
     def process_absent(pid: int) -> dict[str, Any]:
         raise participant_driver.DriverError("owned process is absent")
 
     monkeypatch.setattr(participant_driver, "_process_observation", process_absent)
-    monkeypatch.setattr(participant_driver, "_matching_process_observations", lambda _: [])
 
     result = participant_driver.repair(payload)
 
@@ -1931,7 +1935,7 @@ def test_repair_accepts_startup_gate_stopped_binding_when_processes_are_absent(
     assert len(result["owned_resource_evidence_sha256"]) == 64
 
 
-def test_repair_rejects_unconfirmed_startup_gate_cleanup_with_matching_process(
+def test_repair_rejects_unconfirmed_startup_gate_cleanup_without_process_evidence(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
     private_root = tmp_path / "participant-private"
@@ -1964,11 +1968,53 @@ def test_repair_rejects_unconfirmed_startup_gate_cleanup_with_matching_process(
         raise participant_driver.DriverError("owned process is absent")
 
     monkeypatch.setattr(participant_driver, "_process_observation", process_absent)
-    monkeypatch.setattr(
-        participant_driver,
-        "_matching_process_observations",
-        lambda _: [{"pid": 42, "pgid": 42, "ps": "claude", "identity_sha256": "3" * 64}],
+
+    with pytest.raises(
+        participant_driver.DriverError, match="repair durable cleanup evidence differs"
+    ):
+        participant_driver.repair(payload)
+
+
+def test_repair_rejects_unconfirmed_startup_gate_cleanup_with_live_process(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    private_root = tmp_path / "participant-private"
+    private_root.mkdir(mode=0o700)
+    payload = _repair_payload(private_root)
+    participant_driver._write_private(  # noqa: SLF001
+        participant_driver._state_path(private_root),  # noqa: SLF001
+        {
+            "schema_version": 1,
+            "status": "stopped",
+            "scenario_id": payload["context"]["scenario_id"],
+            "participant_id": payload["context"]["participant_id"],
+            "participant_generation": 1,
+            "runtime_binding_id": "runtime-binding-repair",
+            "presentation_instance_id": "presentation-repair",
+            "pid": 999_994,
+            "pgid": 999_994,
+            "process_identity_sha256": "1" * 64,
+            "stop_evidence_sha256": "2" * 64,
+        },
     )
+    participant_driver._record_launch_failure(  # noqa: SLF001
+        private_root,
+        stage="startup-gate",
+        exc=participant_driver.DriverError("runtime TUI did not become input-ready"),
+        cleanup_outcome="unconfirmed",
+        process_observation={
+            "pid": 999_995,
+            "pgid": 999_995,
+            "identity_sha256": "3" * 64,
+        },
+    )
+
+    def process_observation(pid: int) -> dict[str, Any]:
+        if pid == 999_995:
+            return {"pid": pid, "pgid": pid, "ps": "claude", "identity_sha256": "3" * 64}
+        raise participant_driver.DriverError("owned process is absent")
+
+    monkeypatch.setattr(participant_driver, "_process_observation", process_observation)
 
     with pytest.raises(
         participant_driver.DriverError, match="repair startup cleanup is unconfirmed"
