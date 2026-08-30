@@ -3662,9 +3662,10 @@ def test_scenario_repair_settles_closed_cleanup_pending_without_resources(
         )["participants"][0]
         assert participant["observed_state"] == "stopped"
         assert participant["degraded"] is None
+        assert participant["journal_head_sequence"] == repaired["journal_head_sequence"]
 
 
-def test_scenario_close_treats_settled_cleanup_pending_as_inactive(
+def test_scenario_close_records_settled_cleanup_pending_without_observation(
     tmp_path: Path,
 ) -> None:
     state_root = tmp_path / "state"
@@ -3686,7 +3687,7 @@ def test_scenario_close_treats_settled_cleanup_pending_as_inactive(
         )
         assert replay is None
         assert executions is not None
-        assert executions[0]["kind"] == "inactive"
+        assert executions[0]["kind"] == "settled"
         assert host.participants is not None
 
         reports, cancelled = host.participants.close_scenario_participants(executions)
@@ -3703,6 +3704,43 @@ def test_scenario_close_treats_settled_cleanup_pending_as_inactive(
         assert result["scenario"]["observed_state"] == "closed"
         assert result["scenario"]["degraded"] is None
         assert result["close_summary"]["all_closed"] is True
+        report = result["close_summary"]["reports"][0]
+        assert report["classification"] == "settled_cleanup_pending"
+        assert report["command"] == "settled-cleanup-pending"
+        participant = client.list_participants(
+            project_instance_id=PROJECT_ID, scenario_id=SCENARIO_ID
+        )["participants"][0]
+        assert participant["journal_head_sequence"] == result["scenario"][
+            "journal_head_sequence"
+        ]
+
+
+def test_force_close_records_settled_cleanup_pending_without_observation(
+    tmp_path: Path,
+) -> None:
+    store = ScenarioStore(tmp_path / "state")
+    driver = FakeDriver()
+    coordinator = ParticipantCoordinator(store, driver)  # type: ignore[arg-type]
+
+    reports = coordinator.force_close_scenario_participants(
+        [
+            {
+                "participant_id": PARTICIPANT_ID,
+                "participant_generation": 1,
+                "participant_state_revision": 3,
+                "desired_state": "stopped",
+                "continuity_mode": "explicit_recreate",
+                "runtime_binding_id": None,
+                "presentation_binding_id": None,
+                "kind": "settled",
+            }
+        ]
+    )
+
+    assert reports[0]["classification"] == "settled_cleanup_pending"
+    assert reports[0]["closed"] is True
+    assert reports[0]["command"] == "settled-cleanup-pending"
+    assert driver.force_stop_calls == []
 
 
 def test_force_destroy_cleanup_rejects_unproven_live_binding(tmp_path: Path) -> None:

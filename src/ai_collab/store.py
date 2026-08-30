@@ -2016,13 +2016,11 @@ class ScenarioStore:
                         "presentation_binding_id"
                     ],
                 }
-                if (
-                    participant["observed_state"] in {"stopped", "detached"}
-                    or self._cleanup_pending_participant_is_settled(
-                        item, participant
-                    )
-                ):
+                if participant["observed_state"] in {"stopped", "detached"}:
                     executions.append({**common, "kind": "inactive"})
+                    continue
+                if self._cleanup_pending_participant_is_settled(item, participant):
+                    executions.append({**common, "kind": "settled"})
                     continue
                 runtime_ack = artifact.get("runtime_ready_ack")
                 if (
@@ -2149,6 +2147,7 @@ class ScenarioStore:
                 mutation_state="committed",
                 error_code=failure_code,
             )
+            changed_participant_ids: list[str] = []
             for report in reports:
                 participant = participants[report["participant_id"]]
                 artifact = artifacts[report["participant_id"]]
@@ -2215,9 +2214,7 @@ class ScenarioStore:
                         "repair_action": "participant.recover",
                     }
                 if participant["state_revision"] != participant_revision:
-                    participant["journal_head_sequence"] = state[
-                        "journal_head_sequence"
-                    ]
+                    changed_participant_ids.append(participant["participant_id"])
             restore_target_participant_ids = sorted(
                 report["participant_id"]
                 for report in reports
@@ -2269,6 +2266,10 @@ class ScenarioStore:
                 after_revision=record["state_revision"],
                 mutation_state="committed",
             )
+            for participant_id in changed_participant_ids:
+                participants[participant_id]["journal_head_sequence"] = state[
+                    "journal_head_sequence"
+                ]
             record["journal_head_sequence"] = state["journal_head_sequence"]
             request = state["requests"][request_id]
             request.pop("pending_external_result", None)
@@ -3589,17 +3590,16 @@ class ScenarioStore:
                 "destroyed": "destroying",
             }[record["desired_state"]]
             participants, artifacts = self._participant_maps(item)
+            settled_participant_ids: list[str] = []
             if record["desired_state"] in {"closed", "destroyed"}:
                 for participant_id, participant in participants.items():
                     artifact = artifacts.get(participant_id)
                     if not isinstance(artifact, dict):
                         continue
-                    self._settle_cleanup_pending_participant(
-                        state,
-                        item,
-                        participant,
-                        artifact,
-                    )
+                    if self._settle_cleanup_pending_participant(
+                        item, participant, artifact
+                    ):
+                        settled_participant_ids.append(participant_id)
             degraded = self._scenario_participant_fault_payload(
                 record,
                 participants,
@@ -3624,6 +3624,10 @@ class ScenarioStore:
                 after_revision=record["state_revision"],
                 mutation_state="committed",
             )
+            for participant_id in settled_participant_ids:
+                participants[participant_id]["journal_head_sequence"] = state[
+                    "journal_head_sequence"
+                ]
             record["journal_head_sequence"] = state["journal_head_sequence"]
             operation["state"] = "succeeded"
             operation["mutation_state"] = "committed"
@@ -6558,7 +6562,6 @@ class ScenarioStore:
     @classmethod
     def _settle_cleanup_pending_participant(
         cls,
-        state: dict[str, Any],
         item: dict[str, Any],
         participant: dict[str, Any],
         artifact: dict[str, Any],
@@ -6585,7 +6588,6 @@ class ScenarioStore:
             "presentation_create_ack",
         ):
             artifact[field] = None
-        participant["journal_head_sequence"] = state["journal_head_sequence"]
         return True
 
     @classmethod

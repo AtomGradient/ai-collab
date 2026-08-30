@@ -1042,6 +1042,28 @@ class ParticipantCoordinator:
                 if progress_callback is not None:
                     progress_callback(index + 1, total, execution["participant_id"])
                 continue
+            if execution["kind"] == "settled":
+                reports.append(
+                    {
+                        **base,
+                        "classification": "settled_cleanup_pending",
+                        "closed": True,
+                        "action_outcome_known": True,
+                        "drain_requested": False,
+                        "progress_event_count": 0,
+                        "runtime_binding_id": None,
+                        "presentation_binding_id": None,
+                        "owned_resource_evidence_sha256": canonical_json_sha256(
+                            {**base, "settled": True, "observation_available": False}
+                        ),
+                        "owner": execution["participant_id"],
+                        "command": "settled-cleanup-pending",
+                        "started_at_unix_ms": None,
+                    }
+                )
+                if progress_callback is not None:
+                    progress_callback(index + 1, total, execution["participant_id"])
+                continue
             if execution["kind"] == "unknown":
                 reports.append(
                     {
@@ -1159,6 +1181,20 @@ class ParticipantCoordinator:
                     "outcome_known": True,
                     "command": "inactive",
                     "evidence": {"inactive": True, "force_destroy": True},
+                    "runtime_binding": None,
+                    "presentation_binding": None,
+                }
+            elif execution["kind"] == "settled":
+                details = {
+                    "classification": "settled_cleanup_pending",
+                    "closed": True,
+                    "outcome_known": True,
+                    "command": "settled-cleanup-pending",
+                    "evidence": {
+                        "settled": True,
+                        "observation_available": False,
+                        "force_destroy": True,
+                    },
                     "runtime_binding": None,
                     "presentation_binding": None,
                 }

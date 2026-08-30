@@ -5072,20 +5072,38 @@ class HarnessHost:
             "continuity_mode": execution["continuity_mode"],
         }
         inactive = execution["kind"] == "inactive"
+        settled = execution["kind"] == "settled"
         return {
             **base,
-            "classification": "idle" if inactive else "unknown",
-            "closed": inactive,
+            "classification": (
+                "idle"
+                if inactive
+                else "settled_cleanup_pending"
+                if settled
+                else "unknown"
+            ),
+            "closed": inactive or settled,
             "action_outcome_known": True,
             "drain_requested": False,
             "progress_event_count": 0,
             "runtime_binding_id": None,
             "presentation_binding_id": None,
             "owned_resource_evidence_sha256": canonical_json_sha256(
-                {**base, "inactive": inactive, "observation_available": inactive}
+                {
+                    **base,
+                    "inactive": inactive,
+                    "settled": settled,
+                    "observation_available": inactive,
+                }
             ),
             "owner": execution["participant_id"],
-            "command": "inactive" if inactive else "unknown",
+            "command": (
+                "inactive"
+                if inactive
+                else "settled-cleanup-pending"
+                if settled
+                else "unknown"
+            ),
             "started_at_unix_ms": None,
         }
 
