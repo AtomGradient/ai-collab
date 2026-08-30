@@ -1078,6 +1078,10 @@ def _vendor_proof_path(private_root: Path) -> Path:
     return private_root / "vendor-session-proof.json"
 
 
+def _vendor_activity_path(private_root: Path) -> Path:
+    return private_root / "vendor-session-activity.json"
+
+
 def _collaboration_prompt_path(private_root: Path) -> Path:
     return private_root / "participant-collaboration-context.txt"
 
@@ -1224,25 +1228,50 @@ import sys
 payload = json.load(sys.stdin)
 provider = os.environ["AI_COLLAB_HARNESS_VENDOR_PROVIDER"]
 proof_path = Path(os.environ["AI_COLLAB_HARNESS_VENDOR_PROOF"])
+activity_path = Path(os.environ["AI_COLLAB_HARNESS_VENDOR_ACTIVITY"])
 context_path = Path(os.environ["AI_COLLAB_HARNESS_COLLABORATION_PROMPT"])
-proof = {
-    "schema_version": 1,
-    "provider": provider,
-    "session_id": payload.get("session_id"),
-    "source": payload.get("source"),
-}
-temporary = proof_path.with_name(
-    "." + proof_path.name + "." + str(os.getpid()) + ".hook.tmp"
+event_name = (
+    payload.get("hook_event_name")
+    or payload.get("hookEventName")
+    or ("SessionStart" if payload.get("source") is not None else None)
 )
-descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-    json.dump(proof, stream, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    stream.write("\\n")
-    stream.flush()
-    os.fsync(stream.fileno())
-os.replace(temporary, proof_path)
-os.chmod(proof_path, 0o600)
-if provider == "codex":
+if event_name == "SessionStart":
+    proof = {
+        "schema_version": 1,
+        "provider": provider,
+        "session_id": payload.get("session_id"),
+        "source": payload.get("source"),
+    }
+    temporary = proof_path.with_name(
+        "." + proof_path.name + "." + str(os.getpid()) + ".hook.tmp"
+    )
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+        json.dump(proof, stream, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        stream.write("\\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, proof_path)
+    os.chmod(proof_path, 0o600)
+elif event_name == "UserPromptSubmit":
+    activity = {
+        "schema_version": 1,
+        "provider": provider,
+        "session_id": payload.get("session_id"),
+        "source": event_name,
+    }
+    temporary = activity_path.with_name(
+        "." + activity_path.name + "." + str(os.getpid()) + ".hook.tmp"
+    )
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+        json.dump(activity, stream, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        stream.write("\\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, activity_path)
+    os.chmod(activity_path, 0o600)
+if provider == "codex" and event_name == "SessionStart":
     print(json.dumps({
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
@@ -1279,6 +1308,49 @@ def _stored_vendor_binding(
     ):
         raise DriverError("vendor session binding differs")
     return value
+
+
+def _vendor_session_activity_matches(
+    private_root: Path, provider: str, session_id: str
+) -> bool:
+    path = _vendor_activity_path(private_root)
+    if not path.exists():
+        return False
+    value = _read_private(path)
+    if (
+        set(value) != {"schema_version", "provider", "session_id", "source"}
+        or value["schema_version"] != STATE_SCHEMA_VERSION
+        or value["provider"] != provider
+        or value["source"] != "UserPromptSubmit"
+    ):
+        raise DriverError("vendor session activity differs")
+    try:
+        activity_session_id = str(uuid.UUID(value["session_id"]))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise DriverError("vendor session activity is invalid") from exc
+    return activity_session_id == session_id
+
+
+def _record_vendor_session_binding(
+    private_root: Path,
+    launch_spec: Mapping[str, Any],
+    provider: str,
+    session_id: str,
+) -> None:
+    continuity_binding_ref = launch_spec.get("continuity_binding_ref")
+    if not isinstance(continuity_binding_ref, str) or not continuity_binding_ref:
+        return
+    binding = {
+        "schema_version": STATE_SCHEMA_VERSION,
+        "provider": provider,
+        "continuity_binding_ref": continuity_binding_ref,
+        "vendor_session_id": session_id,
+    }
+    existing = _stored_vendor_binding(private_root, launch_spec, provider)
+    if existing is not None and existing != binding:
+        raise DriverError("vendor session binding differs")
+    if existing is None:
+        _write_private(_vendor_binding_path(private_root), binding)
 
 
 def _prepare_runtime_launch(
@@ -1344,6 +1416,17 @@ def _prepare_runtime_launch(
                             }
                         ],
                     }
+                ],
+                "UserPromptSubmit": [
+                    {
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": f"/usr/bin/python3 {shlex.quote(str(hook_path))}",
+                                "timeout": 10,
+                            }
+                        ],
+                    }
                 ]
             }
         }
@@ -1375,32 +1458,17 @@ def _verify_vendor_session(
         return None
     proof_path = _vendor_proof_path(private_root)
     if not proof_path.exists():
-        # Codex materializes a new interactive conversation, and therefore
-        # emits SessionStart, only when the employee submits the first prompt.
-        # A ready but untouched TUI has no conversation to restore yet.  An
-        # exact resume already names its private binding explicitly on argv;
-        # input-ready proves that the requested session loaded, while the next
-        # real prompt will still provide a strict hook proof for revalidation.
-        if expected_session_id is not None and (
-            resume_requested or provider == "claude"
-        ):
+        # A ready but untouched vendor TUI may not have materialized a
+        # conversation yet.  Do not persist a generated Claude --session-id as
+        # resumable until the SessionStart hook proves the vendor accepted it.
+        # For an existing binding, a successful --resume launch and input-ready
+        # TUI prove the already recorded session is loadable even if no new hook
+        # event fires until the first prompt.
+        if expected_session_id is not None and resume_requested:
             normalized_session_id = str(uuid.UUID(expected_session_id))
-            if launch_spec.get("continuity_mode") == "exact_resume":
-                binding = {
-                    "schema_version": STATE_SCHEMA_VERSION,
-                    "provider": provider,
-                    "continuity_binding_ref": launch_spec[
-                        "continuity_binding_ref"
-                    ],
-                    "vendor_session_id": normalized_session_id,
-                }
-                existing = _stored_vendor_binding(
-                    private_root, launch_spec, provider
-                )
-                if existing is not None and existing != binding:
-                    raise DriverError("vendor session binding differs")
-                if existing is None:
-                    _write_private(_vendor_binding_path(private_root), binding)
+            _record_vendor_session_binding(
+                private_root, launch_spec, provider, normalized_session_id
+            )
             return hashlib.sha256(
                 normalized_session_id.encode("utf-8")
             ).hexdigest()
@@ -1411,26 +1479,29 @@ def _verify_vendor_session(
         normalized_session_id = str(uuid.UUID(session_id))
     except (TypeError, ValueError, AttributeError) as exc:
         raise DriverError("vendor session identity is invalid") from exc
-    expected_source = "resume" if resume_requested else "startup"
+    expected_sources = (
+        {"resume", "compact"} if resume_requested else {"startup", "compact"}
+    )
     if (
         set(proof) != {"schema_version", "provider", "session_id", "source"}
         or proof["provider"] != provider
-        or proof["source"] != expected_source
+        or proof["source"] not in expected_sources
         or (expected_session_id is not None and session_id != expected_session_id)
     ):
         raise DriverError("vendor session lifecycle proof differs")
-    if launch_spec.get("continuity_mode") == "exact_resume":
-        binding = {
-            "schema_version": STATE_SCHEMA_VERSION,
-            "provider": provider,
-            "continuity_binding_ref": launch_spec["continuity_binding_ref"],
-            "vendor_session_id": normalized_session_id,
-        }
-        existing = _stored_vendor_binding(private_root, launch_spec, provider)
-        if existing is not None and existing != binding:
-            raise DriverError("vendor session binding differs")
-        if existing is None:
-            _write_private(_vendor_binding_path(private_root), binding)
+    source = proof["source"]
+    materialized = source in {"resume", "compact"} or _vendor_session_activity_matches(
+        private_root, provider, normalized_session_id
+    )
+    if provider == "codex" and source == "startup":
+        # Codex currently emits SessionStart only after the first real prompt,
+        # unlike Claude which emits it at TUI startup before a transcript exists.
+        materialized = True
+    if not materialized:
+        return None
+    _record_vendor_session_binding(
+        private_root, launch_spec, provider, normalized_session_id
+    )
     return hashlib.sha256(normalized_session_id.encode("utf-8")).hexdigest()
 
 
@@ -1511,6 +1582,9 @@ def _runtime_environment(
                 "AI_COLLAB_HARNESS_VENDOR_PROVIDER": provider,
                 "AI_COLLAB_HARNESS_VENDOR_PROOF": str(
                     _vendor_proof_path(private_root)
+                ),
+                "AI_COLLAB_HARNESS_VENDOR_ACTIVITY": str(
+                    _vendor_activity_path(private_root)
                 ),
                 "AI_COLLAB_HARNESS_COLLABORATION_PROMPT": str(
                     _collaboration_prompt_path(private_root)
@@ -3605,7 +3679,12 @@ def _close_binding(
 
 def close(payload: Mapping[str, Any]) -> dict[str, Any]:
     private_root, state, profile = _close_binding(payload)
-    _refresh_vendor_session_binding(private_root, payload["launch_spec"], state)
+    try:
+        vendor_session_identity_sha256 = _refresh_vendor_session_binding(
+            private_root, payload["launch_spec"], state
+        )
+    except DriverError:
+        vendor_session_identity_sha256 = None
     drain_timeout_ms = payload["drain_timeout_ms"]
     classification = "idle"
     drain_requested = False
@@ -3649,6 +3728,7 @@ def close(payload: Mapping[str, Any]) -> dict[str, Any]:
         "runtime_binding_id": state["runtime_binding_id"],
         "presentation_binding_id": state["presentation_instance_id"],
         "owned_resource_evidence_sha256": evidence,
+        "vendor_session_identity_sha256": vendor_session_identity_sha256,
         "owner": payload["context"]["participant_id"],
         "command": state["runtime_profile_ref"],
         "started_at_unix_ms": state.get("started_at_unix_ms"),
@@ -3673,9 +3753,17 @@ def stop(payload: Mapping[str, Any]) -> dict[str, Any]:
         return {
             "stopped": True,
             "owned_resource_evidence_sha256": state["stop_evidence_sha256"],
+            "vendor_session_identity_sha256": state.get(
+                "vendor_session_identity_sha256"
+            ),
         }
     _validate_process_state(state)
-    _refresh_vendor_session_binding(private_root, payload["launch_spec"], state)
+    try:
+        vendor_session_identity_sha256 = _refresh_vendor_session_binding(
+            private_root, payload["launch_spec"], state
+        )
+    except DriverError:
+        vendor_session_identity_sha256 = None
     if state.get("interaction_mode") == "tui":
         module = _ensure_iterm_module(private_root)
         foreground_pid = asyncio.run(_iterm_close_async(module, state))
@@ -3696,7 +3784,11 @@ def stop(payload: Mapping[str, Any]) -> dict[str, Any]:
     state["status"] = "stopped"
     state["stop_evidence_sha256"] = evidence
     _write_private(state_path, state)
-    return {"stopped": True, "owned_resource_evidence_sha256": evidence}
+    return {
+        "stopped": True,
+        "owned_resource_evidence_sha256": evidence,
+        "vendor_session_identity_sha256": vendor_session_identity_sha256,
+    }
 
 
 def _owned_process_is_absent(state: Mapping[str, Any]) -> bool:

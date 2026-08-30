@@ -312,6 +312,7 @@ class FakeDriver:
         self.support_exact_resume = False
         self.pending_vendor_binding = False
         self.always_pending_vendor_binding = False
+        self.close_vendor_session_identity_sha256: str | None = None
         self.start_calls = 0
         self.start_generations: list[int] = []
         self.start_participant_clients: list[dict[str, str]] = []
@@ -651,12 +652,17 @@ class FakeDriver:
                 )
             self.running_bindings.discard(binding_id)
             self.running = bool(self.running_bindings)
-            return {
+            result = {
                 "stopped": True,
                 "owned_resource_evidence_sha256": canonical_json_sha256(
                     {"stopped": True}
                 ),
             }
+            if self.close_vendor_session_identity_sha256 is not None:
+                result["vendor_session_identity_sha256"] = (
+                    self.close_vendor_session_identity_sha256
+                )
+            return result
         if operation == "close":
             self.close_calls += 1
             self.close_started.set()
@@ -669,7 +675,7 @@ class FakeDriver:
                     runtime_ack["binding"]["runtime_binding_id"]
                 )
                 self.running = bool(self.running_bindings)
-            return {
+            result = {
                 "classification": mode,
                 "closed": closed,
                 "action_outcome_known": True,
@@ -686,6 +692,11 @@ class FakeDriver:
                 "command": payload["launch_spec"]["runtime_profile_ref"],
                 "started_at_unix_ms": 1_786_435_200_000,
             }
+            if self.close_vendor_session_identity_sha256 is not None:
+                result["vendor_session_identity_sha256"] = (
+                    self.close_vendor_session_identity_sha256
+                )
+            return result
         raise AssertionError(operation)
 
 
@@ -2449,15 +2460,19 @@ def test_scenario_resume_rejects_target_generation_drift(tmp_path: Path) -> None
         assert driver.start_calls == 1
 
 
-@pytest.mark.parametrize("resume_binding_present", [True, False])
+@pytest.mark.parametrize(
+    ("close_binding_present", "resume_binding_present"),
+    [(True, True), (True, False), (False, True)],
+)
 def test_scenario_resume_reports_optional_exact_resume_capability(
     tmp_path: Path,
+    close_binding_present: bool,
     resume_binding_present: bool,
 ) -> None:
     state_root = tmp_path / "state"
     with running_host(state_root) as (_, client, driver):
         driver.support_exact_resume = True
-        driver.pending_vendor_binding = True
+        driver.pending_vendor_binding = not close_binding_present
         created = client.create_scenario(
             project_instance_id=PROJECT_ID,
             scenario_id=SCENARIO_ID,
@@ -2485,14 +2500,29 @@ def test_scenario_resume_reports_optional_exact_resume_capability(
             participant_id=PARTICIPANT_ID,
             request_prefix="exact-resume",
         )
-        closed = client.close_scenario(
+        closed_result = client.close_scenario(
             project_instance_id=PROJECT_ID,
             scenario_id=SCENARIO_ID,
             scenario_generation=opened["scenario_generation"],
             scenario_state_revision=opened["state_revision"],
             drain_timeout_ms=2_000,
             request_id="exact-resume-close",
-        )["scenario"]
+        )
+        closed = closed_result["scenario"]
+        restore_target = closed_result["close_summary"]["restore_targets"][0]
+        if close_binding_present:
+            assert restore_target == {
+                "participant_id": PARTICIPANT_ID,
+                "participant_generation": 1,
+                "continuity_mode": "exact_resume",
+                "vendor_session_identity_sha256": SESSION_DIGEST,
+            }
+        else:
+            assert restore_target == {
+                "participant_id": PARTICIPANT_ID,
+                "participant_generation": 1,
+                "continuity_mode": "explicit_recreate",
+            }
 
         driver.always_pending_vendor_binding = not resume_binding_present
 
@@ -2504,15 +2534,91 @@ def test_scenario_resume_reports_optional_exact_resume_capability(
             request_id="exact-resume-open",
         )
         summary = resumed["resume_summary"]
-        assert summary["vendor_session_identity_required"] is True
-        assert summary["exact_resumed_count"] == int(resume_binding_present)
-        assert summary["recreated_count"] == 0
-        assert summary["reports"][0]["outcome"] == (
-            "exact_resumed" if resume_binding_present else "failed"
+        assert summary["vendor_session_identity_required"] is close_binding_present
+        assert summary["exact_resumed_count"] == int(
+            close_binding_present and resume_binding_present
         )
+        assert summary["recreated_count"] == int(not close_binding_present)
+        expected_outcome = (
+            "recreated"
+            if not close_binding_present
+            else "exact_resumed"
+            if resume_binding_present
+            else "failed"
+        )
+        assert summary["reports"][0]["outcome"] == expected_outcome
         assert summary["reports"][0]["repair_required"] is (
-            not resume_binding_present
+            close_binding_present and not resume_binding_present
         )
+
+
+def test_scenario_resume_uses_vendor_identity_discovered_during_close(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    with running_host(state_root) as (_, client, driver):
+        driver.support_exact_resume = True
+        driver.pending_vendor_binding = True
+        created = client.create_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            project_binding_digest=PROJECT_DIGEST,
+            request_id="close-discovered-create",
+        )["scenario"]
+        added = _add_test_participant(
+            client,
+            scenario=created,
+            participant_id=PARTICIPANT_ID,
+            request_prefix="close-discovered",
+            launch_spec=_launch_spec(continuity_mode="exact_resume"),
+        )
+        opened = client.open_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=created["scenario_generation"],
+            scenario_state_revision=created["state_revision"],
+            request_id="close-discovered-open-initial",
+        )["scenario"]
+        _start_test_participant(
+            client,
+            scenario=opened,
+            participant=added,
+            participant_id=PARTICIPANT_ID,
+            request_prefix="close-discovered",
+        )
+
+        driver.close_vendor_session_identity_sha256 = SESSION_DIGEST
+        closed_result = client.close_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=opened["scenario_generation"],
+            scenario_state_revision=opened["state_revision"],
+            drain_timeout_ms=2_000,
+            request_id="close-discovered-close",
+        )
+        closed = closed_result["scenario"]
+        assert closed_result["close_summary"]["restore_targets"] == [
+            {
+                "participant_id": PARTICIPANT_ID,
+                "participant_generation": 1,
+                "continuity_mode": "exact_resume",
+                "vendor_session_identity_sha256": SESSION_DIGEST,
+            }
+        ]
+
+        resumed = client.open_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=closed["scenario_generation"],
+            scenario_state_revision=closed["state_revision"],
+            request_id="close-discovered-open",
+        )
+        summary = resumed["resume_summary"]
+        assert summary["vendor_session_identity_required"] is True
+        assert summary["exact_resumed_count"] == 1
+        assert summary["recreated_count"] == 0
+        assert summary["reports"][0]["outcome"] == "exact_resumed"
+        assert summary["reports"][0]["repair_required"] is False
 
 
 def test_environment_probe_round_trips_validated_observations(

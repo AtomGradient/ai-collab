@@ -2739,11 +2739,20 @@ def test_vendor_session_hook_captures_and_reuses_exact_identity(
         expected_session_id,
         False,
     )
-    assert initial_identity_digest == (
-        None
-        if provider == "codex"
-        else hashlib.sha256(session_id.encode()).hexdigest()
+    assert initial_identity_digest is None
+    unproven_argv, _, unproven_session_id, unproven_resumed = (
+        participant_driver._prepare_runtime_launch(  # noqa: SLF001
+            private_root, launch_spec, participant_client
+        )
     )
+    assert unproven_resumed is False
+    if provider == "codex":
+        assert unproven_session_id is None
+        assert "resume" not in unproven_argv
+    else:
+        assert unproven_session_id is not None
+        assert unproven_argv[-2:] == ("--session-id", unproven_session_id)
+        assert "--resume" not in unproven_argv
     environment = participant_driver._runtime_environment(  # noqa: SLF001
         launch_spec, participant_client, private_root
     )
@@ -2777,6 +2786,31 @@ def test_vendor_session_hook_captures_and_reuses_exact_identity(
     identity_digest = participant_driver._refresh_vendor_session_binding(  # noqa: SLF001
         private_root, launch_spec, state
     )
+    if provider == "claude":
+        assert identity_digest is None
+        assert state["vendor_session_identity_sha256"] is None
+        activity = subprocess.run(
+            (
+                sys.executable,
+                str(participant_driver._vendor_hook_path(private_root)),  # noqa: SLF001
+            ),
+            input=json.dumps(
+                {
+                    "hook_event_name": "UserPromptSubmit",
+                    "session_id": session_id,
+                }
+            ),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=environment,
+            check=False,
+        )
+        assert activity.returncode == 0, activity.stderr
+        assert activity.stdout == ""
+        identity_digest = participant_driver._refresh_vendor_session_binding(  # noqa: SLF001
+            private_root, launch_spec, state
+        )
     assert identity_digest == hashlib.sha256(session_id.encode()).hexdigest()
     assert state["vendor_session_identity_sha256"] == identity_digest
 

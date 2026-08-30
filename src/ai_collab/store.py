@@ -2138,6 +2138,56 @@ class ScenarioStore:
                 if cancelled
                 else "lifecycle.close-incomplete"
             )
+            def restore_target(report: dict[str, Any]) -> dict[str, Any]:
+                participant = participants[report["participant_id"]]
+                artifact = artifacts[report["participant_id"]]
+                continuity_mode = report.get(
+                    "continuity_mode", artifact["launch_spec"]["continuity_mode"]
+                )
+                vendor_identity = None
+                if continuity_mode == "exact_resume":
+                    report_identity = report.get("vendor_session_identity_sha256")
+                    if self._sha256(report_identity):
+                        vendor_identity = report_identity
+                    if vendor_identity is None:
+                        runtime_ack = artifact.get("runtime_ready_ack")
+                        binding = (
+                            runtime_ack.get("binding")
+                            if isinstance(runtime_ack, dict)
+                            else None
+                        )
+                        if isinstance(binding, dict) and self._sha256(
+                            binding.get("vendor_session_identity_sha256")
+                        ):
+                            vendor_identity = binding[
+                                "vendor_session_identity_sha256"
+                            ]
+                    if vendor_identity is None:
+                        continuity_mode = "explicit_recreate"
+                target = {
+                    "participant_id": report["participant_id"],
+                    "participant_generation": report.get(
+                        "participant_generation",
+                        participant["participant_generation"],
+                    ),
+                    "continuity_mode": continuity_mode,
+                }
+                if vendor_identity is not None:
+                    target["vendor_session_identity_sha256"] = vendor_identity
+                return target
+
+            restore_targets = [
+                restore_target(report)
+                for report in reports
+                if report.get(
+                    "desired_state_before_close",
+                    participants[report["participant_id"]]["desired_state"],
+                )
+                == "running"
+            ]
+            restore_target_participant_ids = sorted(
+                target["participant_id"] for target in restore_targets
+            )
             self._append_operation_event(
                 state,
                 operation,
@@ -2215,20 +2265,6 @@ class ScenarioStore:
                     }
                 if participant["state_revision"] != participant_revision:
                     changed_participant_ids.append(participant["participant_id"])
-            restore_target_participant_ids = sorted(
-                report["participant_id"]
-                for report in reports
-                if report["desired_state_before_close"] == "running"
-            )
-            restore_targets = [
-                {
-                    "participant_id": report["participant_id"],
-                    "participant_generation": report["participant_generation"],
-                    "continuity_mode": report["continuity_mode"],
-                }
-                for report in reports
-                if report["desired_state_before_close"] == "running"
-            ]
             close_summary = {
                 "schema_version": 1,
                 "operation_id": operation_id,
@@ -2413,9 +2449,14 @@ class ScenarioStore:
                     "scenario.restore-plan-invalid",
                     "Scenario restore plan is unavailable",
                 )
-            return sorted(
-                copy.deepcopy(declared), key=lambda value: value["participant_id"]
-            )
+            normalized = copy.deepcopy(declared)
+            for target in normalized:
+                if target["continuity_mode"] == "exact_resume" and not self._sha256(
+                    target.get("vendor_session_identity_sha256")
+                ):
+                    target["continuity_mode"] = "explicit_recreate"
+                    target.pop("vendor_session_identity_sha256", None)
+            return sorted(normalized, key=lambda value: value["participant_id"])
 
     def pending_scenario_resume_requests(self) -> list[dict[str, Any]]:
         """Return compound opens whose participant restore summary is unfinished."""
@@ -4785,9 +4826,18 @@ class ScenarioStore:
         scenario_state_revision: int,
         participant_generation: int,
         participant_state_revision: int,
+        start_continuity_mode: str | None = None,
     ) -> tuple[str, dict[str, Any] | None, dict[str, Any] | None]:
         key = self._scenario_key(project_instance_id, scenario_id)
         with self._lock:
+            if start_continuity_mode is not None and start_continuity_mode not in {
+                "explicit_recreate",
+                "exact_resume",
+            }:
+                raise StoreError(
+                    "participant.invalid-transition",
+                    "participant start continuity mode differs",
+                )
             state = self._read_state()
             previous = self._previous_request(state, request_id, request_digest)
             if previous is not None:
@@ -4823,6 +4873,9 @@ class ScenarioStore:
                 raise StoreError(
                     "participant.invalid-transition", "participant is not stopped"
                 )
+            launch_spec = copy.deepcopy(artifact["launch_spec"])
+            if start_continuity_mode is not None:
+                launch_spec["continuity_mode"] = start_continuity_mode
             operation = self._new_participant_operation(
                 state,
                 request_id=request_id,
@@ -4836,7 +4889,7 @@ class ScenarioStore:
                 participant_generation=participant_generation,
                 participant_state_revision=participant_state_revision,
                 desired_state_after="running",
-                requested_continuity_mode=artifact["launch_spec"]["continuity_mode"],
+                requested_continuity_mode=launch_spec["continuity_mode"],
                 resulting_participant_generation=participant_generation,
             )
             record["desired_state"] = "running"
@@ -4885,7 +4938,7 @@ class ScenarioStore:
                         "capability_snapshot_digest"
                     ],
                 },
-                "launch_spec": copy.deepcopy(artifact["launch_spec"]),
+                "launch_spec": launch_spec,
                 "resolved_driver": copy.deepcopy(artifact["resolved_driver"]),
                 "private_root": str(
                     self.participant_private_path(

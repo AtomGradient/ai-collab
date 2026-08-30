@@ -797,6 +797,7 @@ class HarnessHost:
                     participant_generation=participant["participant_generation"],
                     participant_state_revision=participant["state_revision"],
                     participant_client=participant_client,
+                    start_continuity_mode=planned["continuity_mode"],
                     require_bound_vendor_identity=(
                         planned["continuity_mode"] == "exact_resume"
                     ),

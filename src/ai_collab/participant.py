@@ -1601,11 +1601,18 @@ class ParticipantCoordinator:
 
     @classmethod
     def _validate_stop_result(cls, stopped: Any) -> None:
+        fields = {"stopped", "owned_resource_evidence_sha256"}
+        optional_fields = {"vendor_session_identity_sha256"}
         if (
             not isinstance(stopped, dict)
-            or set(stopped) != {"stopped", "owned_resource_evidence_sha256"}
+            or not fields.issubset(stopped)
+            or set(stopped) - fields - optional_fields
             or stopped["stopped"] is not True
             or not cls._sha256(stopped["owned_resource_evidence_sha256"])
+            or (
+                stopped.get("vendor_session_identity_sha256") is not None
+                and not cls._sha256(stopped["vendor_session_identity_sha256"])
+            )
         ):
             raise ParticipantError(
                 "driver.invalid-reply", "participant stop reply is invalid"
@@ -1869,6 +1876,7 @@ class ParticipantCoordinator:
             "command",
             "started_at_unix_ms",
         }
+        optional_fields = {"vendor_session_identity_sha256"}
         runtime_ack = payload["runtime_ready_ack"]["binding"]
         presentation_ack = payload["presentation_create_ack"]
         expected_presentation = (
@@ -1878,7 +1886,8 @@ class ParticipantCoordinator:
         )
         if (
             not isinstance(result, dict)
-            or set(result) != fields
+            or not fields.issubset(result)
+            or set(result) - fields - optional_fields
             or result["classification"]
             not in {"idle", "busy", "requested", "timeout", "unknown"}
             or not isinstance(result["closed"], bool)
@@ -1901,6 +1910,10 @@ class ParticipantCoordinator:
                     or isinstance(result["started_at_unix_ms"], bool)
                     or result["started_at_unix_ms"] < 0
                 )
+            )
+            or (
+                result.get("vendor_session_identity_sha256") is not None
+                and not cls._sha256(result["vendor_session_identity_sha256"])
             )
         ):
             raise ParticipantError(
