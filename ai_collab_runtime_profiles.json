@@ -59,9 +59,9 @@
       },
       "startup_gate": {
         "scope": "harness_verified_workspace",
-        "prompt_pattern": "(?s)Accessing\\s+workspace:.*Quick\\s+safety\\s+check:.*1\\.\\s+Yes,\\s+I\\s+trust\\s+this\\s+folder.*2\\.\\s+No,\\s+exit",
+        "prompt_pattern": "(?s)Accessing\\s+workspace:.*Quick\\s+safety\\s+check:.*\\n[ \\t]*❯[ \\t]+No,\\s+exit[ \\t]*\\n[ \\t]+Yes,\\s+I\\s+trust\\s+this\\s+folder[ \\t]*\\n\\s*Enter\\s+to\\s+confirm",
         "ready_pattern": "(?m)^\\s*❯\\s*$",
-        "confirm_sequence": ["1", "\r"],
+        "confirm_sequence": ["\u001b[B", "\r"],
         "requires_workspace_path": true,
         "timeout_seconds": 180
       }

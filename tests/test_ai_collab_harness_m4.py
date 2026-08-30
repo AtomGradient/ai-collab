@@ -1619,6 +1619,18 @@ def test_startup_gate_timeout_validation_allows_slow_vendor_ready_screens() -> N
     assert participant_driver._valid_startup_gate(gate) is False  # noqa: SLF001
 
 
+def test_startup_gate_validation_rejects_unknown_confirmation_keys() -> None:
+    gate = copy.deepcopy(
+        participant_driver._runtime_profiles()["runtime-profile.claude"][  # noqa: SLF001
+            "startup_gate"
+        ]
+    )
+
+    assert participant_driver._valid_startup_gate(gate) is True  # noqa: SLF001
+    gate["confirm_sequence"] = ["yes", "\r"]
+    assert participant_driver._valid_startup_gate(gate) is False  # noqa: SLF001
+
+
 def test_launch_failure_diagnostic_is_bounded_and_owner_private(
     tmp_path: Path,
 ) -> None:
@@ -2131,8 +2143,17 @@ def test_startup_trust_gate_accepts_only_exact_workspace_and_waits_for_ready(
         "runtime-profile.claude"
     ]
     prompt = (
-        f"Accessing workspace:\n{workspace}\nQuick safety check: Is this trusted?\n"
-        "1. Yes, I trust this folder\n2. No, exit"
+        "────────────────────────────────────────────────────────────────────────────────\n"
+        " Accessing workspace:\n\n"
+        f" {workspace}\n\n"
+        " Quick safety check: Is this a project you created or one you trust? (Like your\n"
+        " own code, a well-known open source project, or work from your team). If not,\n"
+        " take a moment to review what's in this folder first.\n\n"
+        " Claude Code'll be able to read, edit, and execute files here.\n\n"
+        " Security guide\n\n"
+        " ❯ No, exit\n"
+        "   Yes, I trust this folder\n\n"
+        " Enter to confirm · Esc to cancel"
     )
     ready = "Claude Code v2.1.227\n❯"
     session = _StartupSession(
@@ -2145,12 +2166,44 @@ def test_startup_trust_gate_accepts_only_exact_workspace_and_waits_for_ready(
             session, profile, workspace, 1234
         )
     )
-    assert session.sent == [("1", True), ("\r", True)]
+    assert session.sent == [("\x1b[B", True), ("\r", True)]
     assert evidence["outcome"] == "accepted"
     assert evidence["scope"] == "harness_verified_workspace"
     assert evidence["workspace_identity_sha256"] == participant_driver.digest(
         {"workspace_path": str(workspace.resolve())}
     )
+
+
+def test_claude_trust_prompt_pattern_requires_current_menu_shape() -> None:
+    gate = participant_driver._runtime_profiles()["runtime-profile.claude"][  # noqa: SLF001
+        "startup_gate"
+    ]
+    screen = (
+        " Accessing workspace:\n\n"
+        " /Users/atomgradient/Documents/Scenarios/workspace/bundle/EdgeStudio\n\n"
+        " Quick safety check: Is this a project you created or one you trust?\n\n"
+        " Security guide\n\n"
+        " ❯ No, exit\n"
+        "   Yes, I trust this folder\n\n"
+        " Enter to confirm · Esc to cancel"
+    )
+
+    assert re.search(gate["prompt_pattern"], screen) is not None
+    assert re.search(
+        gate["prompt_pattern"],
+        screen.replace("❯ No, exit\n   Yes", "  No, exit\n ❯ Yes"),
+    ) is None
+    assert re.search(
+        gate["prompt_pattern"],
+        screen.replace("❯ No, exit\n   Yes", "❯ Yes\n   No, exit"),
+    ) is None
+    assert re.search(
+        gate["prompt_pattern"],
+        screen.replace(
+            "   Yes, I trust this folder",
+            "   Yes, I trust this folder\n   Maybe later",
+        ),
+    ) is None
 
 
 def test_startup_trust_gate_fails_closed_on_workspace_mismatch(
