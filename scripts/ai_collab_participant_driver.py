@@ -1605,6 +1605,54 @@ def _process_observation(pid: int) -> dict[str, Any]:
     return {**value, "identity_sha256": digest(value)}
 
 
+def _matching_process_group_observations(
+    process_group_id: int, process_match: str
+) -> list[dict[str, Any]]:
+    if (
+        not isinstance(process_group_id, int)
+        or isinstance(process_group_id, bool)
+        or process_group_id <= 1
+    ):
+        raise DriverError("process identity is invalid")
+    completed = subprocess.run(
+        ("/bin/ps", "-g", str(process_group_id), "-o", "pid="),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        timeout=3,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise DriverError("owned process relationship is unavailable")
+    observations: list[dict[str, Any]] = []
+    for field in completed.stdout.split():
+        try:
+            pid = int(field)
+            observation = _process_observation(pid)
+        except (ValueError, DriverError):
+            continue
+        if (
+            observation["pgid"] == process_group_id
+            and process_match in observation["ps"]
+        ):
+            observations.append(observation)
+    return sorted(observations, key=lambda value: value["pid"])
+
+
+def _stable_job_observation(
+    observation: Mapping[str, Any], process_match: str
+) -> Mapping[str, Any]:
+    candidates = _matching_process_group_observations(
+        observation["pgid"], process_match
+    )
+    for candidate in candidates:
+        if candidate["pid"] == candidate["pgid"]:
+            return candidate
+    if candidates:
+        return candidates[0]
+    return observation
+
+
 def _process_relationship(pid: int) -> dict[str, int]:
     if not isinstance(pid, int) or isinstance(pid, bool) or pid < 2:
         raise DriverError("owned process relationship is invalid")
@@ -2115,7 +2163,8 @@ async def _wait_job_pid(
             pid = 0
         else:
             if process_match in observation["ps"]:
-                return pid
+                stable = _stable_job_observation(observation, process_match)
+                return int(stable["pid"])
         if asyncio.get_running_loop().time() >= deadline:
             raise DriverError("iTerm runtime process did not become ready")
         await asyncio.sleep(0.05)

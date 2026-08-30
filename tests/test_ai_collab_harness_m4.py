@@ -882,6 +882,55 @@ def test_foreground_job_rejects_same_group_non_descendant(monkeypatch: Any) -> N
         raise AssertionError("same-group non-descendant foreground job was accepted")
 
 
+class _JobPidSession:
+    async def async_get_variable(self, name: str) -> str:
+        assert name == "jobPid"
+        return "9653"
+
+
+def test_wait_job_pid_prefers_stable_process_group_leader(
+    monkeypatch: Any,
+) -> None:
+    observations = {
+        9625: {
+            "pid": 9625,
+            "pgid": 9625,
+            "ps": "/opt/homebrew/bin/claude --session-id existing",
+            "identity_sha256": "a" * 64,
+        },
+        9653: {
+            "pid": 9653,
+            "pgid": 9625,
+            "ps": "/opt/homebrew/bin/claude transient-helper",
+            "identity_sha256": "b" * 64,
+        },
+    }
+    monkeypatch.setattr(
+        participant_driver,
+        "_process_observation",
+        lambda pid: observations[pid],
+    )
+    monkeypatch.setattr(
+        participant_driver,
+        "_matching_process_group_observations",
+        lambda pgid, process_match: [
+            value
+            for value in observations.values()
+            if value["pgid"] == pgid and process_match in value["ps"]
+        ],
+    )
+
+    pid = asyncio.run(
+        participant_driver._wait_job_pid(  # noqa: SLF001
+            _JobPidSession(),
+            "claude",
+            wait_seconds=0.1,
+        )
+    )
+
+    assert pid == 9625
+
+
 def test_sender_accepts_owned_descendant_in_new_process_group(
     monkeypatch: Any,
 ) -> None:
