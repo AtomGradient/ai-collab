@@ -733,6 +733,7 @@ def _launch_reason_code(stage: str, exc: BaseException) -> str:
             "iterm.window-identity-ambiguous"
         ),
         "iTerm owner marker round trip differed": "iterm.owner-marker-drift",
+        "owned process observation is unavailable": "process.observation-unavailable",
     }
     if _retryable_iterm_connection_error(exc):
         return "iterm.connection-closed"
@@ -779,6 +780,7 @@ def _sender_auth_reason_code(stage: str, exc: BaseException) -> str:
     known = {
         "owned process is absent": "process.absent",
         "owned process binding drifted": "process.binding-drift",
+        "owned process observation is unavailable": "process.observation-unavailable",
         "owned process relationship is unavailable": "process.relationship-unavailable",
         "owned process relationship is invalid": "process.relationship-invalid",
         "participant sender process is not an owned descendant": (

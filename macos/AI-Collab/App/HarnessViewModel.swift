@@ -520,8 +520,13 @@ final class HarnessViewModel: ObservableObject {
         case "workspace.prepare":
             await prepareWorkspace()
         case "participant.recover":
-            if let participant = participants.filter(\.canRecover).only {
+            let recoverable = participants.filter(\.canRecover)
+            guard !recoverable.isEmpty else {
+                return refuse(.participantAction, S.Msg.noColleaguesNeedRecovery)
+            }
+            for participant in recoverable {
                 await recoverParticipant(participant)
+                if actionableError != nil { break }
             }
         case "system-settings.automation":
             if let url = URL(
@@ -535,7 +540,6 @@ final class HarnessViewModel: ObservableObject {
             openIterm2()
         case "iterm-presentation.enable-python-api":
             copyItermPythonAPISetupCommand()
-            openIterm2()
             noteSuccess(S.Msg.itermPythonAPICommandCopied)
         case "iterm-presentation.restart-after-python-api",
              "iterm-presentation.reset-private-api-socket":
@@ -560,10 +564,13 @@ final class HarnessViewModel: ObservableObject {
 
     private func copyItermPythonAPISetupCommand() {
         let command = """
-        osascript -e 'tell application id "com.googlecode.iterm2" to quit'
-        defaults write com.googlecode.iterm2 EnableAPIServer -bool true
-        defaults write com.googlecode.iterm2 NoSyncEnableAPIServer -bool true
-        open -b com.googlecode.iterm2
+        /usr/bin/nohup /bin/zsh <<'AICOLLAB_ENABLE_ITERM_API' >/dev/null 2>&1 &
+        /usr/bin/osascript -e 'tell application id "com.googlecode.iterm2" to quit'
+        /bin/sleep 2
+        /usr/bin/defaults write com.googlecode.iterm2 EnableAPIServer -bool true
+        /usr/bin/defaults write com.googlecode.iterm2 NoSyncEnableAPIServer -bool true
+        /usr/bin/open -b com.googlecode.iterm2
+        AICOLLAB_ENABLE_ITERM_API
         """
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(command, forType: .string)
@@ -666,7 +673,7 @@ final class HarnessViewModel: ObservableObject {
              "iterm-presentation.reset-private-api-socket":
             true
         case "participant.recover":
-            participants.filter(\.canRecover).count == 1
+            participants.filter(\.canRecover).count >= 1
         default:
             false
         }
@@ -1481,7 +1488,7 @@ final class HarnessViewModel: ObservableObject {
         activity: @autoclosure @escaping () -> String,
         success: @autoclosure @escaping () -> String,
         extraPayload: [String: Any] = [:],
-        responseTimeoutSeconds: Int = 360
+        responseTimeoutSeconds: Int = 480
     ) async {
         guard let project = selectedProject, let scenario = selectedScenario else {
             return refuse(.participantAction, S.Msg.selectRoomFirst)

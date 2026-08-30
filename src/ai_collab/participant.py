@@ -22,7 +22,7 @@ from .workspace import ProjectAdapterCommand, WorkspaceError
 
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 NAMESPACED_RE = re.compile(r"^[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*)+$")
-PARTICIPANT_START_TIMEOUT_SECONDS = 300.0
+PARTICIPANT_START_TIMEOUT_SECONDS = 420.0
 SUPERVISION_SCHEMA_VERSION = 1
 SUPERVISION_TIMEOUT_SECONDS = 5.0
 RESOURCE_CLASSES = {

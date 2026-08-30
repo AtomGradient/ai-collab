@@ -4260,7 +4260,7 @@ def test_scenario_repair_keeps_unrecovered_participant_fault_repairable(
         assert final["degraded"] is None
 
 
-def test_scenario_repair_does_not_clear_closed_participant_fault(
+def test_scenario_repair_keeps_closed_participant_fault_force_destroyable(
     tmp_path: Path,
 ) -> None:
     state_root = tmp_path / "state"
@@ -4326,7 +4326,7 @@ def test_scenario_repair_does_not_clear_closed_participant_fault(
         assert repaired["desired_state"] == "closed"
         assert repaired["observed_state"] == "degraded"
         assert repaired["degraded"]["reason"] == "participant_fault"
-        assert repaired["degraded"]["repair_action"] == "scenario.repair"
+        assert repaired["degraded"]["repair_action"] == "scenario.force-destroy"
 
 
 def test_participant_recover_failure_stays_degraded_without_generation_rotation(

@@ -7159,7 +7159,7 @@ class ScenarioStore:
             "repair_action": (
                 "participant.recover"
                 if scenario.get("desired_state") == "running"
-                else "scenario.repair"
+                else "scenario.force-destroy"
             ),
         }
 

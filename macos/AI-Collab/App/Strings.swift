@@ -652,6 +652,9 @@ enum S {
         static func nothingToRecover(_ id: String) -> String {
             t("\(id) has nothing to recover.", "\(id) 没有需要找回的内容。")
         }
+        static var noColleaguesNeedRecovery: String {
+            t("No AI colleagues need recovery.", "没有需要找回的 AI 同事。")
+        }
         static func noProcessToForceStop(_ id: String) -> String {
             t(
                 "\(id) has no Harness-owned process to force stop.",
@@ -779,9 +782,9 @@ enum S {
         static var workspaceReady: String { t("Workspace is ready.", "工作区已就绪。") }
         static var itermPythonAPICommandCopied: String {
             t(
-                "Copied iTerm2 Python API setup commands. Paste them into Terminal "
+                "Copied iTerm2 Python API setup command. Paste it into Terminal.app "
                     + "if Settings is not available, then run preflight again.",
-                "已复制 iTerm2 Python API 设置命令。如果无法从设置里开启，请粘贴到终端执行，"
+                "已复制 iTerm2 Python API 设置命令。如果无法从设置里开启，请粘贴到 Terminal.app 执行，"
                     + "然后重新运行预检。"
             )
         }
@@ -1090,6 +1093,7 @@ enum S {
                 return t("Free disk space, then prepare again", "清理磁盘空间后重新准备")
             case "participant.recover": return t("Recover AI Colleague", "找回 AI 同事")
             case "scenario.repair": return t("Use Repair Task Room Below", "使用下方的修复任务房间")
+            case "scenario.force-destroy": return t("Force Delete Task Room", "强制删除任务房间")
             case "system-settings.automation":
                 return t("Open Automation Settings", "打开自动化设置")
             case "presentation.permission-request":

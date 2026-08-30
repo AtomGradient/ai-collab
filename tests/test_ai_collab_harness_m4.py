@@ -685,6 +685,19 @@ def test_tui_launch_preflight_fails_fast_with_actionable_reason(
     )
 
 
+def test_process_observation_unavailable_has_specific_reason_code() -> None:
+    error = participant_driver.DriverError("owned process observation is unavailable")
+
+    assert (
+        participant_driver._launch_reason_code("initial-process", error)  # noqa: SLF001
+        == "process.observation-unavailable"
+    )
+    assert (
+        participant_driver._sender_auth_reason_code("send", error)  # noqa: SLF001
+        == "process.observation-unavailable"
+    )
+
+
 def test_launch_failure_diagnostic_preserves_preflight_remediation(
     tmp_path: Path,
 ) -> None:
@@ -1583,9 +1596,13 @@ def test_startup_process_wait_is_independent_from_declared_gate_timeout() -> Non
 def test_startup_gate_schema_budget_stays_within_driver_start_timeout() -> None:
     from ai_collab.participant import PARTICIPANT_START_TIMEOUT_SECONDS
 
+    bounded_driver_overhead = (
+        (2 * participant_driver.PROCESS_WAIT_SECONDS)
+        + (7 * participant_driver.OPERATION_TIMEOUT_SECONDS)
+    )
     assert (
         participant_driver.STARTUP_GATE_MAX_SECONDS
-        + (2 * participant_driver.PROCESS_WAIT_SECONDS)
+        + bounded_driver_overhead
         < PARTICIPANT_START_TIMEOUT_SECONDS
     )
 
