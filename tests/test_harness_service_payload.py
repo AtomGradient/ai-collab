@@ -116,6 +116,35 @@ def test_embedded_python_smoke_test_fails_closed(tmp_path: Path) -> None:
         module._assert_embedded_python_runs(tmp_path / "HarnessService")  # noqa: SLF001
 
 
+def test_embedded_python_smoke_test_uses_host_agent_environment(
+    tmp_path: Path,
+) -> None:
+    module = _module()
+    service = tmp_path / "HarnessService"
+    executable = service / "runtime/bin/python3"
+    log = tmp_path / "smoke-calls.txt"
+    executable.parent.mkdir(parents=True)
+    executable.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s|%s|%s|%s\\n' \"$PYTHONHOME\" \"$PYTHONPATH\" "
+        f"\"$PYTHONDONTWRITEBYTECODE\" \"$*\" >> {log}\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o755)
+
+    module._assert_embedded_python_runs(service)  # noqa: SLF001
+
+    lines = log.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    assert lines[0].endswith("|-I -c import sys; raise SystemExit(0 if sys.prefix else 1)")
+    expected = (
+        f"{service / 'runtime'}|{service / 'python'}|1|-c import ai_collab.service, "
+        "yaml; import sys; raise SystemExit(0 if sys.prefix else 1)"
+    )
+    assert lines[1] == expected
+
+
 def test_public_payload_embeds_generic_adapters_and_no_integration_content(
     tmp_path: Path, monkeypatch: Any
 ) -> None:

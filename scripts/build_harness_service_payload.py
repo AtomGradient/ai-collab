@@ -211,23 +211,55 @@ def _relocate_runtime(runtime: Path) -> None:
 
 
 def _assert_embedded_python_runs(destination: Path) -> None:
+    runtime = destination / "runtime"
+    python_root = destination / "python"
     executable = destination / "runtime/bin/python3"
-    completed = subprocess.run(
-        [
-            str(executable),
-            "-I",
-            "-c",
-            "import sys; raise SystemExit(0 if sys.prefix else 1)",
-        ],
-        cwd=destination,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        check=False,
-    )
-    if completed.returncode != 0:
-        raise SystemExit(
-            "embedded Python smoke test failed:\n" + completed.stdout.strip()
+
+    checks = [
+        (
+            [
+                str(executable),
+                "-I",
+                "-c",
+                "import sys; raise SystemExit(0 if sys.prefix else 1)",
+            ],
+            None,
+        ),
+        (
+            [
+                str(executable),
+                "-c",
+                "import ai_collab.service, yaml; import sys; "
+                "raise SystemExit(0 if sys.prefix else 1)",
+            ],
+            {
+                **os.environ,
+                "PYTHONHOME": str(runtime),
+                "PYTHONPATH": str(python_root),
+                "PYTHONDONTWRITEBYTECODE": "1",
+            },
+        ),
+    ]
+    for argv, env in checks:
+        try:
+            completed = subprocess.run(
+                argv,
+                cwd=destination,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                check=False,
+                timeout=60,
+            )
+        except subprocess.TimeoutExpired as exc:
+            output = (exc.stdout or "") if isinstance(exc.stdout, str) else ""
+            raise SystemExit(
+                "embedded Python smoke test timed out:\n" + output.strip()
+            ) from exc
+        if completed.returncode != 0:
+            raise SystemExit(
+                "embedded Python smoke test failed:\n" + completed.stdout.strip()
         )
 
 

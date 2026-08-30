@@ -4342,6 +4342,83 @@ def test_scenario_repair_keeps_closed_participant_fault_resumable(
         assert resumed["degraded"]["repair_action"] == "participant.recover"
 
 
+def test_scenario_repair_keeps_destroyed_participant_fault_non_resumable(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    with running_host(state_root) as (host, client, driver):
+        created = client.create_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            project_binding_digest=PROJECT_DIGEST,
+            request_id="destroyed-participant-fault-create",
+        )["scenario"]
+        added = _add_test_participant(
+            client,
+            scenario=created,
+            participant_id=PARTICIPANT_ID,
+            request_prefix="destroyed-participant-fault",
+        )
+        opened = client.open_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=created["scenario_generation"],
+            scenario_state_revision=created["state_revision"],
+            request_id="destroyed-participant-fault-open",
+        )["scenario"]
+        driver.fail_start = True
+        with pytest.raises(HarnessClientError):
+            _start_test_participant(
+                client,
+                scenario=opened,
+                participant=added,
+                participant_id=PARTICIPANT_ID,
+                request_prefix="destroyed-participant-fault",
+            )
+
+        degraded = client.scenario_status(
+            project_instance_id=PROJECT_ID, scenario_id=SCENARIO_ID
+        )["scenario"]
+        operation_id, replay, _ = host.store.begin_scenario_repair(
+            request_id="destroyed-participant-fault-scenario-repair",
+            request_digest="a" * 64,
+            host_generation=host.host_generation,
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=degraded["scenario_generation"],
+            scenario_state_revision=degraded["state_revision"],
+            expected_wip_summary_digest="b" * 64,
+        )
+        assert replay is None
+        with host.store._lock:  # noqa: SLF001 - legacy durable edge fixture
+            durable = host.store._read_state()  # noqa: SLF001
+            item = next(iter(durable["scenarios"].values()))
+            item["record"]["desired_state"] = "destroyed"
+            durable["state_revision"] += 1
+            host.store._write_state(durable)  # noqa: SLF001
+
+        repaired = host.store.finalize_scenario_repair(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            request_id="destroyed-participant-fault-scenario-repair",
+            operation_id=operation_id,
+            workspace_evidence_sha256="c" * 64,
+        )["scenario"]
+
+        assert repaired["desired_state"] == "destroyed"
+        assert repaired["observed_state"] == "degraded"
+        assert repaired["degraded"]["reason"] == "participant_fault"
+        assert repaired["degraded"]["repair_action"] == "scenario.force-destroy"
+        with pytest.raises(HarnessClientError):
+            client.open_scenario(
+                project_instance_id=PROJECT_ID,
+                scenario_id=SCENARIO_ID,
+                scenario_generation=repaired["scenario_generation"],
+                scenario_state_revision=repaired["state_revision"],
+                request_id="destroyed-participant-fault-resume",
+            )
+
+
 def test_participant_recover_failure_stays_degraded_without_generation_rotation(
     tmp_path: Path,
 ) -> None:

@@ -1845,6 +1845,7 @@ class ScenarioStore:
                 )
             resumable_degraded = (
                 record["observed_state"] == "degraded"
+                and record["desired_state"] in {"closed", "running"}
                 and isinstance(record.get("degraded"), dict)
                 and record["degraded"].get("reason")
                 in {"participant_fault", "participant_restore_incomplete"}
@@ -7155,11 +7156,11 @@ class ScenarioStore:
                 for _, participant in degraded
             ),
             "owned_resource_evidence_sha256": evidence,
-            "repair_action": (
-                "participant.recover"
-                if scenario.get("desired_state") == "running"
-                else "scenario.open"
-            ),
+            "repair_action": {
+                "running": "participant.recover",
+                "closed": "scenario.open",
+                "destroyed": "scenario.force-destroy",
+            }.get(scenario.get("desired_state"), "scenario.repair"),
         }
 
     def _reconcile_scenario_participant_faults(self, state: dict[str, Any]) -> None:
