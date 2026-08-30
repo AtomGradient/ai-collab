@@ -1611,6 +1611,34 @@ def _process_observation(pid: int) -> dict[str, Any]:
     return {**value, "identity_sha256": digest(value)}
 
 
+def _matching_process_observations(process_match: str) -> list[dict[str, Any]]:
+    if not isinstance(process_match, str) or not process_match:
+        raise DriverError("process match is invalid")
+    try:
+        completed = subprocess.run(
+            ("/bin/ps", "-axo", "pid=", "-o", "command="),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise DriverError("owned process observation is unavailable") from exc
+    if completed.returncode != 0:
+        raise DriverError("owned process observation is unavailable")
+    observations: list[dict[str, Any]] = []
+    for line in completed.stdout.splitlines():
+        fields = line.strip().split(None, 1)
+        if len(fields) != 2 or process_match not in fields[1]:
+            continue
+        try:
+            observations.append(_process_observation(int(fields[0])))
+        except (ValueError, DriverError):
+            continue
+    return sorted(observations, key=lambda value: value["pid"])
+
+
 def _matching_process_group_observations(
     process_group_id: int, process_match: str
 ) -> list[dict[str, Any]]:
@@ -3748,6 +3776,81 @@ def _recovery_result(
     }
 
 
+def _startup_gate_recovery_evidence(
+    private_root: Path,
+    payload: Mapping[str, Any],
+    state: Mapping[str, Any],
+    degraded: Mapping[str, Any],
+) -> str | None:
+    diagnostic_path = _launch_diagnostic_path(private_root)
+    if not diagnostic_path.is_file() or diagnostic_path.is_symlink():
+        return None
+    diagnostic = _read_private(diagnostic_path)
+    required = {
+        "schema_version",
+        "outcome",
+        "stage",
+        "reason_code",
+        "cleanup_outcome",
+    }
+    if not required <= set(diagnostic) or set(diagnostic) - required - {
+        "provider_error_code",
+        "remediation_ref",
+    }:
+        return None
+    if (
+        diagnostic["schema_version"] != 1
+        or diagnostic["outcome"] != "rejected"
+        or diagnostic["stage"]
+        not in {
+            "startup-gate",
+            "vendor-session-proof",
+            "final-process",
+            "window-geometry",
+            "activation",
+        }
+        or diagnostic["cleanup_outcome"] not in {"close-requested", "unconfirmed"}
+    ):
+        return None
+    pid = state.get("pid")
+    if not isinstance(pid, int) or isinstance(pid, bool):
+        raise DriverError("repair stopped binding lacks process identity")
+    exact_process_absent = False
+    try:
+        observation = _process_observation(pid)
+    except DriverError as exc:
+        if str(exc) != "owned process is absent":
+            raise
+        exact_process_absent = True
+    else:
+        if observation["identity_sha256"] == state.get("process_identity_sha256"):
+            raise DriverError("repair stopped binding still has live process")
+        exact_process_absent = True
+    matching_process_count = 0
+    if diagnostic["cleanup_outcome"] == "unconfirmed":
+        profile = _runtime_profile(payload["launch_spec"])
+        matches = _matching_process_observations(profile["process_match"])
+        matching_process_count = len(matches)
+        if matches:
+            raise DriverError("repair startup cleanup is unconfirmed")
+    return digest(
+        {
+            "recovery": "startup_gate_stopped_binding",
+            "diagnostic": diagnostic,
+            "degraded_evidence_sha256": degraded[
+                "owned_resource_evidence_sha256"
+            ],
+            "state_runtime_binding_id": state.get("runtime_binding_id"),
+            "state_presentation_instance_id": state.get(
+                "presentation_instance_id"
+            ),
+            "state_stop_evidence_sha256": state.get("stop_evidence_sha256"),
+            "exact_process_absent": exact_process_absent,
+            "matching_process_count": matching_process_count,
+        }
+    )
+
+
 def repair(payload: Mapping[str, Any]) -> dict[str, Any]:
     """Recover only an exact owned binding or a provably pre-binding failure."""
 
@@ -3815,17 +3918,26 @@ def repair(payload: Mapping[str, Any]) -> dict[str, Any]:
         ):
             raise DriverError("repair owned binding differs")
         if state.get("status") == "stopped" and runtime_ack is None:
+            if presentation_ack is not None:
+                raise DriverError("repair durable cleanup evidence differs")
             if (
-                presentation_ack is not None
-                or degraded["cleanup_pending"] is not False
-                or state.get("stop_evidence_sha256")
-                != degraded["owned_resource_evidence_sha256"]
+                degraded["cleanup_pending"] is False
+                and state.get("stop_evidence_sha256")
+                == degraded["owned_resource_evidence_sha256"]
             ):
+                stop_evidence = state["stop_evidence_sha256"]
+            elif degraded["cleanup_pending"] is True:
+                stop_evidence = _startup_gate_recovery_evidence(
+                    private_root, payload, state, degraded
+                )
+                if stop_evidence is None:
+                    raise DriverError("repair durable cleanup evidence differs")
+            else:  # pragma: no cover - validated above
                 raise DriverError("repair durable cleanup evidence differs")
             return _recovery_result(
                 payload,
                 recovery_class="exact_binding_stopped",
-                stop_evidence=state["stop_evidence_sha256"],
+                stop_evidence=stop_evidence,
             )
         if (
             not isinstance(runtime_binding, dict)

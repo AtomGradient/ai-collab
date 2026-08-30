@@ -2016,7 +2016,12 @@ class ScenarioStore:
                         "presentation_binding_id"
                     ],
                 }
-                if participant["observed_state"] in {"stopped", "detached"}:
+                if (
+                    participant["observed_state"] in {"stopped", "detached"}
+                    or self._cleanup_pending_participant_is_settled(
+                        item, participant
+                    )
+                ):
                     executions.append({**common, "kind": "inactive"})
                     continue
                 runtime_ack = artifact.get("runtime_ready_ack")
@@ -3227,9 +3232,15 @@ class ScenarioStore:
                     blockers.append("participant.operation-active")
                 if scenario["desired_state"] in {"closed", "destroyed"}:
                     if any(
-                        participant["observed_state"] not in {"stopped", "detached"}
-                        or participant["runtime_binding_id"] is not None
-                        or participant["presentation_binding_id"] is not None
+                        (
+                            participant["observed_state"]
+                            not in {"stopped", "detached"}
+                            or participant["runtime_binding_id"] is not None
+                            or participant["presentation_binding_id"] is not None
+                        )
+                        and not self._cleanup_pending_participant_is_settled(
+                            item, participant
+                        )
                         for participant in participants.values()
                     ):
                         blockers.append("participant.cleanup-pending")
@@ -3577,7 +3588,15 @@ class ScenarioStore:
                 "running": "running",
                 "destroyed": "destroying",
             }[record["desired_state"]]
-            participants, _ = self._participant_maps(item)
+            participants, artifacts = self._participant_maps(item)
+            if record["desired_state"] in {"closed", "destroyed"}:
+                for participant_id, participant in participants.items():
+                    self._settle_cleanup_pending_participant(
+                        state,
+                        item,
+                        participant,
+                        artifacts[participant_id],
+                    )
             degraded = self._scenario_participant_fault_payload(
                 record,
                 participants,
@@ -6492,6 +6511,79 @@ class ScenarioStore:
                 )
                 changed = True
         return changed
+
+    @classmethod
+    def _has_unreleased_participant_resources(
+        cls,
+        item: dict[str, Any],
+        participant: dict[str, Any],
+    ) -> bool:
+        scenario = item["record"]
+        for lease in cls._resource_leases(item).values():
+            holder = lease["holder"]
+            if (
+                lease["status"] != "released"
+                and holder["project_instance_id"] == item["project_instance_id"]
+                and holder["scenario_id"] == scenario["scenario_id"]
+                and holder["scenario_generation"] == scenario["scenario_generation"]
+                and holder["participant_id"] == participant["participant_id"]
+                and holder["participant_generation"]
+                == participant["participant_generation"]
+            ):
+                return True
+        return False
+
+    @classmethod
+    def _cleanup_pending_participant_is_settled(
+        cls,
+        item: dict[str, Any],
+        participant: dict[str, Any],
+    ) -> bool:
+        degraded = participant.get("degraded")
+        return (
+            participant.get("desired_state") == "stopped"
+            and participant.get("observed_state") == "degraded"
+            and participant.get("runtime_binding_id") is None
+            and participant.get("presentation_binding_id") is None
+            and isinstance(degraded, dict)
+            and degraded.get("reason") == "cleanup_pending"
+            and degraded.get("cleanup_pending") is True
+            and degraded.get("repair_action") == "participant.recover"
+            and not cls._has_unreleased_participant_resources(item, participant)
+        )
+
+    @classmethod
+    def _settle_cleanup_pending_participant(
+        cls,
+        state: dict[str, Any],
+        item: dict[str, Any],
+        participant: dict[str, Any],
+        artifact: dict[str, Any],
+    ) -> bool:
+        if not cls._cleanup_pending_participant_is_settled(item, participant):
+            return False
+        revision = participant["state_revision"]
+        participant.update(
+            {
+                "desired_state": "stopped",
+                "observed_state": "stopped",
+                "runtime_binding_id": None,
+                "presentation_binding_id": None,
+                "active_operation_id": None,
+                "degraded": None,
+                "state_revision": revision + 1,
+            }
+        )
+        for field in (
+            "runtime_create_request",
+            "prepared_runtime_launch",
+            "runtime_ready_ack",
+            "presentation_create_request",
+            "presentation_create_ack",
+        ):
+            artifact[field] = None
+        participant["journal_head_sequence"] = state["journal_head_sequence"]
+        return True
 
     @classmethod
     def _stale_participant_resources(

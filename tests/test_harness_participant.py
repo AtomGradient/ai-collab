@@ -3555,6 +3555,156 @@ def test_forced_close_completes_when_a_participant_cannot_be_proven_closed(
         assert result["close_summary"]["auto_force_stop_used"] is True
 
 
+def _mark_closed_cleanup_pending_without_external_resources(
+    host: HarnessHost,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    with host.store._lock:  # noqa: SLF001 - durable edge fixture
+        durable = host.store._read_state()  # noqa: SLF001
+        item = next(iter(durable["scenarios"].values()))
+        scenario = item["record"]
+        participant = item["participants"][PARTICIPANT_ID]
+        artifact = item["participant_artifacts"][PARTICIPANT_ID]
+        for lease in item["resource_leases"].values():
+            lease.update(
+                {
+                    "lease_revision": lease["lease_revision"] + 1,
+                    "status": "released",
+                    "stale_reason": None,
+                    "release_evidence_sha256": "d" * 64,
+                }
+            )
+        for field in (
+            "runtime_create_request",
+            "prepared_runtime_launch",
+            "runtime_ready_ack",
+            "presentation_create_request",
+            "presentation_create_ack",
+        ):
+            artifact[field] = None
+        participant.update(
+            {
+                "desired_state": "stopped",
+                "observed_state": "degraded",
+                "runtime_binding_id": None,
+                "presentation_binding_id": None,
+                "active_operation_id": None,
+                "degraded": {
+                    "reason": "cleanup_pending",
+                    "cleanup_pending": True,
+                    "owned_resource_evidence_sha256": "e" * 64,
+                    "repair_action": "participant.recover",
+                },
+                "state_revision": participant["state_revision"] + 1,
+            }
+        )
+        scenario.update(
+            {
+                "desired_state": "closed",
+                "observed_state": "degraded",
+                "active_operation_id": None,
+                "degraded": {
+                    "reason": "cleanup_pending",
+                    "cleanup_pending": True,
+                    "owned_resource_evidence_sha256": "f" * 64,
+                    "repair_action": "scenario.repair",
+                },
+                "state_revision": scenario["state_revision"] + 1,
+            }
+        )
+        durable["state_revision"] += 1
+        host.store._write_state(durable)  # noqa: SLF001
+        return json.loads(json.dumps(scenario)), json.loads(json.dumps(participant))
+
+
+def test_scenario_repair_settles_closed_cleanup_pending_without_resources(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    with running_host(state_root) as (host, client, _driver):
+        _start_ready_participant(client)
+        scenario, _participant = _mark_closed_cleanup_pending_without_external_resources(
+            host
+        )
+
+        preview = host.store.scenario_high_risk_preview(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=scenario["scenario_generation"],
+            scenario_state_revision=scenario["state_revision"],
+            operation="scenario.repair",
+        )
+        assert preview["eligible"] is True
+        assert "participant.cleanup-pending" not in preview["blockers"]
+        operation_id, replay, _ = host.store.begin_scenario_repair(
+            request_id="settled-cleanup-repair",
+            request_digest="1" * 64,
+            host_generation=host.host_generation,
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=scenario["scenario_generation"],
+            scenario_state_revision=scenario["state_revision"],
+            expected_wip_summary_digest="2" * 64,
+        )
+        assert replay is None
+
+        repaired = host.store.finalize_scenario_repair(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            request_id="settled-cleanup-repair",
+            operation_id=operation_id,
+            workspace_evidence_sha256="3" * 64,
+        )["scenario"]
+
+        assert repaired["observed_state"] == "closed"
+        assert repaired["degraded"] is None
+        participant = client.list_participants(
+            project_instance_id=PROJECT_ID, scenario_id=SCENARIO_ID
+        )["participants"][0]
+        assert participant["observed_state"] == "stopped"
+        assert participant["degraded"] is None
+
+
+def test_scenario_close_treats_settled_cleanup_pending_as_inactive(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    with running_host(state_root) as (host, client, driver):
+        _start_ready_participant(client)
+        scenario, _participant = _mark_closed_cleanup_pending_without_external_resources(
+            host
+        )
+
+        operation_id, replay, executions = host.store.begin_scenario_close(
+            request_id="settled-cleanup-close",
+            request_digest="4" * 64,
+            host_generation=host.host_generation,
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=scenario["scenario_generation"],
+            scenario_state_revision=scenario["state_revision"],
+            drain_timeout_ms=25,
+        )
+        assert replay is None
+        assert executions is not None
+        assert executions[0]["kind"] == "inactive"
+        assert host.participants is not None
+
+        reports, cancelled = host.participants.close_scenario_participants(executions)
+        result = host.store.finalize_scenario_close(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            request_id="settled-cleanup-close",
+            operation_id=operation_id,
+            reports=reports,
+            cancelled=cancelled,
+        )
+
+        assert driver.close_calls == 0
+        assert result["scenario"]["observed_state"] == "closed"
+        assert result["scenario"]["degraded"] is None
+        assert result["close_summary"]["all_closed"] is True
+
+
 def test_force_destroy_cleanup_rejects_unproven_live_binding(tmp_path: Path) -> None:
     store = ScenarioStore(tmp_path / "state")
     driver = FakeDriver()
