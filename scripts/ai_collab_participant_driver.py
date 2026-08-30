@@ -75,6 +75,7 @@ PINGAGENT_CLIENT = PINGAGENT_BIN / "ai-ping"
 CONSUMPTION_TIMEOUT_SECONDS = 240.0
 STARTUP_POLL_SECONDS = 0.25
 STARTUP_STABLE_OBSERVATIONS = 4
+STARTUP_GATE_MAX_SECONDS = 300
 SENDER_SESSION_CONNECT_ATTEMPTS = 3
 SENDER_SESSION_RETRY_SECONDS = 0.1
 PROXY_ENVIRONMENT_KEYS = (
@@ -979,7 +980,7 @@ def _valid_startup_gate(value: Any) -> bool:
         or len(value["ready_pattern"]) > 512
         or value.get("confirm_sequence") != ["1", "\r"]
         or not isinstance(value.get("timeout_seconds"), int)
-        or not 5 <= value["timeout_seconds"] <= 120
+        or not 5 <= value["timeout_seconds"] <= STARTUP_GATE_MAX_SECONDS
     ):
         return False
     try:

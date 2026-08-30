@@ -4162,6 +4162,91 @@ def test_host_restart_reconciles_legacy_running_scenario_participant_fault(
         assert driver.repair_calls == [1]
 
 
+def test_scenario_repair_keeps_unrecovered_participant_fault_repairable(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    with running_host(state_root) as (host, client, driver):
+        created = client.create_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            project_binding_digest=PROJECT_DIGEST,
+            request_id="repair-participant-fault-create",
+        )["scenario"]
+        added = _add_test_participant(
+            client,
+            scenario=created,
+            participant_id=PARTICIPANT_ID,
+            request_prefix="repair-participant-fault",
+        )
+        opened = client.open_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=created["scenario_generation"],
+            scenario_state_revision=created["state_revision"],
+            request_id="repair-participant-fault-open",
+        )["scenario"]
+        driver.fail_start = True
+        with pytest.raises(HarnessClientError):
+            _start_test_participant(
+                client,
+                scenario=opened,
+                participant=added,
+                participant_id=PARTICIPANT_ID,
+                request_prefix="repair-participant-fault",
+            )
+
+        degraded = client.scenario_status(
+            project_instance_id=PROJECT_ID, scenario_id=SCENARIO_ID
+        )["scenario"]
+        participant = client.list_participants(
+            project_instance_id=PROJECT_ID, scenario_id=SCENARIO_ID
+        )["participants"][0]
+        assert degraded["observed_state"] == "degraded"
+        assert degraded["degraded"]["reason"] == "participant_fault"
+
+        operation_id, replay, _ = host.store.begin_scenario_repair(
+            request_id="repair-participant-fault-scenario-repair",
+            request_digest="4" * 64,
+            host_generation=host.host_generation,
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=degraded["scenario_generation"],
+            scenario_state_revision=degraded["state_revision"],
+            expected_wip_summary_digest="5" * 64,
+        )
+        assert replay is None
+        repaired = host.store.finalize_scenario_repair(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            request_id="repair-participant-fault-scenario-repair",
+            operation_id=operation_id,
+            workspace_evidence_sha256="6" * 64,
+        )["scenario"]
+        assert repaired["observed_state"] == "degraded"
+        assert repaired["degraded"]["reason"] == "participant_fault"
+        assert repaired["degraded"]["cleanup_pending"] is True
+
+        driver.fail_start = False
+        recovered = client.recover_participant(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            participant_id=PARTICIPANT_ID,
+            scenario_generation=repaired["scenario_generation"],
+            scenario_state_revision=repaired["state_revision"],
+            participant_generation=participant["participant_generation"],
+            participant_state_revision=participant["state_revision"],
+            request_id="repair-participant-fault-recover",
+        )["participant"]
+        assert recovered["observed_state"] == "stopped"
+        assert driver.repair_calls == [1]
+        final = client.scenario_status(
+            project_instance_id=PROJECT_ID, scenario_id=SCENARIO_ID
+        )["scenario"]
+        assert final["observed_state"] == "running"
+        assert final["degraded"] is None
+
+
 def test_participant_recover_failure_stays_degraded_without_generation_rotation(
     tmp_path: Path,
 ) -> None:

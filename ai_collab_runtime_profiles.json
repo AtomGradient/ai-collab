@@ -38,7 +38,7 @@
         "ready_pattern": "(?m)^\\s*›(?!\\s*\\d+\\.).*$",
         "confirm_sequence": ["1", "\r"],
         "requires_workspace_path": true,
-        "timeout_seconds": 60
+        "timeout_seconds": 180
       }
     },
     {
@@ -63,7 +63,7 @@
         "ready_pattern": "(?m)^\\s*❯\\s*$",
         "confirm_sequence": ["1", "\r"],
         "requires_workspace_path": true,
-        "timeout_seconds": 60
+        "timeout_seconds": 180
       }
     }
   ]

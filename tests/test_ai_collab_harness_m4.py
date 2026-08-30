@@ -232,6 +232,19 @@ def test_runtime_profiles_keep_generic_baseline_and_enable_vendor_identity_adapt
     assert "claude" not in product_source
 
 
+def test_cli_startup_gates_allow_slow_vendor_ready_screens() -> None:
+    profiles = participant_driver._runtime_profiles()  # noqa: SLF001
+
+    assert (
+        profiles["runtime-profile.codex"]["startup_gate"]["timeout_seconds"]
+        == 180
+    )
+    assert (
+        profiles["runtime-profile.claude"]["startup_gate"]["timeout_seconds"]
+        == 180
+    )
+
+
 def test_participant_templates_are_driver_data_not_host_vendor_logic() -> None:
     result = participant_driver.list_templates({})
     assert {item["template_id"] for item in result["templates"]} == {
@@ -1533,6 +1546,18 @@ def test_startup_process_wait_uses_declared_gate_timeout() -> None:
         )
         == participant_driver.PROCESS_WAIT_SECONDS
     )
+
+
+def test_startup_gate_timeout_validation_allows_slow_vendor_ready_screens() -> None:
+    gate = copy.deepcopy(
+        participant_driver._runtime_profiles()["runtime-profile.codex"][  # noqa: SLF001
+            "startup_gate"
+        ]
+    )
+
+    assert participant_driver._valid_startup_gate(gate) is True  # noqa: SLF001
+    gate["timeout_seconds"] = participant_driver.STARTUP_GATE_MAX_SECONDS + 1
+    assert participant_driver._valid_startup_gate(gate) is False  # noqa: SLF001
 
 
 def test_launch_failure_diagnostic_is_bounded_and_owner_private(

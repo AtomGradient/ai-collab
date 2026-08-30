@@ -3572,9 +3572,24 @@ class ScenarioStore:
                 "running": "running",
                 "destroyed": "destroying",
             }[record["desired_state"]]
-            record["observed_state"] = target
+            degraded = None
+            if target == "running":
+                participants, _ = self._participant_maps(item)
+                degraded = self._scenario_participant_fault_payload(
+                    record,
+                    participants,
+                    evidence_context={
+                        "scenario_repair_operation_id": operation_id,
+                        "workspace_evidence_sha256": workspace_evidence_sha256,
+                    },
+                )
+            if degraded is None:
+                record["observed_state"] = target
+                record["degraded"] = None
+            else:
+                record["observed_state"] = "degraded"
+                record["degraded"] = degraded
             record["active_operation_id"] = None
-            record["degraded"] = None
             record["state_revision"] += 1
             self._append_operation_event(
                 state,
@@ -7095,57 +7110,73 @@ class ScenarioStore:
                         "repair_action": "scenario.repair",
                     }
 
+    def _scenario_participant_fault_payload(
+        self,
+        scenario: dict[str, Any],
+        participants: dict[str, dict[str, Any]],
+        *,
+        evidence_context: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        degraded = sorted(
+            (
+                participant_id,
+                participant,
+            )
+            for participant_id, participant in participants.items()
+            if participant["observed_state"] == "degraded"
+        )
+        if not degraded:
+            return None
+        evidence = canonical_json_sha256(
+            {
+                "scenario_id": scenario["scenario_id"],
+                "scenario_generation": scenario["scenario_generation"],
+                **evidence_context,
+                "degraded_participants": [
+                    {
+                        "participant_id": participant_id,
+                        "participant_generation": participant[
+                            "participant_generation"
+                        ],
+                        "owned_resource_evidence_sha256": participant.get(
+                            "degraded", {}
+                        ).get("owned_resource_evidence_sha256"),
+                    }
+                    for participant_id, participant in degraded
+                ],
+            }
+        )
+        return {
+            "reason": "participant_fault",
+            "cleanup_pending": any(
+                participant.get("degraded", {}).get("cleanup_pending") is True
+                for _, participant in degraded
+            ),
+            "owned_resource_evidence_sha256": evidence,
+            "repair_action": "scenario.repair",
+        }
+
     def _reconcile_scenario_participant_faults(self, state: dict[str, Any]) -> None:
         """Restore the aggregate invariant after older empty-resume results."""
 
         for item in state["scenarios"].values():
             scenario = item["record"]
             participants, _ = self._participant_maps(item)
-            degraded = sorted(
-                (
-                    participant_id,
-                    participant,
-                )
-                for participant_id, participant in participants.items()
-                if participant["observed_state"] == "degraded"
+            degraded = self._scenario_participant_fault_payload(
+                scenario,
+                participants,
+                evidence_context={"host_restart": True},
             )
             if (
-                not degraded
+                degraded is None
                 or scenario["desired_state"] != "running"
                 or scenario["observed_state"] != "running"
                 or scenario.get("active_operation_id") is not None
             ):
                 continue
-            evidence = canonical_json_sha256(
-                {
-                    "scenario_id": scenario["scenario_id"],
-                    "scenario_generation": scenario["scenario_generation"],
-                    "host_restart": True,
-                    "degraded_participants": [
-                        {
-                            "participant_id": participant_id,
-                            "participant_generation": participant[
-                                "participant_generation"
-                            ],
-                            "owned_resource_evidence_sha256": participant.get(
-                                "degraded", {}
-                            ).get("owned_resource_evidence_sha256"),
-                        }
-                        for participant_id, participant in degraded
-                    ],
-                }
-            )
             scenario["observed_state"] = "degraded"
             scenario["state_revision"] += 1
-            scenario["degraded"] = {
-                "reason": "participant_fault",
-                "cleanup_pending": any(
-                    participant.get("degraded", {}).get("cleanup_pending") is True
-                    for _, participant in degraded
-                ),
-                "owned_resource_evidence_sha256": evidence,
-                "repair_action": "scenario.repair",
-            }
+            scenario["degraded"] = degraded
 
     @staticmethod
     def _workspace_is_ready(path: Path) -> bool:
