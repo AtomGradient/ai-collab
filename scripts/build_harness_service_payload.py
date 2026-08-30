@@ -237,6 +237,7 @@ def _assert_embedded_python_runs(destination: Path) -> None:
                 "PYTHONHOME": str(runtime),
                 "PYTHONPATH": str(python_root),
                 "PYTHONDONTWRITEBYTECODE": "1",
+                "PYTHONNOUSERSITE": "1",
             },
         ),
     ]

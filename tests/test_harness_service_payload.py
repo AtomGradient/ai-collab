@@ -126,8 +126,8 @@ def test_embedded_python_smoke_test_uses_host_agent_environment(
     executable.parent.mkdir(parents=True)
     executable.write_text(
         "#!/bin/sh\n"
-        f"printf '%s|%s|%s|%s\\n' \"$PYTHONHOME\" \"$PYTHONPATH\" "
-        f"\"$PYTHONDONTWRITEBYTECODE\" \"$*\" >> {log}\n"
+        f"printf '%s|%s|%s|%s|%s\\n' \"$PYTHONHOME\" \"$PYTHONPATH\" "
+        f"\"$PYTHONDONTWRITEBYTECODE\" \"$PYTHONNOUSERSITE\" \"$*\" >> {log}\n"
         "exit 0\n",
         encoding="utf-8",
     )
@@ -139,7 +139,7 @@ def test_embedded_python_smoke_test_uses_host_agent_environment(
     assert len(lines) == 2
     assert lines[0].endswith("|-I -c import sys; raise SystemExit(0 if sys.prefix else 1)")
     expected = (
-        f"{service / 'runtime'}|{service / 'python'}|1|-c import ai_collab.service, "
+        f"{service / 'runtime'}|{service / 'python'}|1|1|-c import ai_collab.service, "
         "yaml; import sys; raise SystemExit(0 if sys.prefix else 1)"
     )
     assert lines[1] == expected

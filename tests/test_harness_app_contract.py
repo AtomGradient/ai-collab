@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import ast
 import re
 import subprocess
 import sys
@@ -21,6 +22,7 @@ SWIFT_CONTRACT = (
     / "HarnessContract.generated.swift"
 )
 APP_ROOT = ROOT / "macos" / "AI-Collab" / "App"
+STORE = ROOT / "src" / "ai_collab" / "store.py"
 APP_PROJECT = ROOT / "macos" / "AI-Collab" / "project.yml"
 HOST_AGENT = ROOT / "macos" / "AI-Collab" / "HostAgent" / "main.swift"
 LAUNCH_AGENT = (
@@ -195,6 +197,48 @@ def test_app_exposes_degraded_and_high_risk_repair_actions() -> None:
     assert "ResourceLeaseRecord" in models
 
 
+def _repair_action_literals(node: ast.AST) -> set[str]:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return {node.value} if "." in node.value else set()
+    if isinstance(node, ast.IfExp):
+        return _repair_action_literals(node.body) | _repair_action_literals(node.orelse)
+    if isinstance(node, ast.Dict):
+        values: set[str] = set()
+        for value in node.values:
+            values.update(_repair_action_literals(value))
+        return values
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "get"
+    ):
+        values = _repair_action_literals(node.func.value)
+        for default in node.args[1:]:
+            values.update(_repair_action_literals(default))
+        return values
+    return set()
+
+
+def test_durable_repair_actions_have_app_exits() -> None:
+    tree = ast.parse(STORE.read_text(encoding="utf-8"))
+    durable_actions: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Dict):
+            continue
+        for key, value in zip(node.keys, node.values, strict=True):
+            if isinstance(key, ast.Constant) and key.value == "repair_action":
+                durable_actions.update(_repair_action_literals(value))
+
+    view_model = (APP_ROOT / "HarnessViewModel.swift").read_text(encoding="utf-8")
+    content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
+    assert "model.textOnlyRepairAction(action)" in content
+    covered = set(re.findall(r'case "([^"]+)":', view_model))
+    covered.update(re.findall(r'action == "([^"]+)"', content))
+
+    assert durable_actions
+    assert durable_actions <= covered
+
+
 def test_app_gives_high_risk_confirmation_operations_long_timeout() -> None:
     view_model = (APP_ROOT / "HarnessViewModel.swift").read_text(encoding="utf-8")
     for operation in ("scenario.destroy", "scenario.force-destroy", "resource.break"):
@@ -318,6 +362,7 @@ def test_host_agent_preserves_user_path_when_launched_by_service_management() ->
     assert "userPaths + inheritedPaths" in helper
     assert 'setenv("PATH", searchPaths.joined(separator: ":"), 1)' in helper
     assert 'setenv("PATH", userPaths.joined(separator: ":"), 0)' not in helper
+    assert 'setenv("PYTHONNOUSERSITE", "1", 1)' in helper
 
 
 def test_host_agent_resolves_user_supplied_adapter_configs() -> None:

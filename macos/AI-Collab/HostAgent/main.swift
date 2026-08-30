@@ -74,6 +74,7 @@ guard let participant = resolvedConfiguration("ai_collab_participant_driver.json
 setenv("PYTHONHOME", runtime.path, 1)
 setenv("PYTHONPATH", pythonPath.path, 1)
 setenv("PYTHONDONTWRITEBYTECODE", "1", 1)
+setenv("PYTHONNOUSERSITE", "1", 1)
 setenv("PYTHONUNBUFFERED", "1", 1)
 let home = FileManager.default.homeDirectoryForCurrentUser.path
 let userPaths = [

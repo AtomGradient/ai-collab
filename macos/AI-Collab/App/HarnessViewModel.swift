@@ -589,6 +589,15 @@ final class HarnessViewModel: ObservableObject {
         S.Repair.detail(action) != nil
     }
 
+    func textOnlyRepairAction(_ action: String) -> String? {
+        switch action {
+        case "scenario.force-destroy":
+            S.Repair.detail(action)
+        default:
+            nil
+        }
+    }
+
     func repairActionLabel(_ action: String) -> String {
         S.Repair.label(action)
     }

@@ -756,6 +756,10 @@ struct ContentView: View {
                                         highRiskIntent = .repairScenario
                                     }
                                     .controlSize(.small)
+                                } else if let instruction = model.textOnlyRepairAction(action) {
+                                    Text(instruction)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
                                 } else if model.canPerformRepairAction(action) {
                                     Button(model.repairActionLabel(action)) {
                                         Task { await model.performRepairAction(action) }
@@ -1350,6 +1354,10 @@ struct ContentView: View {
                             if action == "scenario.repair" {
                                 Button(S.Banner.reviewRepair) { highRiskIntent = .repairScenario }
                                     .controlSize(.small)
+                            } else if let instruction = model.textOnlyRepairAction(action) {
+                                Text(instruction)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
                             } else if let performable = model.performableRepairAction(error) {
                                 Button(model.repairActionLabel(performable)) {
                                     Task { await model.performRepairAction(performable) }

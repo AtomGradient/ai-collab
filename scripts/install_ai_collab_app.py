@@ -267,6 +267,7 @@ def _health_check(app: Path, state_root: Path, expected_digest: str, timeout: fl
                     "PYTHONHOME": str(runtime),
                     "PYTHONPATH": str(python_path),
                     "PYTHONDONTWRITEBYTECODE": "1",
+                    "PYTHONNOUSERSITE": "1",
                 }
             )
             completed = subprocess.run(

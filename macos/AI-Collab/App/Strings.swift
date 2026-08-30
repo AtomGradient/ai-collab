@@ -1094,6 +1094,7 @@ enum S {
             case "scenario.open": return t("Resume Task Room", "恢复任务房间")
             case "participant.recover": return t("Recover AI Colleague", "找回 AI 同事")
             case "scenario.repair": return t("Use Repair Task Room Below", "使用下方的修复任务房间")
+            case "scenario.force-destroy": return t("Use Force Delete", "使用强制删除")
             case "system-settings.automation":
                 return t("Open Automation Settings", "打开自动化设置")
             case "presentation.permission-request":
@@ -1131,6 +1132,11 @@ enum S {
                 return t(
                     "Open iTerm2, then run preflight again.",
                     "打开 iTerm2，然后重新运行预检。"
+                )
+            case "scenario.force-destroy":
+                return t(
+                    "Use Force Delete from the task room menu to finish removing this room.",
+                    "从任务房间菜单使用强制删除，完成删除这个房间。"
                 )
             case "iterm-presentation.enable-python-api":
                 return t(

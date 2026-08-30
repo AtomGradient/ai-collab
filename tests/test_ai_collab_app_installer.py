@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import shutil
 from pathlib import Path
 
@@ -217,6 +218,52 @@ def test_health_requires_registration_from_installed_bundle(
 
     with pytest.raises(INSTALLER.InstallError, match="another App bundle"):
         INSTALLER._health_check(app, tmp_path / "state", "a" * 64, 0.01)
+
+
+def test_health_check_disables_user_site_packages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = tmp_path / "AI Collab.app"
+    runtime = app / "Contents/Resources/HarnessService/runtime"
+    python = runtime / "bin/python3"
+    python.parent.mkdir(parents=True)
+    python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    python.chmod(0o755)
+    (app / "Contents/Resources/HarnessService/python").mkdir(parents=True)
+    state_root = tmp_path / "state"
+    registration = state_root / "installation/service-registration.json"
+    registration.parent.mkdir(parents=True)
+    registration.write_text(
+        json.dumps(
+            {
+                "service_build_digest": "a" * 64,
+                "app_bundle_path": str(app),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(INSTALLER.time, "sleep", lambda _seconds: None)
+    captured_environment: dict[str, str] = {}
+
+    def run_health(argv: list[str], **kwargs: object) -> object:
+        environment = kwargs["env"]
+        assert isinstance(environment, dict)
+        captured_environment.update(environment)
+        return INSTALLER.subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout='{"status":"ready","host_generation":7}',
+            stderr="",
+        )
+
+    monkeypatch.setattr(INSTALLER.subprocess, "run", run_health)
+
+    result = INSTALLER._health_check(app, state_root, "a" * 64, 1.0)
+
+    assert result["status"] == "ready"
+    assert captured_environment["PYTHONHOME"] == str(runtime)
+    assert captured_environment["PYTHONDONTWRITEBYTECODE"] == "1"
+    assert captured_environment["PYTHONNOUSERSITE"] == "1"
 
 
 def test_first_install_failure_unregisters_bad_service(
