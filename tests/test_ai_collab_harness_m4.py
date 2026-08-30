@@ -2156,9 +2156,7 @@ def test_startup_trust_gate_accepts_only_exact_workspace_and_waits_for_ready(
         " Enter to confirm · Esc to cancel"
     )
     ready = "Claude Code v2.1.227\n❯"
-    session = _StartupSession(
-        [prompt, ready, ready, ready, ready]
-    )
+    session = _StartupSession([prompt, prompt, ready, ready, ready, ready])
     monkeypatch.setattr(participant_driver, "STARTUP_POLL_SECONDS", 0)
     monkeypatch.setattr(participant_driver, "_process_cwd", lambda pid: workspace)
     evidence = asyncio.run(

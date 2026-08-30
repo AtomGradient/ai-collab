@@ -2366,15 +2366,14 @@ async def _wait_startup_ready(
             await _bounded(session.async_get_screen_contents())
         ).replace("\x00", " ")
         if prompt_pattern.search(screen) is not None:
-            if accepted:
-                raise DriverError("startup trust gate reappeared after confirmation")
-            if _process_cwd(process_pid) != workspace_path.resolve(strict=True):
-                raise DriverError("startup trust gate workspace differs")
-            for value in gate["confirm_sequence"]:
-                await _bounded(
-                    session.async_send_text(value, suppress_broadcast=True)
-                )
-            accepted = True
+            if not accepted:
+                if _process_cwd(process_pid) != workspace_path.resolve(strict=True):
+                    raise DriverError("startup trust gate workspace differs")
+                for value in gate["confirm_sequence"]:
+                    await _bounded(
+                        session.async_send_text(value, suppress_broadcast=True)
+                    )
+                accepted = True
             stable_digest = None
             stable_count = 0
         elif ready_pattern.search(screen) is not None:
