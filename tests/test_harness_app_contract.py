@@ -186,10 +186,11 @@ def test_app_exposes_degraded_and_high_risk_repair_actions() -> None:
     assert "participant_fault" in strings
     assert "AI colleague needs recovery" in strings
     assert "humanDegradedReason" in content
-    assert 'action == "scenario.force-destroy"' in content
     assert ".forceDestroyScenario(scenario)" in content
-    assert "Force Delete Task Room" in strings
-    assert r"participants.filter(\.canRecover).count >= 1" in view_model
+    assert 'case "scenario.open":' in view_model
+    assert "await openScenario()" in view_model
+    assert "Resume Task Room" in strings
+    assert "participants.contains(where: \\.canRecover)" in view_model
     assert "cleanupPending" in models
     assert "ResourceLeaseRecord" in models
 
@@ -207,9 +208,13 @@ def test_app_gives_high_risk_confirmation_operations_long_timeout() -> None:
         view_model,
         re.S,
     )
-    assert "responseTimeoutSeconds: Int = 480" in view_model
+    assert "responseTimeoutSeconds: Int = 360" in view_model
     for operation in ("participant.start", "participant.replace"):
-        assert f'operation: "{operation}"' in view_model
+        assert re.search(
+            rf'operation: "{re.escape(operation)}".*?responseTimeoutSeconds: 480',
+            view_model,
+            re.S,
+        ), operation
 
 
 def test_iterm_python_api_setup_runs_detached_before_quitting_iterm() -> None:

@@ -47,7 +47,7 @@ def test_embedded_payload_copies_pingagent_client_and_transport(
                     f"bin/python{module.sys.version_info.major}.{module.sys.version_info.minor}"
                 )
                 executable.parent.mkdir(parents=True, exist_ok=True)
-                executable.write_text("embedded runtime\n", encoding="utf-8")
+                executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         else:
             target.write_text("embedded file\n", encoding="utf-8")
 
@@ -83,12 +83,37 @@ def _install_fake_copy(module: Any, monkeypatch: Any) -> list[tuple[Path, Path]]
                     f"bin/python{module.sys.version_info.major}.{module.sys.version_info.minor}"
                 )
                 executable.parent.mkdir(parents=True, exist_ok=True)
-                executable.write_text("embedded runtime\n", encoding="utf-8")
+                executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         else:
             target.write_text("embedded file\n", encoding="utf-8")
 
     monkeypatch.setattr(module, "_copy", fake_copy)
     return copied
+
+
+def test_python_framework_binary_detection_is_version_independent() -> None:
+    module = _module()
+
+    assert module._is_python_framework_binary(  # noqa: SLF001
+        "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/Python"
+    )
+    assert module._is_python_framework_binary(  # noqa: SLF001
+        "/Library/Frameworks/Python.framework/Versions/3.11/Python"
+    )
+    assert not module._is_python_framework_binary(  # noqa: SLF001
+        "/opt/homebrew/lib/Python"
+    )
+
+
+def test_embedded_python_smoke_test_fails_closed(tmp_path: Path) -> None:
+    module = _module()
+    executable = tmp_path / "HarnessService/runtime/bin/python3"
+    executable.parent.mkdir(parents=True)
+    executable.write_text("#!/bin/sh\nexit 7\n", encoding="utf-8")
+    executable.chmod(0o755)
+
+    with pytest.raises(SystemExit, match="embedded Python smoke test failed"):
+        module._assert_embedded_python_runs(tmp_path / "HarnessService")  # noqa: SLF001
 
 
 def test_public_payload_embeds_generic_adapters_and_no_integration_content(

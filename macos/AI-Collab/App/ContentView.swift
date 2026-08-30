@@ -756,12 +756,6 @@ struct ContentView: View {
                                         highRiskIntent = .repairScenario
                                     }
                                     .controlSize(.small)
-                                } else if action == "scenario.force-destroy",
-                                          let scenario = model.selectedScenario {
-                                    Button(model.repairActionLabel(action), role: .destructive) {
-                                        highRiskIntent = .forceDestroyScenario(scenario)
-                                    }
-                                    .controlSize(.small)
                                 } else if model.canPerformRepairAction(action) {
                                     Button(model.repairActionLabel(action)) {
                                         Task { await model.performRepairAction(action) }
@@ -1356,12 +1350,6 @@ struct ContentView: View {
                             if action == "scenario.repair" {
                                 Button(S.Banner.reviewRepair) { highRiskIntent = .repairScenario }
                                     .controlSize(.small)
-                            } else if action == "scenario.force-destroy",
-                                      let scenario = model.selectedScenario {
-                                Button(model.repairActionLabel(action), role: .destructive) {
-                                    highRiskIntent = .forceDestroyScenario(scenario)
-                                }
-                                .controlSize(.small)
                             } else if let performable = model.performableRepairAction(error) {
                                 Button(model.repairActionLabel(performable)) {
                                     Task { await model.performRepairAction(performable) }

@@ -4260,7 +4260,7 @@ def test_scenario_repair_keeps_unrecovered_participant_fault_repairable(
         assert final["degraded"] is None
 
 
-def test_scenario_repair_keeps_closed_participant_fault_force_destroyable(
+def test_scenario_repair_keeps_closed_participant_fault_resumable(
     tmp_path: Path,
 ) -> None:
     state_root = tmp_path / "state"
@@ -4326,7 +4326,20 @@ def test_scenario_repair_keeps_closed_participant_fault_force_destroyable(
         assert repaired["desired_state"] == "closed"
         assert repaired["observed_state"] == "degraded"
         assert repaired["degraded"]["reason"] == "participant_fault"
-        assert repaired["degraded"]["repair_action"] == "scenario.force-destroy"
+        assert repaired["degraded"]["repair_action"] == "scenario.open"
+
+        resumed = client.open_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=repaired["scenario_generation"],
+            scenario_state_revision=repaired["state_revision"],
+            request_id="closed-participant-fault-resume",
+        )["scenario"]
+
+        assert resumed["desired_state"] == "running"
+        assert resumed["observed_state"] == "degraded"
+        assert resumed["degraded"]["reason"] == "participant_fault"
+        assert resumed["degraded"]["repair_action"] == "participant.recover"
 
 
 def test_participant_recover_failure_stays_degraded_without_generation_rotation(

@@ -124,6 +124,13 @@ def _set_install_name(path: Path, old: str, new: str) -> None:
     path.chmod(mode)
 
 
+def _is_python_framework_binary(dependency: str) -> bool:
+    return (
+        "/Python.framework/Versions/" in dependency
+        and dependency.endswith("/Python")
+    )
+
+
 def _relocate_runtime(runtime: Path) -> None:
     """Make the copied interpreter tree self-contained.
 
@@ -162,9 +169,7 @@ def _relocate_runtime(runtime: Path) -> None:
         for dependency in _load_commands(macho):
             if not dependency.startswith(_FOREIGN_PREFIXES):
                 continue
-            if dependency.endswith("/Python.framework/Versions/3.11/Python") and (
-                framework_binary.is_file()
-            ):
+            if _is_python_framework_binary(dependency) and framework_binary.is_file():
                 target = framework_binary
             else:
                 if dependency not in bundled:
@@ -203,6 +208,27 @@ def _relocate_runtime(runtime: Path) -> None:
     if remaining:
         listing = "; ".join(f"{p.name} -> {d}" for p, d in remaining[:5])
         raise SystemExit(f"embedded runtime still references foreign libraries: {listing}")
+
+
+def _assert_embedded_python_runs(destination: Path) -> None:
+    executable = destination / "runtime/bin/python3"
+    completed = subprocess.run(
+        [
+            str(executable),
+            "-I",
+            "-c",
+            "import sys; raise SystemExit(0 if sys.prefix else 1)",
+        ],
+        cwd=destination,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise SystemExit(
+            "embedded Python smoke test failed:\n" + completed.stdout.strip()
+        )
 
 
 def _copy(source: Path, destination: Path) -> None:
@@ -346,6 +372,7 @@ def build(destination: Path, integration_root: Path | None) -> None:
     if not executable.exists() and not executable.is_symlink():
         executable.symlink_to(versioned_executable.name)
     executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
+    _assert_embedded_python_runs(destination)
     manifest = {
         "schema_version": 1,
         "python_version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",

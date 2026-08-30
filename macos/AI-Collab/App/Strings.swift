@@ -1091,9 +1091,9 @@ enum S {
             case "project.reconcile": return t("Check project updates again", "重新检查项目更新")
             case "disk.free-space":
                 return t("Free disk space, then prepare again", "清理磁盘空间后重新准备")
+            case "scenario.open": return t("Resume Task Room", "恢复任务房间")
             case "participant.recover": return t("Recover AI Colleague", "找回 AI 同事")
             case "scenario.repair": return t("Use Repair Task Room Below", "使用下方的修复任务房间")
-            case "scenario.force-destroy": return t("Force Delete Task Room", "强制删除任务房间")
             case "system-settings.automation":
                 return t("Open Automation Settings", "打开自动化设置")
             case "presentation.permission-request":

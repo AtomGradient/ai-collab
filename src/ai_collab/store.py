@@ -1845,7 +1845,6 @@ class ScenarioStore:
                 )
             resumable_degraded = (
                 record["observed_state"] == "degraded"
-                and record["desired_state"] == "running"
                 and isinstance(record.get("degraded"), dict)
                 and record["degraded"].get("reason")
                 in {"participant_fault", "participant_restore_incomplete"}
@@ -7159,7 +7158,7 @@ class ScenarioStore:
             "repair_action": (
                 "participant.recover"
                 if scenario.get("desired_state") == "running"
-                else "scenario.force-destroy"
+                else "scenario.open"
             ),
         }
 

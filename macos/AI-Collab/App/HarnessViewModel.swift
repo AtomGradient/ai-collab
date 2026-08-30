@@ -519,12 +519,17 @@ final class HarnessViewModel: ObservableObject {
             await runPreflight()
         case "workspace.prepare":
             await prepareWorkspace()
+        case "scenario.open":
+            await openScenario()
         case "participant.recover":
-            let recoverable = participants.filter(\.canRecover)
-            guard !recoverable.isEmpty else {
+            var attempted = Set<String>()
+            guard participants.contains(where: \.canRecover) else {
                 return refuse(.participantAction, S.Msg.noColleaguesNeedRecovery)
             }
-            for participant in recoverable {
+            while let participant = participants.first(
+                where: { $0.canRecover && !attempted.contains($0.id) }
+            ) {
+                attempted.insert(participant.id)
                 await recoverParticipant(participant)
                 if actionableError != nil { break }
             }
@@ -666,6 +671,7 @@ final class HarnessViewModel: ObservableObject {
     func canPerformRepairAction(_ action: String) -> Bool {
         switch action {
         case "host.retry", "project.register", "scenario.refresh", "scenario.preflight",
+             "scenario.open",
              "workspace.prepare", "system-settings.automation",
              "presentation.permission-request", "iterm-presentation.launch-target",
              "iterm-presentation.enable-python-api",
@@ -1007,7 +1013,8 @@ final class HarnessViewModel: ObservableObject {
             operation: "participant.start",
             participant: participant,
             activity: S.Msg.starting(participant.id),
-            success: S.Msg.isRunning(participant.id)
+            success: S.Msg.isRunning(participant.id),
+            responseTimeoutSeconds: 480
         )
     }
 
@@ -1093,7 +1100,8 @@ final class HarnessViewModel: ObservableObject {
             extraPayload: [
                 "launch_spec": template.launchSpec,
                 "presentation_driver_id": template.presentationDriverID ?? NSNull(),
-            ]
+            ],
+            responseTimeoutSeconds: 480
         )
     }
 
@@ -1139,7 +1147,8 @@ final class HarnessViewModel: ObservableObject {
             extraPayload: [
                 "launch_spec": launchSpec,
                 "presentation_driver_id": template.presentationDriverID ?? NSNull(),
-            ]
+            ],
+            responseTimeoutSeconds: 480
         )
     }
 
@@ -1488,7 +1497,7 @@ final class HarnessViewModel: ObservableObject {
         activity: @autoclosure @escaping () -> String,
         success: @autoclosure @escaping () -> String,
         extraPayload: [String: Any] = [:],
-        responseTimeoutSeconds: Int = 480
+        responseTimeoutSeconds: Int = 360
     ) async {
         guard let project = selectedProject, let scenario = selectedScenario else {
             return refuse(.participantAction, S.Msg.selectRoomFirst)
