@@ -1668,6 +1668,44 @@ def _matching_process_group_observations(
     return sorted(observations, key=lambda value: value["pid"])
 
 
+def _exact_process_group_observations(
+    process_group_id: int,
+) -> list[dict[str, int]]:
+    """Observe every member of one exact process group, or fail closed."""
+
+    if (
+        not isinstance(process_group_id, int)
+        or isinstance(process_group_id, bool)
+        or process_group_id <= 1
+    ):
+        raise DriverError("process identity is invalid")
+    try:
+        completed = subprocess.run(
+            ("/bin/ps", "-axo", "pid=", "-o", "pgid="),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise DriverError("owned process observation is unavailable") from exc
+    if completed.returncode != 0:
+        raise DriverError("owned process observation is unavailable")
+    observations: list[dict[str, int]] = []
+    for line in completed.stdout.splitlines():
+        fields = line.split()
+        if len(fields) != 2:
+            raise DriverError("owned process observation is unavailable")
+        try:
+            pid, pgid = (int(field) for field in fields)
+        except ValueError as exc:
+            raise DriverError("owned process observation is unavailable") from exc
+        if pgid == process_group_id:
+            observations.append({"pid": pid, "pgid": pgid})
+    return sorted(observations, key=lambda value: value["pid"])
+
+
 def _stable_job_observation(
     observation: Mapping[str, Any], process_match: str
 ) -> Mapping[str, Any]:
@@ -2448,6 +2486,12 @@ async def _iterm_start_async(
         cleanup_outcome = (
             "unconfirmed" if stage == "window-create" else "not-required"
         )
+        failure_process_observation = None
+        if isinstance(pid, int) and not isinstance(pid, bool) and pid > 1:
+            try:
+                failure_process_observation = _process_observation(pid)
+            except DriverError:
+                failure_process_observation = None
         if window is not None:
             cleanup_outcome = "unconfirmed"
             try:
@@ -2462,12 +2506,6 @@ async def _iterm_start_async(
                 cleanup_outcome = "close-requested"
             except Exception:
                 pass
-        failure_process_observation = None
-        if isinstance(pid, int) and not isinstance(pid, bool) and pid > 1:
-            try:
-                failure_process_observation = _process_observation(pid)
-            except DriverError:
-                failure_process_observation = None
         if state is not None:
             try:
                 _terminate_exact(state)
@@ -3827,32 +3865,33 @@ def _startup_gate_recovery_evidence(
         if observation["identity_sha256"] == state.get("process_identity_sha256"):
             raise DriverError("repair stopped binding still has live process")
         exact_process_absent = True
-    if diagnostic["cleanup_outcome"] == "unconfirmed":
-        launch_process = diagnostic.get("process_observation")
-        if not isinstance(launch_process, dict):
-            return None
-        launch_pid = launch_process.get("pid")
-        launch_pgid = launch_process.get("pgid")
-        launch_identity = launch_process.get("identity_sha256")
-        if (
-            not isinstance(launch_pid, int)
-            or isinstance(launch_pid, bool)
-            or launch_pid <= 1
-            or not isinstance(launch_pgid, int)
-            or isinstance(launch_pgid, bool)
-            or launch_pgid <= 1
-            or not isinstance(launch_identity, str)
-            or re.fullmatch(r"[0-9a-f]{64}", launch_identity) is None
-        ):
-            return None
-        try:
-            observation = _process_observation(launch_pid)
-        except DriverError as exc:
-            if str(exc) != "owned process is absent":
-                raise
-        else:
-            if observation["identity_sha256"] == launch_identity:
-                raise DriverError("repair startup cleanup is unconfirmed")
+    launch_process = diagnostic.get("process_observation")
+    if not isinstance(launch_process, dict):
+        return None
+    launch_pid = launch_process.get("pid")
+    launch_pgid = launch_process.get("pgid")
+    launch_identity = launch_process.get("identity_sha256")
+    if (
+        not isinstance(launch_pid, int)
+        or isinstance(launch_pid, bool)
+        or launch_pid <= 1
+        or not isinstance(launch_pgid, int)
+        or isinstance(launch_pgid, bool)
+        or launch_pgid <= 1
+        or not isinstance(launch_identity, str)
+        or re.fullmatch(r"[0-9a-f]{64}", launch_identity) is None
+    ):
+        return None
+    try:
+        observation = _process_observation(launch_pid)
+    except DriverError as exc:
+        if str(exc) != "owned process is absent":
+            raise
+    else:
+        if observation["identity_sha256"] == launch_identity:
+            raise DriverError("repair startup cleanup is unconfirmed")
+    if _exact_process_group_observations(launch_pgid):
+        raise DriverError("repair startup cleanup is unconfirmed")
     return digest(
         {
             "recovery": "startup_gate_stopped_binding",
