@@ -25,7 +25,10 @@ Host, without disturbing each other:
 1. Download `AICollab.dmg` from [Releases](../../releases), drag it into
    Applications, and open it. Release builds are signed and notarized.
 2. Install [iTerm2](https://iterm2.com) — agents run in iTerm2 windows the
-   Host owns and recovers.
+   Host owns and recovers. In iTerm2, open Settings -> General -> Magic,
+   enable **Python API**, then restart iTerm2. The equivalent setup commands are:
+   `defaults write com.googlecode.iterm2 EnableAPIServer -bool true` and
+   `defaults write com.googlecode.iterm2 NoSyncEnableAPIServer -bool true`.
 3. Click **Register Project** and pick any Git directory. Fileless projects and
    older AI Collab declarations both register directly; registration never
    writes the selected checkout.

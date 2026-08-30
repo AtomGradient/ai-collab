@@ -125,6 +125,9 @@ final class HarnessViewModel: ObservableObject {
     var resumeText: String { resumeOverride ?? S.Defaults.resume }
     @Published var destroyPreviewText = ""
     @Published var destroyPreviewEligible = false
+    @Published var destroyPreviewBlockers: [String] = []
+    var destroyPreviewLoaded: Bool { !destroyPreviewText.isEmpty }
+    var destroyPreviewBlocked: Bool { destroyPreviewLoaded && !destroyPreviewEligible }
 
     let client: HarnessIPCClient
     private let serviceController: HarnessServiceController?
@@ -525,18 +528,53 @@ final class HarnessViewModel: ObservableObject {
         case "presentation.permission-request":
             await requestPresentationPermission()
         case "iterm-presentation.launch-target":
-            if let url = NSWorkspace.shared.urlForApplication(
-                withBundleIdentifier: "com.googlecode.iterm2"
-            ) {
-                NSWorkspace.shared.openApplication(
-                    at: url,
-                    configuration: NSWorkspace.OpenConfiguration(),
-                    completionHandler: nil
-                )
-            }
+            openIterm2()
+        case "iterm-presentation.enable-python-api":
+            copyItermPythonAPISetupCommand()
+            openIterm2()
+            noteSuccess(S.Msg.itermPythonAPICommandCopied)
+        case "iterm-presentation.restart-after-python-api",
+             "iterm-presentation.reset-private-api-socket":
+            openIterm2()
+            noteSuccess(S.Msg.restartIterm2Required)
         default:
             break
         }
+    }
+
+    private func openIterm2() {
+        if let url = NSWorkspace.shared.urlForApplication(
+            withBundleIdentifier: "com.googlecode.iterm2"
+        ) {
+            NSWorkspace.shared.openApplication(
+                at: url,
+                configuration: NSWorkspace.OpenConfiguration(),
+                completionHandler: nil
+            )
+        }
+    }
+
+    private func copyItermPythonAPISetupCommand() {
+        let command = """
+        defaults write com.googlecode.iterm2 EnableAPIServer -bool true
+        defaults write com.googlecode.iterm2 NoSyncEnableAPIServer -bool true
+        osascript -e 'tell application id "com.googlecode.iterm2" to quit'
+        open -b com.googlecode.iterm2
+        """
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(command, forType: .string)
+    }
+
+    func repairActionDetail(_ action: String) -> String? {
+        S.Repair.detail(action)
+    }
+
+    func shouldShowRepairDetail(_ action: String) -> Bool {
+        S.Repair.detail(action) != nil
+    }
+
+    func repairActionLabel(_ action: String) -> String {
+        S.Repair.label(action)
     }
 
     /// Explicit user gesture: let macOS show its Automation consent prompt
@@ -602,10 +640,6 @@ final class HarnessViewModel: ObservableObject {
         return observations?.first?["status"] as? String
     }
 
-    func repairActionLabel(_ action: String) -> String {
-        S.Repair.label(action)
-    }
-
     /// The performable repair button for one error, honoring the approved
     /// retryable gate: a retry-semantic action is only clickable when the
     /// Host marked the failure retryable; otherwise the recommendation stays
@@ -622,7 +656,10 @@ final class HarnessViewModel: ObservableObject {
         switch action {
         case "host.retry", "project.register", "scenario.refresh", "scenario.preflight",
              "workspace.prepare", "system-settings.automation",
-             "presentation.permission-request", "iterm-presentation.launch-target":
+             "presentation.permission-request", "iterm-presentation.launch-target",
+             "iterm-presentation.enable-python-api",
+             "iterm-presentation.restart-after-python-api",
+             "iterm-presentation.reset-private-api-socket":
             true
         case "participant.recover":
             participants.filter(\.canRecover).count == 1
@@ -1024,7 +1061,8 @@ final class HarnessViewModel: ObservableObject {
             operation: "participant.force-stop",
             participant: participant,
             activity: S.Msg.forceStopping(participant.id),
-            success: S.Msg.forceStopped(participant.id)
+            success: S.Msg.forceStopped(participant.id),
+            responseTimeoutSeconds: 360
         )
     }
 
@@ -1118,7 +1156,8 @@ final class HarnessViewModel: ObservableObject {
                         "scenario_state_revision": scenario.stateRevision,
                         "lease_id": resource.id,
                         "lease_revision": resource.revision,
-                    ]
+                    ],
+                    responseTimeoutSeconds: 360
                 )
             )
             try await self.reloadScenarios()
@@ -1144,6 +1183,7 @@ final class HarnessViewModel: ObservableObject {
             else { throw HarnessIPCError.invalidReply }
             self.destroyPreviewText = prettyJSON(result)
             self.destroyPreviewEligible = eligible
+            self.destroyPreviewBlockers = preview["blockers"] as? [String] ?? []
         }
     }
 
@@ -1154,7 +1194,9 @@ final class HarnessViewModel: ObservableObject {
         guard destroyPreviewEligible else {
             return refuse(
                 .scenarioLifecycle,
-                S.Msg.loadPreviewFirst
+                self.destroyPreviewLoaded
+                    ? S.Msg.destroyPreviewBlocked(self.destroyPreviewBlockers)
+                    : S.Msg.loadPreviewFirst
             )
         }
         await performMutation(
@@ -1167,11 +1209,11 @@ final class HarnessViewModel: ObservableObject {
                     operation: "scenario.destroy",
                     target: self.scenarioTarget(projectID: project.id, scenarioID: scenario.id),
                     fence: ["operation_generation": scenario.stateRevision],
-                    payload: self.scenarioFencePayload(scenario)
+                    payload: self.scenarioFencePayload(scenario),
+                    responseTimeoutSeconds: 360
                 )
             )
-            self.destroyPreviewText = ""
-            self.destroyPreviewEligible = false
+            self.clearDestroyPreview()
             self.selectedScenarioID = nil
             self.participants = []
             self.resources = []
@@ -1196,7 +1238,8 @@ final class HarnessViewModel: ObservableObject {
                         projectID: project.id, scenarioID: scenario.id
                     ),
                     fence: ["operation_generation": scenario.stateRevision],
-                    payload: self.scenarioFencePayload(scenario)
+                    payload: self.scenarioFencePayload(scenario),
+                    responseTimeoutSeconds: 360
                 )
             )
             if self.selectedScenarioID == scenario.id {
@@ -1419,7 +1462,8 @@ final class HarnessViewModel: ObservableObject {
                     operation: operation,
                     target: self.scenarioTarget(projectID: project.id, scenarioID: scenario.id),
                     fence: ["operation_generation": scenario.stateRevision],
-                    payload: payload
+                    payload: payload,
+                    responseTimeoutSeconds: 360
                 )
             )
             try await self.reloadScenarios()
@@ -1432,7 +1476,8 @@ final class HarnessViewModel: ObservableObject {
         participant: ParticipantRecord,
         activity: @autoclosure @escaping () -> String,
         success: @autoclosure @escaping () -> String,
-        extraPayload: [String: Any] = [:]
+        extraPayload: [String: Any] = [:],
+        responseTimeoutSeconds: Int = 60
     ) async {
         guard let project = selectedProject, let scenario = selectedScenario else {
             return refuse(.participantAction, S.Msg.selectRoomFirst)
@@ -1462,7 +1507,8 @@ final class HarnessViewModel: ObservableObject {
                         "operation_generation": participant.stateRevision,
                         "participant_generation": participant.generation,
                     ],
-                    payload: payload
+                    payload: payload,
+                    responseTimeoutSeconds: responseTimeoutSeconds
                 )
             )
             try await self.reloadScenarios()
@@ -1723,6 +1769,7 @@ final class HarnessViewModel: ObservableObject {
     private func clearDestroyPreview() {
         destroyPreviewText = ""
         destroyPreviewEligible = false
+        destroyPreviewBlockers = []
     }
 
     private func reloadParticipants(project: ProjectRecord, scenario: ScenarioRecord) async throws {

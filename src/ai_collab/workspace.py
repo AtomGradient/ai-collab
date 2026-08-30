@@ -1233,7 +1233,10 @@ class WorkspaceCoordinator:
                         binding=binding,
                         workspace_path=workspace_path,
                     )
-                if operation != "scenario.destroy" or binding_state not in {
+                if operation not in {
+                    "scenario.destroy",
+                    "scenario.force-destroy",
+                } or binding_state not in {
                     "absent",
                     "planned",
                     "provision_failed",
@@ -1277,6 +1280,34 @@ class WorkspaceCoordinator:
             plan = copy.deepcopy(binding["plan"])
             receipt = copy.deepcopy(binding["receipt"])
             workspace_id = binding["workspace_id"]
+        if operation == "scenario.force-destroy":
+            try:
+                husk_digest = self._empty_husk_digest(
+                    workspace_path, workspace_id=workspace_id
+                )
+            except WorkspaceError:
+                pass
+            else:
+                return (
+                    {
+                        "workspace_id": workspace_id,
+                        "workspace_binding_digest": receipt.get(
+                            "workspace_binding_digest"
+                        ),
+                        "receipt_digest": canonical_json_sha256(receipt),
+                        "state": "missing",
+                        "binding_state": "ready",
+                        "drift_codes": ["workspace.binding-missing"],
+                        "wip_summary_digest": husk_digest,
+                        "canonical_source_wip_mutation": False,
+                    },
+                    {
+                        "subject_kind": "empty-project-storage",
+                        "workspace_path": str(workspace_path),
+                        "expected_binding_state": "ready",
+                        "expected_husk_digest": husk_digest,
+                    },
+                )
         operation_id = f"ws-preview-{uuid.uuid4().hex}"
         external = self._call_adapter(
             project_instance_id,
@@ -1866,7 +1897,7 @@ class WorkspaceCoordinator:
                         "workspace binding changed during destroy",
                     )
                 if binding_state != "ready":
-                    if force or binding_state not in {
+                    if binding_state not in {
                         "absent",
                         "planned",
                         "provision_failed",
@@ -1893,6 +1924,23 @@ class WorkspaceCoordinator:
                         scenario_generation=scenario_generation,
                         workspace_path=workspace_path,
                         expected_husk_digest=expected_wip_summary_digest,
+                    )
+                if force and self._workspace_container_absent_or_empty(
+                    workspace_path
+                ):
+                    return self._destroy_empty_husk(
+                        state=state,
+                        key=key,
+                        binding=binding,
+                        binding_state=binding_state,
+                        request_id=request_id,
+                        request_digest=request_digest,
+                        project_instance_id=project_instance_id,
+                        scenario_id=scenario_id,
+                        scenario_generation=scenario_generation,
+                        workspace_path=workspace_path,
+                        expected_husk_digest=expected_wip_summary_digest,
+                        allow_ready_binding=True,
                     )
             prepared = self._prepare_ready_high_risk(
                 request_id=request_id,
@@ -2869,6 +2917,7 @@ class WorkspaceCoordinator:
         scenario_generation: int,
         workspace_path: Path,
         expected_husk_digest: str,
+        allow_ready_binding: bool = False,
     ) -> tuple[str, dict[str, Any]]:
         """Tombstone an exact empty Scenario workspace without touching source/WIP."""
 
@@ -2887,11 +2936,10 @@ class WorkspaceCoordinator:
         # proof that every non-ready state is disposable.
         current = state["bindings"].get(key)
         current_state = "absent" if current is None else current["state"]
-        if current_state != binding_state or current_state not in {
-            "absent",
-            "planned",
-            "provision_failed",
-        }:
+        allowed_states = {"absent", "planned", "provision_failed"}
+        if allow_ready_binding:
+            allowed_states.add("ready")
+        if current_state != binding_state or current_state not in allowed_states:
             raise WorkspaceError(
                 "workspace.concurrent-change", "workspace changed during destroy"
             )
@@ -2957,8 +3005,23 @@ class WorkspaceCoordinator:
         return operation_id, response
 
     @staticmethod
+    def _workspace_container_absent_or_empty(workspace_path: Path) -> bool:
+        try:
+            details = workspace_path.lstat()
+        except FileNotFoundError:
+            return True
+        except OSError:
+            return False
+        if stat.S_ISLNK(details.st_mode) or not stat.S_ISDIR(details.st_mode):
+            return False
+        try:
+            return not any(workspace_path.iterdir())
+        except OSError:
+            return False
+
+    @staticmethod
     def _empty_husk_digest(workspace_path: Path, *, workspace_id: str) -> str:
-        """Prove a Host-owned Scenario container contains no deletable data."""
+        """Prove a Host-owned Scenario container is empty or absent."""
 
         if not isinstance(workspace_id, str) or (
             not workspace_id.startswith("workspace-")
@@ -2970,6 +3033,15 @@ class WorkspaceCoordinator:
             )
         try:
             details = workspace_path.lstat()
+        except FileNotFoundError:
+            return WorkspaceCoordinator._missing_husk_digest(
+                workspace_path, workspace_id=workspace_id
+            )
+        except OSError as exc:
+            raise WorkspaceError(
+                "workspace.husk-invalid", "empty workspace cannot be inspected"
+            ) from exc
+        try:
             resolved = workspace_path.resolve(strict=True)
             entries = list(workspace_path.iterdir())
         except OSError as exc:
@@ -2999,6 +3071,47 @@ class WorkspaceCoordinator:
                     "inode": details.st_ino,
                     "uid": details.st_uid,
                     "mode": stat.S_IMODE(details.st_mode),
+                },
+                "entries": [],
+            }
+        )
+
+    @staticmethod
+    def _missing_husk_digest(workspace_path: Path, *, workspace_id: str) -> str:
+        parent = workspace_path.parent
+        try:
+            parent_details = parent.lstat()
+            parent_resolved = parent.resolve(strict=True)
+        except OSError as exc:
+            raise WorkspaceError(
+                "workspace.husk-invalid",
+                "empty workspace parent cannot be inspected",
+            ) from exc
+        if (
+            stat.S_ISLNK(parent_details.st_mode)
+            or not stat.S_ISDIR(parent_details.st_mode)
+            or parent_resolved != parent
+            or parent_details.st_uid != os.getuid()
+            or stat.S_IMODE(parent_details.st_mode) != 0o700
+        ):
+            raise WorkspaceError(
+                "workspace.husk-invalid",
+                "empty workspace parent ownership differs",
+            )
+        if workspace_path.exists() or workspace_path.is_symlink():
+            raise WorkspaceError(
+                "workspace.husk-invalid",
+                "empty workspace changed during inspection",
+            )
+        return canonical_json_sha256(
+            {
+                "path_absence": {
+                    "workspace_id": workspace_id,
+                    "parent_device": parent_details.st_dev,
+                    "parent_inode": parent_details.st_ino,
+                    "parent_uid": parent_details.st_uid,
+                    "parent_mode": stat.S_IMODE(parent_details.st_mode),
+                    "missing_name": workspace_path.name,
                 },
                 "entries": [],
             }

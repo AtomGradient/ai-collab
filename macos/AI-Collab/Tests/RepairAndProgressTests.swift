@@ -199,6 +199,33 @@ final class RepairAndProgressTests: XCTestCase {
         )
     }
 
+    func testITermPresentationRepairGuidanceIsActionable() {
+        let model = HarnessViewModel()
+        let actions = [
+            "iterm-presentation.launch-target",
+            "iterm-presentation.enable-python-api",
+            "iterm-presentation.restart-after-python-api",
+            "iterm-presentation.reset-private-api-socket",
+        ]
+
+        for action in actions {
+            XCTAssertTrue(model.canPerformRepairAction(action), action)
+            XCTAssertFalse(S.Repair.label(action).contains(action), action)
+            XCTAssertNotNil(model.repairActionDetail(action), action)
+        }
+        XCTAssertEqual(S.Repair.label("iterm-presentation.enable-python-api"), "Copy iTerm2 API Setup")
+        XCTAssertTrue(
+            model.repairActionDetail("iterm-presentation.enable-python-api")?
+                .contains("Settings -> General -> Magic") == true
+        )
+        XCTAssertEqual(
+            S.Fix.sentence("auth.confirmation-timeout"),
+            "The high-risk confirmation timed out."
+        )
+        XCTAssertFalse(model.canPerformRepairAction("iterm-presentation.remove-authentication-bypass"))
+        XCTAssertNotNil(S.Repair.detail("iterm-presentation.remove-authentication-bypass"))
+    }
+
     func testLeaseStatesAndResourceClassesSpeakHumanWords() {
         for (token, english) in [
             ("active", "In use"), ("stale", "Stale"), ("released", "Released"),

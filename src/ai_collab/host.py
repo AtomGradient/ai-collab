@@ -3265,7 +3265,10 @@ class HarnessHost:
                     retryable=True,
                 )
             record, workspace_path = self.store.scenario_workspace(
-                target["project_instance_id"], target["scenario_id"]
+                target["project_instance_id"],
+                target["scenario_id"],
+                allow_missing=operation
+                in {"scenario.destroy", "scenario.force-destroy"},
             )
             if (
                 record["scenario_generation"] != payload["scenario_generation"]
@@ -4166,8 +4169,25 @@ class HarnessHost:
             and expected_binding_state
             in {"absent", "planned", "provision_failed"}
         )
+        coordinator_proven_force_destroy = False
         if (
-            not unprovisioned_destroy
+            pending["operation_kind"] == "scenario.force-destroy"
+            and expected_binding_state == "ready"
+            and isinstance(workspace_result, dict)
+        ):
+            workspace = workspace_result.get("workspace")
+            evidence = (
+                workspace.get("unprovisioned_destroy_evidence")
+                if isinstance(workspace, dict)
+                else None
+            )
+            coordinator_proven_force_destroy = (
+                isinstance(evidence, dict)
+                and evidence.get("operation_kind") == "destroy-unprovisioned"
+                and evidence.get("binding_state_before") == "ready"
+            )
+        if (
+            not (unprovisioned_destroy or coordinator_proven_force_destroy)
             and workspace_operation_id != expected_workspace_operation_id
         ):
             self._degrade_workspace_join(
@@ -4395,7 +4415,8 @@ class HarnessHost:
             )
         except StoreError:
             if (
-                pending["operation_kind"] == "scenario.destroy"
+                pending["operation_kind"]
+                in {"scenario.destroy", "scenario.force-destroy"}
                 and expected_binding_state
                 in {"absent", "planned", "provision_failed"}
             ):
@@ -4625,7 +4646,8 @@ class HarnessHost:
                     except WorkspaceError:
                         coordinator_no_effect = False
                 unprovisioned_no_adapter = (
-                    pending["operation_kind"] == "scenario.destroy"
+                    pending["operation_kind"]
+                    in {"scenario.destroy", "scenario.force-destroy"}
                     and expected_binding_state
                     in {"absent", "planned", "provision_failed"}
                 )
@@ -4833,7 +4855,10 @@ class HarnessHost:
             subject = {}
         else:
             record, workspace_path = self.store.scenario_workspace(
-                target["project_instance_id"], target["scenario_id"]
+                target["project_instance_id"],
+                target["scenario_id"],
+                allow_missing=operation
+                in {"scenario.destroy", "scenario.force-destroy"},
             )
             if record["workspace_binding_id"] is None:
                 workspace_preview = {

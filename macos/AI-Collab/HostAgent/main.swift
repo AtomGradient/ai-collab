@@ -86,7 +86,15 @@ let userPaths = [
     "/usr/sbin",
     "/sbin",
 ]
-setenv("PATH", userPaths.joined(separator: ":"), 0)
+let inheritedPaths = (ProcessInfo.processInfo.environment["PATH"] ?? "")
+    .split(separator: ":")
+    .map(String.init)
+let searchPaths = (userPaths + inheritedPaths).reduce(into: [String]()) { result, path in
+    if !path.isEmpty && !result.contains(path) {
+        result.append(path)
+    }
+}
+setenv("PATH", searchPaths.joined(separator: ":"), 1)
 
 private func configureSystemProxyEnvironment() {
     guard

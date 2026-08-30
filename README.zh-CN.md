@@ -21,7 +21,10 @@ macOS 上的本地多 AI 任务房间协作套件。把任何 Git 项目变成�
 1. 从 [Releases](../../releases) 下载 `AICollab.dmg`，拖入「应用程序」。
    发布版已签名并完成 Apple 公证，可直接打开。
 2. 安装 [iTerm2](https://iterm2.com) —— Agent 运行在由 Host 拥有并可恢复的
-   iTerm2 窗口里。
+   iTerm2 窗口里。然后在 iTerm2 打开 Settings -> General -> Magic，
+   启用 **Python API** 并重启 iTerm2。等效命令是：
+   `defaults write com.googlecode.iterm2 EnableAPIServer -bool true` 和
+   `defaults write com.googlecode.iterm2 NoSyncEnableAPIServer -bool true`。
 3. 点击 **注册项目**，选择任意 Git 目录。无配置文件的新项目和旧版
    AI Collab 声明都能直接注册；注册不会写入所选 checkout。
 4. 创建一个任务房间，点击 **准备工作区**。在这次明确授权后，Host

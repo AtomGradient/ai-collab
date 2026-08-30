@@ -10,13 +10,16 @@ import ctypes
 import os
 import platform
 import stat
+import subprocess
 from pathlib import Path
 from typing import Any
 
 
 ITERM_SUPPORT_SUITE = "iTerm2"
+ITERM_PREFERENCES_DOMAIN = "com.googlecode.iterm2"
 ITERM_AUTH_BYPASS_FILENAME = "disable-automation-auth"
 ITERM_PRIVATE_SOCKET_COMPONENTS = ("private", "socket")
+ITERM_API_SERVER_KEYS = ("EnableAPIServer", "NoSyncEnableAPIServer")
 
 
 class AutomationPreflightError(RuntimeError):
@@ -132,12 +135,73 @@ def authentication_bypass_status(
     }
 
 
+def target_application_running(bundle_identifier: str) -> bool:
+    """Observe whether an app is running without sending AppleEvents."""
+
+    if not isinstance(bundle_identifier, str) or not bundle_identifier:
+        raise AutomationPreflightError("Automation target bundle identifier is invalid")
+    try:
+        completed = subprocess.run(
+            ["/usr/bin/lsappinfo", "info", "-only", "pid", bundle_identifier],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise AutomationPreflightError("cannot inspect Automation target") from exc
+    return completed.returncode == 0 and "pid" in completed.stdout.lower()
+
+
+def _defaults_bool(domain: str, key: str) -> bool | None:
+    try:
+        completed = subprocess.run(
+            ["/usr/bin/defaults", "read", domain, key],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode != 0:
+        return None
+    value = completed.stdout.strip().lower()
+    if value in {"1", "true", "yes"}:
+        return True
+    if value in {"0", "false", "no"}:
+        return False
+    return None
+
+
+def iterm_python_api_status(
+    preferences_domain: str = ITERM_PREFERENCES_DOMAIN,
+) -> dict[str, bool]:
+    """Read iTerm2's Python API preference without returning plist paths."""
+
+    values = {
+        key: _defaults_bool(preferences_domain, key)
+        for key in ITERM_API_SERVER_KEYS
+    }
+    configured = any(value is not None for value in values.values())
+    enabled = any(value is True for value in values.values())
+    explicitly_disabled = configured and not enabled
+    return {
+        "api_server_configured": configured,
+        "api_server_enabled": enabled,
+        "api_server_explicitly_disabled": explicitly_disabled,
+    }
+
+
 def private_unix_socket_status(
     support_root: Path | None = None,
 ) -> dict[str, bool]:
     """Observe iTerm's local API socket without returning its path or owner."""
 
     root = support_root if support_root is not None else _iterm_support_root()
+    api_status = iterm_python_api_status()
     socket_path = root.joinpath(
         *ITERM_PRIVATE_SOCKET_COMPONENTS
     )
@@ -149,6 +213,7 @@ def private_unix_socket_status(
             "is_unix_socket": False,
             "owned_by_current_user": False,
             "local_only_ready": False,
+            **api_status,
         }
     except OSError as exc:
         raise AutomationPreflightError(
@@ -161,4 +226,5 @@ def private_unix_socket_status(
         "is_unix_socket": is_socket,
         "owned_by_current_user": owned,
         "local_only_ready": is_socket and owned,
+        **api_status,
     }

@@ -766,16 +766,39 @@ struct ContentView: View {
                         }
                     }
                     ForEach(preflight.permissions) { permission in
-                        HStack {
+                        HStack(alignment: .top, spacing: 8) {
                             Image(systemName: "lock.shield")
-                            Text(permission.permissionID)
-                            Spacer()
-                            Text(S.Preflight.permissionStatus(permission.status))
-                                .font(.caption.bold())
-                            if let code = permission.providerErrorCode {
-                                Text(code)
-                                    .font(.caption2.monospaced())
+                                .foregroundStyle(
+                                    permission.status == "granted" ? Color.secondary : Color.orange
+                                )
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(permission.permissionID)
+                                    .font(.callout.bold())
+                                if let code = permission.providerErrorCode {
+                                    Text(code)
+                                        .font(.caption2.monospaced())
+                                        .foregroundStyle(.secondary)
+                                }
+                                if let remediation = permission.remediationRef {
+                                    Text(
+                                        model.repairActionDetail(remediation)
+                                            ?? model.repairActionLabel(remediation)
+                                    )
+                                    .font(.caption)
                                     .foregroundStyle(.secondary)
+                                }
+                            }
+                            Spacer(minLength: 8)
+                            VStack(alignment: .trailing, spacing: 4) {
+                                Text(S.Preflight.permissionStatus(permission.status))
+                                    .font(.caption.bold())
+                                if let remediation = permission.remediationRef,
+                                   model.canPerformRepairAction(remediation) {
+                                    Button(model.repairActionLabel(remediation)) {
+                                        Task { await model.performRepairAction(remediation) }
+                                    }
+                                    .controlSize(.small)
+                                }
                             }
                         }
                     }
@@ -1112,6 +1135,17 @@ struct ContentView: View {
                     }
                     .controlSize(.small)
                     .disabled(!model.destroyPreviewEligible)
+                    if model.destroyPreviewBlocked {
+                        Button(S.Rooms.forceDelete, role: .destructive) {
+                            highRiskIntent = .forceDestroyScenario(scenario)
+                        }
+                        .controlSize(.small)
+                    }
+                }
+                if model.destroyPreviewBlocked {
+                    Text(S.Risk.destroyPreviewBlocked(model.destroyPreviewBlockers))
+                        .font(.caption)
+                        .foregroundStyle(.orange)
                 }
                 ForEach(model.resources.filter(\.canBreak)) { resource in
                     HStack {

@@ -2903,6 +2903,95 @@ def test_force_destroy_removes_a_scenario_whose_workspace_drifted(
         assert client.list_scenarios(project_instance_id="project")["scenarios"] == []
 
 
+def test_force_destroy_removes_ready_scenario_after_workspace_container_disappeared(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    with running_high_risk_host(state_root) as (host, client):
+        created, _ = _provision_host_workspace(client)
+        assert host.workspace is not None
+        workspace_path = (
+            state_root / "workspaces" / created["workspace_binding_id"]
+        )
+        shutil.rmtree(workspace_path)
+
+        preview, subject = host.workspace.high_risk_context(
+            project_instance_id="project",
+            scenario_id="scenario",
+            scenario_generation=created["scenario_generation"],
+            workspace_path=workspace_path,
+            operation="scenario.force-destroy",
+        )
+        assert preview["state"] == "missing"
+        assert preview["binding_state"] == "ready"
+        assert subject["subject_kind"] == "empty-project-storage"
+
+        result = client.force_destroy_scenario(
+            project_instance_id="project",
+            scenario_id="scenario",
+            scenario_generation=created["scenario_generation"],
+            scenario_state_revision=created["state_revision"],
+            request_id="force-missing-ready",
+        )
+
+        assert result["unregistered"] is True
+        assert client.list_scenarios(project_instance_id="project") == {
+            "scenarios": []
+        }
+        workspace_state = json.loads(
+            (state_root / "workspace-execution.json").read_text(encoding="utf-8")
+        )
+        history = next(iter(workspace_state["history"].values()))
+        evidence = history["unprovisioned_destroy_evidence"]
+        assert evidence["binding_state_before"] == "ready"
+        assert len(evidence["husk_digest"]) == 64
+
+
+def test_force_destroy_missing_ready_workspace_restarts_after_finalize_failure(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    with running_high_risk_host(state_root) as (_host, client):
+        created, _ = _provision_host_workspace(client)
+        workspace_path = (
+            state_root / "workspaces" / created["workspace_binding_id"]
+        )
+        shutil.rmtree(workspace_path)
+        host = _host
+        original_write = host.store._write_state  # noqa: SLF001
+        failed_once = False
+
+        def fail_before_finalize_publish(value: dict[str, Any]) -> None:
+            nonlocal failed_once
+            request = value["requests"].get("force-missing-finalize")
+            if (
+                not failed_once
+                and request is not None
+                and request["status"] == "completed"
+            ):
+                failed_once = True
+                raise OSError("injected force missing finalize failure")
+            original_write(value)
+
+        host.store._write_state = fail_before_finalize_publish  # type: ignore[method-assign]  # noqa: SLF001
+        with pytest.raises(HarnessClientError) as pending:
+            client.force_destroy_scenario(
+                project_instance_id="project",
+                scenario_id="scenario",
+                scenario_generation=created["scenario_generation"],
+                scenario_state_revision=created["state_revision"],
+                request_id="force-missing-finalize",
+            )
+        assert pending.value.code == "operation.internal-failure"
+        assert pending.value.retryable is True
+        host.store._write_state = original_write  # type: ignore[method-assign]  # noqa: SLF001
+
+    with running_high_risk_host(state_root) as (_host, client):
+        assert client.list_scenarios(project_instance_id="project") == {
+            "scenarios": []
+        }
+
+
 def test_force_destroy_begin_prepublication_failure_is_no_effect(
     tmp_path: Path,
 ) -> None:

@@ -3691,10 +3691,6 @@ class ScenarioStore:
             expected_workspace_binding_state
             not in {"absent", "planned", "provision_failed", "ready"}
             or not self._sha256(expected_wip_summary_digest)
-            or (
-                operation_kind == "scenario.force-destroy"
-                and expected_workspace_binding_state != "ready"
-            )
         ):
             raise StoreError(
                 "scenario.invalid-transition", "scenario destroy evidence differs"
@@ -4062,7 +4058,11 @@ class ScenarioStore:
             return {"scenario": copy.deepcopy(item["record"])}
 
     def scenario_workspace(
-        self, project_instance_id: str, scenario_id: str
+        self,
+        project_instance_id: str,
+        scenario_id: str,
+        *,
+        allow_missing: bool = False,
     ) -> tuple[dict[str, Any], Path]:
         """Return the fenced Scenario record and its owned private workspace."""
 
@@ -4078,6 +4078,25 @@ class ScenarioStore:
             if not isinstance(binding_id, str):
                 raise StoreError("scenario.workspace-unavailable", "scenario has no workspace")
             workspace_path = self.workspace_path(binding_id)
+            if (
+                allow_missing
+                and not workspace_path.exists()
+                and not workspace_path.is_symlink()
+                and workspace_path.parent
+                in {self.workspace_root, self.legacy_workspace_root}
+            ):
+                parent = workspace_path.parent
+                if (
+                    parent.is_symlink()
+                    or not parent.is_dir()
+                    or parent.stat().st_uid != os.getuid()
+                    or stat.S_IMODE(parent.stat().st_mode) != 0o700
+                ):
+                    raise StoreError(
+                        "scenario.workspace-unavailable",
+                        "scenario workspace root is unavailable",
+                    )
+                return record, workspace_path
             if (
                 workspace_path.is_symlink()
                 or not workspace_path.is_dir()

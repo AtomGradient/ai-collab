@@ -200,7 +200,19 @@ class SecurityAdapterCommand:
                 timeout=timeout_seconds,
                 check=False,
             )
-        except (OSError, subprocess.TimeoutExpired) as exc:
+        except subprocess.TimeoutExpired as exc:
+            if operation == "present":
+                raise SecurityError(
+                    "auth.confirmation-timeout",
+                    "high-risk operation confirmation timed out",
+                    retryable=True,
+                ) from exc
+            raise SecurityError(
+                "security.adapter-unavailable",
+                "security adapter is unavailable",
+                retryable=True,
+            ) from exc
+        except OSError as exc:
             raise SecurityError(
                 "security.adapter-unavailable",
                 "security adapter is unavailable",
@@ -550,6 +562,12 @@ class SecurityCoordinator:
         }
         if decision["outcome"] != "approved":
             self._record_denied(request_digest, first_snapshot, challenge, decision)
+            if decision["reason_code"] == "confirmation.timeout":
+                raise SecurityError(
+                    "auth.confirmation-timeout",
+                    "high-risk operation confirmation timed out",
+                    retryable=True,
+                )
             raise SecurityError(
                 "auth.confirmation-denied", "high-risk operation was denied"
             )

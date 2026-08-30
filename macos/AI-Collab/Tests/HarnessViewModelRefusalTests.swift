@@ -226,6 +226,21 @@ final class HarnessViewModelRefusalTests: XCTestCase {
         )
     }
 
+    func testDestroyWithBlockedPreviewSaysWhy() async {
+        let model = modelWithScenario()
+        model.destroyPreviewText = #"{"effect_preview":{"eligible":false}}"#
+        model.destroyPreviewEligible = false
+        model.destroyPreviewBlockers = ["workspace.not-aligned"]
+
+        await model.destroyScenario()
+
+        XCTAssertEqual(
+            model.validationMessage(for: .scenarioLifecycle),
+            "The destroy preview is blocked: workspace.not-aligned. "
+                + "Review the preview or use Force Delete from High-risk Actions."
+        )
+    }
+
     /// The branch that used to return silently while the button stayed enabled:
     /// the Scenario moved on after the plan preview was taken.
     func testApplyingAStalePlanExplainsThatItWentStale() async {

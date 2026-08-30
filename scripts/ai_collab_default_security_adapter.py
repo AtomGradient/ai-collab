@@ -264,7 +264,7 @@ def _empty_project_subject(
     if (
         set(subject) != expected_fields
         or subject.get("subject_kind") != "empty-project-storage"
-        or binding_state not in {"absent", "planned", "provision_failed"}
+        or binding_state not in {"absent", "planned", "provision_failed", "ready"}
         or not _sha256(subject.get("expected_husk_digest"))
     ):
         raise AdapterError("private empty project subject differs")
@@ -276,30 +276,67 @@ def _empty_project_subject(
         raise AdapterError("private empty project binding is invalid")
     try:
         details = supplied.lstat()
-        workspace = supplied.resolve(strict=True)
-        entries = list(supplied.iterdir())
+    except FileNotFoundError:
+        try:
+            parent_details = supplied.parent.lstat()
+            parent = supplied.parent.resolve(strict=True)
+        except OSError as exc:
+            raise AdapterError("private empty project binding is invalid") from exc
+        if (
+            stat.S_ISLNK(parent_details.st_mode)
+            or not stat.S_ISDIR(parent_details.st_mode)
+            or parent != supplied.parent
+            or parent_details.st_uid != os.getuid()
+            or stat.S_IMODE(parent_details.st_mode) != 0o700
+            or supplied.exists()
+            or supplied.is_symlink()
+        ):
+            raise AdapterError("private empty project binding is invalid")
+        workspace = supplied
+        entries = []
+        observed_state = "missing"
+        observed_husk_digest = digest(
+            {
+                "path_absence": {
+                    "workspace_id": supplied.name,
+                    "parent_device": parent_details.st_dev,
+                    "parent_inode": parent_details.st_ino,
+                    "parent_uid": parent_details.st_uid,
+                    "parent_mode": stat.S_IMODE(parent_details.st_mode),
+                    "missing_name": supplied.name,
+                },
+                "entries": [],
+            }
+        )
     except OSError as exc:
         raise AdapterError("private empty project binding is invalid") from exc
-    if (
-        stat.S_ISLNK(details.st_mode)
-        or not stat.S_ISDIR(details.st_mode)
-        or workspace != supplied
-        or details.st_uid != os.getuid()
-        or stat.S_IMODE(details.st_mode) != 0o700
-    ):
-        raise AdapterError("private empty project binding is invalid")
-    observed_husk_digest = digest(
-        {
-            "path_identity": {
-                "workspace_id": workspace.name,
-                "device": details.st_dev,
-                "inode": details.st_ino,
-                "uid": details.st_uid,
-                "mode": stat.S_IMODE(details.st_mode),
-            },
-            "entries": [],
-        }
-    )
+    else:
+        try:
+            workspace = supplied.resolve(strict=True)
+            entries = list(supplied.iterdir())
+        except OSError as exc:
+            raise AdapterError("private empty project binding is invalid") from exc
+        if (
+            stat.S_ISLNK(details.st_mode)
+            or not stat.S_ISDIR(details.st_mode)
+            or workspace != supplied
+            or details.st_uid != os.getuid()
+            or stat.S_IMODE(details.st_mode) != 0o700
+        ):
+            raise AdapterError("private empty project binding is invalid")
+        observed_state = "unprovisioned"
+        observed_husk_digest = digest(
+            {
+                "path_identity": {
+                    "workspace_id": workspace.name,
+                    "device": details.st_dev,
+                    "inode": details.st_ino,
+                    "uid": details.st_uid,
+                    "mode": stat.S_IMODE(details.st_mode),
+                },
+                "entries": [],
+            }
+        )
     exact_empty = (
         not entries
         and observed_husk_digest == subject["expected_husk_digest"]
@@ -312,7 +349,7 @@ def _empty_project_subject(
     }
     evidence = {
         "subject_digest": digest(redacted_subject),
-        "workspace_state": "unprovisioned",
+        "workspace_state": observed_state,
         "binding_state": binding_state,
         "entry_count": len(entries),
         "husk_digest": observed_husk_digest,
@@ -527,7 +564,7 @@ def _prompt(effect_preview: Mapping[str, Any]) -> str:
     return prompt
 
 
-CONFIRMATION_TIMEOUT_SECONDS = 300
+CONFIRMATION_TIMEOUT_SECONDS = 120
 
 
 def _terminate_presenter(process: "subprocess.Popen[str]") -> None:
@@ -548,7 +585,7 @@ def _terminate_presenter(process: "subprocess.Popen[str]") -> None:
             continue
 
 
-def _present_confirmation(argv: tuple[str, ...]) -> tuple[int, str]:
+def _present_confirmation(argv: tuple[str, ...]) -> tuple[int, str, bool]:
     """Run the presenter so its dialog never outlives this adapter.
 
     An abandoned dialog is worse than no dialog. It keeps accepting clicks
@@ -579,7 +616,7 @@ def _present_confirmation(argv: tuple[str, ...]) -> tuple[int, str]:
         stdout, _ = process.communicate(timeout=CONFIRMATION_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
         _terminate_presenter(process)
-        raise AdapterError("trusted local confirmation was not answered") from None
+        return 0, "", True
     finally:
         for number, handler in installed.items():
             try:
@@ -587,7 +624,7 @@ def _present_confirmation(argv: tuple[str, ...]) -> tuple[int, str]:
             except (OSError, ValueError):
                 continue
         _terminate_presenter(process)
-    return process.returncode, stdout
+    return process.returncode, stdout, False
 
 
 def present(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -612,12 +649,18 @@ def present(payload: Mapping[str, Any]) -> dict[str, Any]:
         "end try\n"
         "end run"
     )
-    returncode, stdout = _present_confirmation(
+    returncode, stdout, timed_out = _present_confirmation(
         ("/usr/bin/osascript", "-e", script, _prompt(effect_preview))
     )
     if returncode != 0:
         raise AdapterError("trusted local confirmation presenter failed")
-    outcome = "approved" if stdout.strip() == "Approve Once" else "denied"
+    outcome = (
+        "denied"
+        if timed_out
+        else "approved"
+        if stdout.strip() == "Approve Once"
+        else "denied"
+    )
     decided_at = int(time.time() * 1000)
     presenter_digest = digest(
         {
@@ -639,7 +682,13 @@ def present(payload: Mapping[str, Any]) -> dict[str, Any]:
                 "presenter_instance_digest": presenter_digest,
             }
         ),
-        "reason_code": None if outcome == "approved" else "user.denied",
+        "reason_code": (
+            None
+            if outcome == "approved"
+            else "confirmation.timeout"
+            if timed_out
+            else "user.denied"
+        ),
     }
 
 

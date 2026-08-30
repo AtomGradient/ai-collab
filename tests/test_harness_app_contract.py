@@ -187,6 +187,22 @@ def test_app_exposes_degraded_and_high_risk_repair_actions() -> None:
     assert "ResourceLeaseRecord" in models
 
 
+def test_app_gives_high_risk_confirmation_operations_long_timeout() -> None:
+    view_model = (APP_ROOT / "HarnessViewModel.swift").read_text(encoding="utf-8")
+    for operation in ("scenario.destroy", "scenario.force-destroy", "resource.break"):
+        assert re.search(
+            rf'operation: "{re.escape(operation)}".*?responseTimeoutSeconds: 360',
+            view_model,
+            re.S,
+        ), operation
+    assert re.search(
+        r'operation: "participant.force-stop".*?responseTimeoutSeconds: 360',
+        view_model,
+        re.S,
+    )
+    assert "responseTimeoutSeconds: Int = 60" in view_model
+
+
 def test_app_exposes_single_entry_context_menu_force_destroy() -> None:
     content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
     view_model = (APP_ROOT / "HarnessViewModel.swift").read_text(encoding="utf-8")
@@ -212,6 +228,39 @@ def test_app_exposes_preflight_and_structured_actionable_errors() -> None:
     assert "category" in ipc
 
 
+def test_app_surfaces_presentation_permission_remediation_actions() -> None:
+    content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
+    view_model = (APP_ROOT / "HarnessViewModel.swift").read_text(encoding="utf-8")
+    strings = (APP_ROOT / "Strings.swift").read_text(encoding="utf-8")
+    assert "permission.remediationRef" in content
+    assert "model.repairActionDetail(remediation)" in content
+    assert "await model.performRepairAction(remediation)" in content
+    for remediation in (
+        "iterm-presentation.enable-python-api",
+        "iterm-presentation.restart-after-python-api",
+        "iterm-presentation.reset-private-api-socket",
+    ):
+        assert remediation in view_model
+        assert remediation in strings
+    assert "Settings -> General -> Magic" in strings
+    assert "auth.confirmation-timeout" in strings
+
+
+def test_app_surfaces_destroy_preview_blockers_and_force_delete_escape_hatch() -> None:
+    content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
+    view_model = (APP_ROOT / "HarnessViewModel.swift").read_text(encoding="utf-8")
+    strings = (APP_ROOT / "Strings.swift").read_text(encoding="utf-8")
+    assert "destroyPreviewBlockers" in view_model
+    assert "destroyPreviewBlocked" in view_model
+    assert 'preview["blockers"] as? [String]' in view_model
+    assert "S.Msg.destroyPreviewBlocked(self.destroyPreviewBlockers)" in view_model
+    assert "model.destroyPreviewBlocked" in content
+    assert "S.Risk.destroyPreviewBlocked(model.destroyPreviewBlockers)" in content
+    assert ".forceDestroyScenario(scenario)" in content
+    assert "Destroy preview is blocked" in strings
+    assert "The destroy preview is blocked" in strings
+
+
 def test_app_embeds_separate_current_user_host_agent_contract() -> None:
     project = APP_PROJECT.read_text(encoding="utf-8")
     helper = HOST_AGENT.read_text(encoding="utf-8")
@@ -226,6 +275,14 @@ def test_app_embeds_separate_current_user_host_agent_contract() -> None:
     assert "<key>RunAtLoad</key>" in launch_agent
     assert "<key>KeepAlive</key>" in launch_agent
     assert "root" not in launch_agent.lower()
+
+
+def test_host_agent_preserves_user_path_when_launched_by_service_management() -> None:
+    helper = HOST_AGENT.read_text(encoding="utf-8")
+    assert 'ProcessInfo.processInfo.environment["PATH"]' in helper
+    assert "userPaths + inheritedPaths" in helper
+    assert 'setenv("PATH", searchPaths.joined(separator: ":"), 1)' in helper
+    assert 'setenv("PATH", userPaths.joined(separator: ":"), 0)' not in helper
 
 
 def test_host_agent_resolves_user_supplied_adapter_configs() -> None:

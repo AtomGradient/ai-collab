@@ -510,6 +510,16 @@ enum S {
         static var repairScenario: String { t("Repair Task Room", "修复任务房间") }
         static var loadDestroyPreview: String { t("Load Destroy Preview", "加载删除预览") }
         static var destroyScenario: String { t("Delete Task Room", "删除任务房间") }
+        static func destroyPreviewBlocked(_ blockers: [String]) -> String {
+            let detail = blockers.isEmpty
+                ? t("the Host reported unresolved blockers", "后台服务报告仍有阻塞条件")
+                : blockers.joined(separator: ", ")
+            return t(
+                "Destroy preview is blocked: \(detail). Use Force Delete only after "
+                    + "confirming the task room can be removed.",
+                "删除预览受阻：\(detail)。确认可以移除这个任务房间后，再使用强制删除。"
+            )
+        }
         static func staleLease(_ resourceClass: String) -> String {
             t("Stale \(resourceClass) lease", "失效的 \(resourceClass) 占用")
         }
@@ -651,6 +661,16 @@ enum S {
                 "先加载删除预览，确认会发生什么。"
             )
         }
+        static func destroyPreviewBlocked(_ blockers: [String]) -> String {
+            let detail = blockers.isEmpty
+                ? t("the Host reported unresolved blockers", "后台服务报告仍有阻塞条件")
+                : blockers.joined(separator: ", ")
+            return t(
+                "The destroy preview is blocked: \(detail). Review the preview or "
+                    + "use Force Delete from High-risk Actions.",
+                "删除预览受阻：\(detail)。请查看预览，或在高风险操作中使用强制删除。"
+            )
+        }
         static var chooseTeamTemplateToPreview: String {
             t("Choose a team template to preview.", "先选择要预览的团队模板。")
         }
@@ -738,6 +758,20 @@ enum S {
         static var windowsRestored: String { t("Restored the room windows.", "已还原房间窗口。") }
         static func createdRoom(_ id: String) -> String { t("Created task room \(id).", "已创建任务房间 \(id)。") }
         static var workspaceReady: String { t("Workspace is ready.", "工作区已就绪。") }
+        static var itermPythonAPICommandCopied: String {
+            t(
+                "Copied iTerm2 Python API setup commands. Paste them into Terminal "
+                    + "if Settings is not available, then run preflight again.",
+                "已复制 iTerm2 Python API 设置命令。如果无法从设置里开启，请粘贴到终端执行，"
+                    + "然后重新运行预检。"
+            )
+        }
+        static var restartIterm2Required: String {
+            t(
+                "Restart iTerm2, then run preflight again.",
+                "重启 iTerm2，然后重新运行预检。"
+            )
+        }
         static func resumed(_ id: String) -> String { t("Resumed \(id).", "已恢复 \(id)。") }
         static func closed(_ id: String) -> String { t("Closed \(id).", "\(id) 已休会。") }
         static var repairFinished: String { t("Repair finished.", "修复完成。") }
@@ -1047,10 +1081,64 @@ enum S {
             case "host.update":
                 return t("Update or Reinstall AI Collab", "更新或重装 AI Collab")
             case "iterm-presentation.enable-python-api":
-                return t("Enable Presentation Automation", "启用展示自动化")
+                return t("Copy iTerm2 API Setup", "复制 iTerm2 API 设置命令")
+            case "iterm-presentation.restart-after-python-api":
+                return t("Restart iTerm2", "重启 iTerm2")
+            case "iterm-presentation.reset-private-api-socket":
+                return t("Reset iTerm2 API Socket", "重置 iTerm2 API Socket")
             case "iterm-presentation.remove-authentication-bypass":
                 return t("Restore Authenticated Presentation API", "恢复带认证的展示 API")
             default: return t("Follow \(action)", "按 \(action) 处理")
+            }
+        }
+
+        static func detail(_ action: String) -> String? {
+            switch action {
+            case "system-settings.automation":
+                return t(
+                    "Open System Settings and allow AI Collab to control iTerm2.",
+                    "打开系统设置，允许 AI Collab 控制 iTerm2。"
+                )
+            case "presentation.permission-request":
+                return t(
+                    "Ask macOS to show the Automation permission prompt for iTerm2.",
+                    "让 macOS 弹出 iTerm2 自动化权限请求。"
+                )
+            case "iterm-presentation.launch-target":
+                return t(
+                    "Open iTerm2, then run preflight again.",
+                    "打开 iTerm2，然后重新运行预检。"
+                )
+            case "iterm-presentation.enable-python-api":
+                return t(
+                    "In iTerm2, open Settings -> General -> Magic, enable Python API, "
+                        + "then restart iTerm2. The button copies equivalent defaults commands.",
+                    "在 iTerm2 打开 Settings -> General -> Magic，启用 Python API，"
+                        + "然后重启 iTerm2。按钮会复制等效的 defaults 命令。"
+                )
+            case "iterm-presentation.restart-after-python-api":
+                return t(
+                    "Python API is enabled, but iTerm2 has not created its local API "
+                        + "socket yet. Quit and reopen iTerm2, then run preflight again.",
+                    "Python API 已启用，但 iTerm2 还没有创建本地 API socket。"
+                        + "退出并重新打开 iTerm2，然后重新运行预检。"
+                )
+            case "iterm-presentation.reset-private-api-socket":
+                return t(
+                    "iTerm2's local API socket is not usable by this user. Quit and "
+                        + "reopen iTerm2; if this stays blocked, remove the stale socket "
+                        + "from iTerm2's support folder.",
+                    "当前用户无法使用 iTerm2 的本地 API socket。退出并重新打开 iTerm2；"
+                        + "如果仍然受阻，删除 iTerm2 支持目录里的旧 socket。"
+                )
+            case "iterm-presentation.remove-authentication-bypass":
+                return t(
+                    "Remove any development authentication bypass for the iTerm2 "
+                        + "presentation adapter, then run preflight again.",
+                    "移除 iTerm2 展示适配器的开发认证绕过配置，然后重新运行预检。"
+                )
+            default:
+                return nil
             }
         }
     }
@@ -1222,6 +1310,11 @@ enum S {
                 )
             case "availability.host-unavailable":
                 return t("The background service is not running.", "后台服务未在运行。")
+            case "auth.confirmation-timeout":
+                return t(
+                    "The high-risk confirmation timed out.",
+                    "高风险操作确认超时。"
+                )
             default:
                 return nil
             }

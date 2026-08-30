@@ -458,24 +458,102 @@ def test_no_overlay_means_the_shipped_registry_is_what_runs(
     assert set(profiles) == {row["profile_id"] for row in registry["profiles"]}
 
 
+def _socket_status(
+    *,
+    present: bool = True,
+    is_unix_socket: bool = True,
+    owned_by_current_user: bool = True,
+    api_server_configured: bool = True,
+    api_server_enabled: bool = True,
+) -> dict[str, bool]:
+    return {
+        "present": present,
+        "is_unix_socket": is_unix_socket,
+        "owned_by_current_user": owned_by_current_user,
+        "local_only_ready": present and is_unix_socket and owned_by_current_user,
+        "api_server_configured": api_server_configured,
+        "api_server_enabled": api_server_enabled,
+        "api_server_explicitly_disabled": (
+            api_server_configured and not api_server_enabled
+        ),
+    }
+
+
 @pytest.mark.parametrize(
-    ("automation_status", "authorized", "socket_ready", "expected", "remediation"),
     (
-        ("authorized", True, True, "granted", None),
-        ("denied", False, True, "denied", "system-settings.automation"),
+        "automation_status",
+        "authorized",
+        "target_running",
+        "socket_status",
+        "expected",
+        "provider_error_code",
+        "remediation",
+    ),
+    (
+        ("authorized", True, True, _socket_status(), "granted", None, None),
+        (
+            "denied",
+            False,
+            True,
+            _socket_status(),
+            "denied",
+            "iterm-presentation.automation-denied",
+            "system-settings.automation",
+        ),
         (
             "not_determined_no_prompt",
             False,
             True,
+            _socket_status(),
             "not_determined",
+            "iterm-presentation.automation-not-determined",
             "presentation.permission-request",
         ),
         (
             "authorized",
             True,
             False,
+            _socket_status(),
             "unavailable",
+            "iterm-presentation.target-not-running",
+            "iterm-presentation.launch-target",
+        ),
+        (
+            "authorized",
+            True,
+            True,
+            _socket_status(
+                present=False,
+                is_unix_socket=False,
+                owned_by_current_user=False,
+                api_server_configured=False,
+                api_server_enabled=False,
+            ),
+            "unavailable",
+            "iterm-presentation.python-api-disabled",
             "iterm-presentation.enable-python-api",
+        ),
+        (
+            "authorized",
+            True,
+            True,
+            _socket_status(
+                present=False,
+                is_unix_socket=False,
+                owned_by_current_user=False,
+            ),
+            "unavailable",
+            "iterm-presentation.private-socket-missing",
+            "iterm-presentation.restart-after-python-api",
+        ),
+        (
+            "authorized",
+            True,
+            True,
+            _socket_status(is_unix_socket=False),
+            "unavailable",
+            "iterm-presentation.private-socket-invalid",
+            "iterm-presentation.reset-private-api-socket",
         ),
     ),
 )
@@ -483,8 +561,10 @@ def test_presentation_permission_probe_is_no_prompt_and_actionable(
     monkeypatch: Any,
     automation_status: str,
     authorized: bool,
-    socket_ready: bool,
+    target_running: bool,
+    socket_status: dict[str, bool],
     expected: str,
+    provider_error_code: str | None,
     remediation: str | None,
 ) -> None:
     monkeypatch.setattr(
@@ -504,17 +584,18 @@ def test_presentation_permission_probe_is_no_prompt_and_actionable(
     monkeypatch.setattr(
         participant_driver,
         "private_unix_socket_status",
-        lambda: {
-            "present": socket_ready,
-            "is_unix_socket": socket_ready,
-            "owned_by_current_user": socket_ready,
-            "local_only_ready": socket_ready,
-        },
+        lambda: socket_status,
+    )
+    monkeypatch.setattr(
+        participant_driver,
+        "_target_application_running",
+        lambda _bundle: target_running,
     )
     observation = participant_driver.permission_probe({})[
         "permission_observations"
     ][0]
     assert observation["status"] == expected
+    assert observation["provider_error_code"] == provider_error_code
     assert observation["remediation_ref"] == remediation
     assert observation["prompt_requested"] is False
     assert len(observation["evidence_digest"]) == 64
@@ -540,12 +621,12 @@ def test_presentation_permission_probe_rejects_authentication_bypass(
     monkeypatch.setattr(
         participant_driver,
         "private_unix_socket_status",
-        lambda: {
-            "present": True,
-            "is_unix_socket": True,
-            "owned_by_current_user": True,
-            "local_only_ready": True,
-        },
+        _socket_status,
+    )
+    monkeypatch.setattr(
+        participant_driver,
+        "_target_application_running",
+        lambda _bundle: True,
     )
     observation = participant_driver.permission_probe({})[
         "permission_observations"
@@ -554,6 +635,68 @@ def test_presentation_permission_probe_rejects_authentication_bypass(
     assert observation["provider_error_code"] == (
         "iterm-presentation.authentication-bypass-present"
     )
+
+
+def test_tui_launch_preflight_fails_fast_with_actionable_reason(
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(
+        participant_driver,
+        "private_unix_socket_status",
+        lambda: _socket_status(
+            present=False,
+            is_unix_socket=False,
+            owned_by_current_user=False,
+            api_server_configured=False,
+            api_server_enabled=False,
+        ),
+    )
+    monkeypatch.setattr(
+        participant_driver,
+        "_target_application_running",
+        lambda _bundle: True,
+    )
+
+    with pytest.raises(participant_driver.PresentationPreflightError) as caught:
+        participant_driver._require_iterm_private_api_ready()
+
+    assert str(caught.value) == "iTerm private API is unavailable"
+    assert (
+        caught.value.provider_error_code
+        == "iterm-presentation.python-api-disabled"
+    )
+    assert caught.value.remediation_ref == "iterm-presentation.enable-python-api"
+    assert (
+        participant_driver._launch_reason_code("iterm-preflight", caught.value)
+        == "iterm.private-api-unavailable"
+    )
+
+
+def test_launch_failure_diagnostic_preserves_preflight_remediation(
+    tmp_path: Path,
+) -> None:
+    error = participant_driver.PresentationPreflightError(
+        "iterm-presentation.private-socket-missing",
+        "iterm-presentation.restart-after-python-api",
+    )
+
+    participant_driver._record_launch_failure(
+        tmp_path,
+        stage="iterm-preflight",
+        exc=error,
+        cleanup_outcome="not-required",
+    )
+
+    diagnostic = json.loads((tmp_path / "launch-diagnostic.json").read_text())
+    assert diagnostic == {
+        "schema_version": 1,
+        "outcome": "rejected",
+        "stage": "iterm-preflight",
+        "reason_code": "iterm.private-api-unavailable",
+        "cleanup_outcome": "not-required",
+        "provider_error_code": "iterm-presentation.private-socket-missing",
+        "remediation_ref": "iterm-presentation.restart-after-python-api",
+    }
 
 
 def test_presentation_focus_restores_exact_owned_window_for_current_topology(

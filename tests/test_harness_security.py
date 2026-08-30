@@ -42,6 +42,7 @@ class FakeSecurityAdapter:
         self.observe_calls = 0
         self.change_subject = False
         self.decision_offset_ms = 0
+        self.reason_code_override: str | None = None
         self.calls: list[tuple[str, dict[str, Any]]] = []
 
     def call(
@@ -81,7 +82,11 @@ class FakeSecurityAdapter:
             ),
             "presenter_instance_digest": "4" * 64,
             "decision_evidence_digest": "5" * 64,
-            "reason_code": None if self.outcome == "approved" else "user.denied",
+            "reason_code": (
+                None
+                if self.outcome == "approved"
+                else self.reason_code_override or "user.denied"
+            ),
         }
 
 
@@ -313,6 +318,38 @@ def test_default_security_adapter_proves_only_an_exact_empty_workspace_husk(
     assert replaced["provider_error_code"] == "project-storage.subject-not-proven"
     assert (original / unexpected.name).read_text(encoding="utf-8") == "preserve\n"
 
+    os.chmod(tmp_path, 0o700)
+    missing = tmp_path / "workspace-missing-proof"
+    parent_details = tmp_path.lstat()
+    missing_husk_digest = canonical_json_sha256(
+        {
+            "path_absence": {
+                "workspace_id": missing.name,
+                "parent_device": parent_details.st_dev,
+                "parent_inode": parent_details.st_ino,
+                "parent_uid": parent_details.st_uid,
+                "parent_mode": stat.S_IMODE(parent_details.st_mode),
+                "missing_name": missing.name,
+            },
+            "entries": [],
+        }
+    )
+    missing_subject = {
+        "subject_kind": "empty-project-storage",
+        "workspace_path": str(missing),
+        "expected_binding_state": "ready",
+        "expected_husk_digest": missing_husk_digest,
+    }
+    missing_granted = _observe_with_default_adapter(missing_subject)
+    assert missing_granted["status"] == "granted"
+    assert missing_granted["provider_error_code"] is None
+
+    missing.mkdir(mode=0o700)
+    missing_replaced = _observe_with_default_adapter(missing_subject)
+    assert missing_replaced["provider_error_code"] == (
+        "project-storage.subject-not-proven"
+    )
+
 
 @pytest.mark.parametrize("prior_operation_kind", ["destroy", "repair"])
 def test_default_security_adapter_allows_two_exact_recovery_inventory_observations(
@@ -437,6 +474,20 @@ def test_default_security_adapter_recovery_uid_mismatch_or_unowned_entry_fails_c
     assert sentinel.read_text(encoding="utf-8") == "preserve\n"
 
 
+def test_default_security_adapter_timeout_is_bounded_denial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.syspath_prepend(str(ROOT / "scripts"))
+    adapter = importlib.import_module("ai_collab_default_security_adapter")
+    monkeypatch.setattr(adapter, "CONFIRMATION_TIMEOUT_SECONDS", 0.01)
+
+    returncode, stdout, timed_out = adapter._present_confirmation(("/bin/sleep", "5"))
+
+    assert returncode == 0
+    assert stdout == ""
+    assert timed_out is True
+
+
 @pytest.mark.parametrize(
     "field_drift",
     [
@@ -554,6 +605,26 @@ def test_denial_never_creates_authorization_or_consumption(tmp_path: Path) -> No
         iter(json.loads(coordinator.state_path.read_text(encoding="utf-8"))["chains"].values())
     )
     assert chain["status"] == "denied"
+    assert chain["authorization"] is None
+    assert chain["consumption"] is None
+
+
+def test_confirmation_timeout_has_distinct_authorization_code(tmp_path: Path) -> None:
+    adapter = FakeSecurityAdapter()
+    adapter.outcome = "denied"
+    adapter.reason_code_override = "confirmation.timeout"
+    coordinator = SecurityCoordinator(tmp_path, adapter)
+
+    with pytest.raises(SecurityError, match="timed out") as caught:
+        _authorize(coordinator, _request("scenario.destroy"))
+
+    assert caught.value.code == "auth.confirmation-timeout"
+    assert caught.value.retryable is True
+    chain = next(
+        iter(json.loads(coordinator.state_path.read_text(encoding="utf-8"))["chains"].values())
+    )
+    assert chain["status"] == "denied"
+    assert chain["decision"]["reason_code"] == "confirmation.timeout"
     assert chain["authorization"] is None
     assert chain["consumption"] is None
 

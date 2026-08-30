@@ -33,6 +33,7 @@ from ai_collab_macos_automation_preflight import (
     authentication_bypass_status,
     automation_permission_status,
     private_unix_socket_status,
+    target_application_running,
 )
 
 try:
@@ -91,6 +92,13 @@ EXPECTED_ITERM_BUNDLE_ID = "com.googlecode.iterm2"
 
 class DriverError(RuntimeError):
     pass
+
+
+class PresentationPreflightError(DriverError):
+    def __init__(self, provider_error_code: str, remediation_ref: str):
+        super().__init__("iTerm private API is unavailable")
+        self.provider_error_code = provider_error_code
+        self.remediation_ref = remediation_ref
 
 
 def canonical_json_bytes(value: Any) -> bytes:
@@ -284,6 +292,7 @@ def _presentation_observation(
         )
         authentication = authentication_bypass_status()
         private_socket = private_unix_socket_status()
+        target_running = _target_application_running(EXPECTED_ITERM_BUNDLE_ID)
     except AutomationPreflightError as exc:
         raise DriverError("presentation permission observation is unavailable") from exc
 
@@ -306,20 +315,34 @@ def _presentation_observation(
         status = "unknown"
         provider_error_code = "iterm-presentation.automation-unknown"
         remediation_ref = "system-settings.automation"
+    elif not target_running:
+        status = "unavailable"
+        provider_error_code, remediation_ref = _iterm_private_api_failure(
+            private_socket,
+            target_running=target_running,
+        )
     elif private_socket.get("local_only_ready") is not True:
         status = "unavailable"
-        provider_error_code = "iterm-presentation.private-api-unavailable"
-        remediation_ref = "iterm-presentation.enable-python-api"
+        provider_error_code, remediation_ref = _iterm_private_api_failure(
+            private_socket,
+            target_running=target_running,
+        )
     else:
         status = "granted"
 
     evidence = {
         "automation_status": automation_status,
+        "target_running": target_running,
         "prompt_requested": automation.get("prompt_requested") is True,
         "cookie_authentication_required": authentication.get(
             "cookie_authentication_required"
         )
         is True,
+        "api_server_configured": private_socket.get("api_server_configured") is True,
+        "api_server_enabled": private_socket.get("api_server_enabled") is True,
+        "api_server_explicitly_disabled": (
+            private_socket.get("api_server_explicitly_disabled") is True
+        ),
         "private_socket_present": private_socket.get("present") is True,
         "private_socket_is_unix": private_socket.get("is_unix_socket") is True,
         "private_socket_owned": private_socket.get("owned_by_current_user") is True,
@@ -339,14 +362,56 @@ def _presentation_observation(
 def _target_application_running(bundle_identifier: str) -> bool:
     """Observe whether the automation target is running, without TCC side effects."""
 
-    completed = subprocess.run(
-        ["/usr/bin/lsappinfo", "info", "-only", "pid", bundle_identifier],
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        check=False,
+    return target_application_running(bundle_identifier)
+
+
+def _iterm_private_api_failure(
+    private_socket: Mapping[str, Any],
+    *,
+    target_running: bool,
+) -> tuple[str, str]:
+    if not target_running:
+        return (
+            "iterm-presentation.target-not-running",
+            "iterm-presentation.launch-target",
+        )
+    if private_socket.get("api_server_enabled") is not True:
+        return (
+            "iterm-presentation.python-api-disabled",
+            "iterm-presentation.enable-python-api",
+        )
+    if private_socket.get("present") is not True:
+        return (
+            "iterm-presentation.private-socket-missing",
+            "iterm-presentation.restart-after-python-api",
+        )
+    if (
+        private_socket.get("is_unix_socket") is not True
+        or private_socket.get("owned_by_current_user") is not True
+    ):
+        return (
+            "iterm-presentation.private-socket-invalid",
+            "iterm-presentation.reset-private-api-socket",
+        )
+    return (
+        "iterm-presentation.private-api-unavailable",
+        "iterm-presentation.enable-python-api",
     )
-    return completed.returncode == 0 and "pid" in completed.stdout.lower()
+
+
+def _require_iterm_private_api_ready() -> None:
+    try:
+        private_socket = private_unix_socket_status()
+        target_running = _target_application_running(EXPECTED_ITERM_BUNDLE_ID)
+    except AutomationPreflightError as exc:
+        raise DriverError("presentation permission observation is unavailable") from exc
+    if target_running and private_socket.get("local_only_ready") is True:
+        return
+    provider_error_code, remediation_ref = _iterm_private_api_failure(
+        private_socket,
+        target_running=target_running,
+    )
+    raise PresentationPreflightError(provider_error_code, remediation_ref)
 
 
 def permission_probe(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -661,6 +726,7 @@ def _launch_reason_code(stage: str, exc: BaseException) -> str:
         "iTerm runtime process did not become ready": "process.readiness-timeout",
         "runtime TUI did not become input-ready": "tui.readiness-timeout",
         "iTerm application state is unavailable": "iterm.application-unavailable",
+        "iTerm private API is unavailable": "iterm.private-api-unavailable",
         "iTerm top-level window was not created": "iterm.window-not-created",
         "iTerm create returned an ambiguous window identity": (
             "iterm.window-identity-ambiguous"
@@ -686,15 +752,21 @@ def _record_launch_failure(
     """Persist a bounded owner-private launch reason without raw TUI or paths."""
 
     try:
+        value = {
+            "schema_version": 1,
+            "outcome": "rejected",
+            "stage": stage,
+            "reason_code": _launch_reason_code(stage, exc),
+            "cleanup_outcome": cleanup_outcome,
+        }
+        provider_error_code = getattr(exc, "provider_error_code", None)
+        remediation_ref = getattr(exc, "remediation_ref", None)
+        if isinstance(provider_error_code, str) and isinstance(remediation_ref, str):
+            value["provider_error_code"] = provider_error_code
+            value["remediation_ref"] = remediation_ref
         _write_private(
             _launch_diagnostic_path(private_root),
-            {
-                "schema_version": 1,
-                "outcome": "rejected",
-                "stage": stage,
-                "reason_code": _launch_reason_code(stage, exc),
-                "cleanup_outcome": cleanup_outcome,
-            },
+            value,
         )
     except OSError:
         pass
@@ -2476,6 +2548,16 @@ def start(payload: Mapping[str, Any]) -> dict[str, Any]:
             identifiers,
             participant_client,
         )
+    try:
+        _require_iterm_private_api_ready()
+    except BaseException as exc:
+        _record_launch_failure(
+            private_root,
+            stage="iterm-preflight",
+            exc=exc,
+            cleanup_outcome="not-required",
+        )
+        raise
     try:
         module = _ensure_iterm_module(private_root)
     except BaseException as exc:
