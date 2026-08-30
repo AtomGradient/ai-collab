@@ -8,3 +8,4 @@ __pycache__/
 Build/
 DerivedData/
 AICollab.xcodeproj/
+.ai-mailbox/
