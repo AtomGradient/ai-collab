@@ -629,6 +629,51 @@ def test_confirmation_timeout_has_distinct_authorization_code(tmp_path: Path) ->
     assert chain["consumption"] is None
 
 
+def test_denied_confirmation_intent_can_be_retried_and_consumed(
+    tmp_path: Path,
+) -> None:
+    adapter = FakeSecurityAdapter()
+    adapter.outcome = "denied"
+    adapter.reason_code_override = "confirmation.timeout"
+    coordinator = SecurityCoordinator(tmp_path, adapter)
+
+    with pytest.raises(SecurityError, match="timed out") as first:
+        _authorize(coordinator, _request("scenario.destroy", request_id="timeout-one"))
+    with pytest.raises(SecurityError, match="timed out") as second:
+        _authorize(coordinator, _request("scenario.destroy", request_id="timeout-two"))
+
+    assert first.value.code == second.value.code == "auth.confirmation-timeout"
+    state = json.loads(coordinator.state_path.read_text(encoding="utf-8"))
+    request_digest = next(iter(state["chains"]))
+    chain = state["chains"][request_digest]
+    assert chain["status"] == "denied"
+    assert [item["decision"]["reason_code"] for item in chain["denied_history"]] == [
+        "confirmation.timeout",
+        "confirmation.timeout",
+    ]
+
+    adapter.outcome = "approved"
+    consumption = _authorize(
+        coordinator,
+        _request("scenario.destroy", request_id="approved-after-timeout"),
+    )
+
+    state = json.loads(coordinator.state_path.read_text(encoding="utf-8"))
+    chain = state["chains"][request_digest]
+    assert chain["status"] == "consumed"
+    assert chain["request_id"] == "approved-after-timeout"
+    assert chain["authorization"] is not None
+    assert chain["consumption"] == consumption
+    assert len(chain["denied_history"]) == 2
+
+    with pytest.raises(SecurityError, match="already consumed") as replayed:
+        _authorize(
+            coordinator,
+            _request("scenario.destroy", request_id="consumed-retry"),
+        )
+    assert replayed.value.code == "auth.authorization-replayed"
+
+
 def test_non_granted_or_changed_permission_subject_fails_closed(tmp_path: Path) -> None:
     denied_adapter = FakeSecurityAdapter()
     denied_adapter.status = "denied"

@@ -474,7 +474,8 @@ class SecurityCoordinator:
         request_digest = operation_intent_digest(request)
         with self._lock:
             state = self._read_state()
-            if request_digest in state["chains"]:
+            existing = state["chains"].get(request_digest)
+            if existing is not None and existing.get("status") != "denied":
                 raise SecurityError(
                     "auth.authorization-replayed",
                     "high-risk authorization was already consumed",
@@ -666,12 +667,13 @@ class SecurityCoordinator:
         }
         with self._lock:
             state = self._read_state()
-            if request_digest in state["chains"]:
+            existing = state["chains"].get(request_digest)
+            if existing is not None and existing.get("status") != "denied":
                 raise SecurityError(
                     "auth.authorization-replayed",
                     "high-risk authorization was already consumed",
                 )
-            state["chains"][request_digest] = {
+            chain = {
                 "status": "consumed",
                 "operation": operation,
                 "request_id": request["request_id"],
@@ -684,6 +686,9 @@ class SecurityCoordinator:
                 "effect_preview": copy.deepcopy(effect_preview),
                 "operation_outcome": None,
             }
+            if existing is not None:
+                chain["denied_history"] = self._denied_history(existing)
+            state["chains"][request_digest] = chain
             state["state_revision"] += 1
             self._write_state(state)
         return copy.deepcopy(consumption)
@@ -923,8 +928,19 @@ class SecurityCoordinator:
     ) -> None:
         with self._lock:
             state = self._read_state()
-            if request_digest in state["chains"]:
+            existing = state["chains"].get(request_digest)
+            if existing is not None and existing.get("status") != "denied":
                 raise SecurityError("auth.authorization-replayed", "confirmation already exists")
+            denied_history = (
+                self._denied_history(existing) if existing is not None else []
+            )
+            denied_history.append(
+                {
+                    "permission_snapshot": copy.deepcopy(snapshot),
+                    "challenge": copy.deepcopy(challenge),
+                    "decision": copy.deepcopy(decision),
+                }
+            )
             state["chains"][request_digest] = {
                 "status": "denied",
                 "operation": None,
@@ -936,9 +952,23 @@ class SecurityCoordinator:
                 "consumption": None,
                 "effect_preview": None,
                 "operation_outcome": None,
+                "denied_history": denied_history,
             }
             state["state_revision"] += 1
             self._write_state(state)
+
+    @staticmethod
+    def _denied_history(chain: Mapping[str, Any]) -> list[dict[str, Any]]:
+        history = chain.get("denied_history")
+        if isinstance(history, list):
+            return copy.deepcopy(history)
+        return [
+            {
+                "permission_snapshot": copy.deepcopy(chain["permission_snapshot"]),
+                "challenge": copy.deepcopy(chain["challenge"]),
+                "decision": copy.deepcopy(chain["decision"]),
+            }
+        ]
 
     @staticmethod
     def _sha256(value: Any) -> bool:
