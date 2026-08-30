@@ -8,6 +8,7 @@
 - Validate a real Harness ai-ping round trip inside a running scenario. The 0.1.13 m2 test validated TUI conversation continuity, not the full delivery chain.
 - Split startup gate diagnostics so a prompt that was accepted but never reached ready is distinguishable from a TUI that never displayed a handled prompt.
 - Make repair actions state-aware enough that degraded states do not point users at currently ineligible repair exits.
+- P0: Fix the participant close-failure cleanup-pending dead end around `store.py:2251`. The close failure branch degrades the participant but leaves `desired_state="running"`, while the scenario close has already committed `desired_state="closed"`. `_cleanup_pending_participant_is_settled` then refuses to settle because it requires `desired_state=="stopped"`; in startup-gate failures there are no unreleased leases, so the stale participant desired state is the only blocker. This leaves `scenario.open`, `scenario.repair`, `participant.recover`, and normal `scenario.destroy` all ineligible.
 
 ## TUI Startup Prompt Automation
 
