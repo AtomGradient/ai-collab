@@ -6,6 +6,8 @@
 - Validate Codex exact resume on m2pro32g.local with a real Codex prompt before close/resume. The 0.1.13 release verified Claude exact resume and empty-TUI recreation, but Codex exact resume still needs a failure-sensitive real TUI test.
 - Add Claude workspace trust prompt automation, matching Codex's strict known-prompt handling, so first launch of a new scenario does not stall waiting for manual confirmation.
 - Validate a real Harness ai-ping round trip inside a running scenario. The 0.1.13 m2 test validated TUI conversation continuity, not the full delivery chain.
+- Split startup gate diagnostics so a prompt that was accepted but never reached ready is distinguishable from a TUI that never displayed a handled prompt.
+- Make repair actions state-aware enough that degraded states do not point users at currently ineligible repair exits.
 
 ## TUI Startup Prompt Automation
 
