@@ -22,6 +22,7 @@ from .workspace import ProjectAdapterCommand, WorkspaceError
 
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 NAMESPACED_RE = re.compile(r"^[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*)+$")
+PARTICIPANT_START_TIMEOUT_SECONDS = 300.0
 SUPERVISION_SCHEMA_VERSION = 1
 SUPERVISION_TIMEOUT_SECONDS = 5.0
 RESOURCE_CLASSES = {
@@ -415,7 +416,11 @@ class ParticipantCoordinator:
         artifacts: dict[str, Any] | None = None
         try:
             self._ensure_private_root(Path(execution["private_root"]))
-            artifacts = self.driver.call("start", execution)
+            artifacts = self.driver.call(
+                "start",
+                execution,
+                timeout_seconds=PARTICIPANT_START_TIMEOUT_SECONDS,
+            )
             self._validate_start_artifacts(execution, artifacts)
             if (
                 require_bound_vendor_identity
@@ -804,7 +809,11 @@ class ParticipantCoordinator:
                 values["scenario_id"],
             )
             self._ensure_private_root(Path(start_execution["private_root"]))
-            artifacts = self.driver.call("start", start_execution)
+            artifacts = self.driver.call(
+                "start",
+                start_execution,
+                timeout_seconds=PARTICIPANT_START_TIMEOUT_SECONDS,
+            )
             self._validate_start_artifacts(start_execution, artifacts)
             observation = self.driver.call(
                 "supervise",

@@ -2528,6 +2528,60 @@ def test_unprovisioned_destroy_resumes_after_store_intent_restart(
         assert not workspace_path.exists()
 
 
+@pytest.mark.parametrize(
+    "operation_kind", ["scenario.destroy", "scenario.force-destroy"]
+)
+def test_destroy_reconcile_allows_missing_ready_workspace_container(
+    tmp_path: Path, operation_kind: str
+) -> None:
+    host = HarnessHost(tmp_path / "state", tmp_path / "host.sock")
+    allow_missing_values: list[bool] = []
+
+    class StoreStub:
+        def scenario_workspace(
+            self,
+            project_instance_id: str,
+            scenario_id: str,
+            *,
+            allow_missing: bool = False,
+        ) -> tuple[dict[str, Any], Path]:
+            assert project_instance_id == "project"
+            assert scenario_id == "missing-ready"
+            allow_missing_values.append(allow_missing)
+            return {}, tmp_path / "workspaces" / "workspace-missing"
+
+    class WorkspaceStub:
+        def completed_request(
+            self, _request_id: str, _request_digest: str
+        ) -> None:
+            return None
+
+        def inspect_pending_high_risk_join(self, **_kwargs: Any) -> None:
+            raise OperationFailed("op", "test.stop", "stop", "unknown", True)
+
+    host.store = StoreStub()  # type: ignore[assignment]
+    host.workspace = WorkspaceStub()  # type: ignore[assignment]
+
+    host._reconcile_workspace_operation(  # noqa: SLF001
+        {
+            "project_instance_id": "project",
+            "scenario_id": "missing-ready",
+            "request_id": "request",
+            "workspace_request_id": "workspace-request",
+            "workspace_operation_kind": "destroy",
+            "request_digest": "a" * 64,
+            "operation_id": "op",
+            "operation_kind": operation_kind,
+            "scenario_generation": 1,
+            "expected_workspace_binding_state": "ready",
+            "expected_wip_summary_digest": "b" * 64,
+            "workspace_binding_id": "workspace-missing",
+        }
+    )
+
+    assert allow_missing_values == [True]
+
+
 def test_unprovisioned_destroy_finalize_failure_stays_pending_for_exact_retry(
     tmp_path: Path,
 ) -> None:

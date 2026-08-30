@@ -4411,7 +4411,10 @@ class HarnessHost:
         expected_wip = pending.get("expected_wip_summary_digest")
         try:
             _, workspace_path = self.store.scenario_workspace(
-                pending["project_instance_id"], pending["scenario_id"]
+                pending["project_instance_id"],
+                pending["scenario_id"],
+                allow_missing=pending["operation_kind"]
+                in {"scenario.destroy", "scenario.force-destroy"},
             )
         except StoreError:
             if (

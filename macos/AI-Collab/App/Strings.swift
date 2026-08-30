@@ -214,6 +214,25 @@ enum S {
                 return t("Unknown state", "未知状态")
             }
         }
+
+        static func degradedReason(_ reason: String) -> String {
+            switch reason {
+            case "participant_fault":
+                return t("AI colleague needs recovery", "AI 同事需要找回")
+            case "participant_restore_incomplete":
+                return t("AI colleague restore is incomplete", "AI 同事恢复未完成")
+            case "cleanup_pending":
+                return t("Cleanup still needs attention", "仍有清理事项需要处理")
+            case "launch_failed":
+                return t("Launch failed", "启动失败")
+            case "operation_unknown":
+                return t("Previous operation needs verification", "上次操作需要核验")
+            case "provision_failed":
+                return t("Workspace setup failed", "工作区准备失败")
+            default:
+                return reason
+            }
+        }
     }
 
     // MARK: High-risk confirmations

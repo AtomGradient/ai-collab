@@ -619,7 +619,11 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                 }
                 if participant.cleanupPending {
-                    Text(participant.degradedReason ?? S.Colleagues.repairRequired)
+                    Text(
+                        participant.degradedReason.map(
+                            HarnessViewModel.humanDegradedReason
+                        ) ?? S.Colleagues.repairRequired
+                    )
                         .font(.caption)
                         .foregroundStyle(.orange)
                 }

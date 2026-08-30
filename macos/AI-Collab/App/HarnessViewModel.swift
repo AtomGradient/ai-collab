@@ -292,6 +292,10 @@ final class HarnessViewModel: ObservableObject {
         S.Status.label(state)
     }
 
+    static func humanDegradedReason(_ reason: String) -> String {
+        S.Status.degradedReason(reason)
+    }
+
     func bootstrap() async {
         await performRead {
             if let serviceController = self.serviceController {
@@ -556,9 +560,9 @@ final class HarnessViewModel: ObservableObject {
 
     private func copyItermPythonAPISetupCommand() {
         let command = """
+        osascript -e 'tell application id "com.googlecode.iterm2" to quit'
         defaults write com.googlecode.iterm2 EnableAPIServer -bool true
         defaults write com.googlecode.iterm2 NoSyncEnableAPIServer -bool true
-        osascript -e 'tell application id "com.googlecode.iterm2" to quit'
         open -b com.googlecode.iterm2
         """
         NSPasteboard.general.clearContents()
@@ -1477,7 +1481,7 @@ final class HarnessViewModel: ObservableObject {
         activity: @autoclosure @escaping () -> String,
         success: @autoclosure @escaping () -> String,
         extraPayload: [String: Any] = [:],
-        responseTimeoutSeconds: Int = 60
+        responseTimeoutSeconds: Int = 360
     ) async {
         guard let project = selectedProject, let scenario = selectedScenario else {
             return refuse(.participantAction, S.Msg.selectRoomFirst)

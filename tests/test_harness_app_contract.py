@@ -183,6 +183,9 @@ def test_app_exposes_degraded_and_high_risk_repair_actions() -> None:
     assert 'Button(S.Risk.breakLease, role: .destructive)' in content
     strings = (APP_ROOT / "Strings.swift").read_text(encoding="utf-8")
     assert "Continue to Host confirmation" in strings
+    assert "participant_fault" in strings
+    assert "AI colleague needs recovery" in strings
+    assert "humanDegradedReason" in content
     assert "cleanupPending" in models
     assert "ResourceLeaseRecord" in models
 
@@ -200,7 +203,18 @@ def test_app_gives_high_risk_confirmation_operations_long_timeout() -> None:
         view_model,
         re.S,
     )
-    assert "responseTimeoutSeconds: Int = 60" in view_model
+    assert "responseTimeoutSeconds: Int = 360" in view_model
+    for operation in ("participant.start", "participant.replace"):
+        assert f'operation: "{operation}"' in view_model
+
+
+def test_iterm_python_api_setup_quits_before_writing_defaults() -> None:
+    view_model = (APP_ROOT / "HarnessViewModel.swift").read_text(encoding="utf-8")
+    command = view_model.split("let command = \"\"\"", 1)[1].split("\"\"\"", 1)[0]
+    quit_index = command.index("tell application id \"com.googlecode.iterm2\" to quit")
+    write_index = command.index("defaults write com.googlecode.iterm2 EnableAPIServer")
+    open_index = command.index("open -b com.googlecode.iterm2")
+    assert quit_index < write_index < open_index
 
 
 def test_app_exposes_single_entry_context_menu_force_destroy() -> None:

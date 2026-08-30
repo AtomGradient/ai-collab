@@ -944,6 +944,38 @@ def test_wait_job_pid_prefers_stable_process_group_leader(
     assert pid == 9625
 
 
+def test_process_group_candidate_lookup_degrades_when_ps_has_no_rows(
+    monkeypatch: Any,
+) -> None:
+    def empty_group(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(returncode=1, stdout="")
+
+    monkeypatch.setattr(participant_driver.subprocess, "run", empty_group)
+
+    assert (
+        participant_driver._matching_process_group_observations(  # noqa: SLF001
+            3001, "codex"
+        )
+        == []
+    )
+
+
+def test_process_group_candidate_lookup_degrades_when_ps_times_out(
+    monkeypatch: Any,
+) -> None:
+    def timed_out(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+        raise subprocess.TimeoutExpired(["/bin/ps"], timeout=3)
+
+    monkeypatch.setattr(participant_driver.subprocess, "run", timed_out)
+
+    assert (
+        participant_driver._matching_process_group_observations(  # noqa: SLF001
+            3001, "codex"
+        )
+        == []
+    )
+
+
 def test_sender_accepts_owned_descendant_in_new_process_group(
     monkeypatch: Any,
 ) -> None:
@@ -1533,18 +1565,28 @@ def test_iterm_dependency_env_rebuilds_incomplete_venv_with_symlinks(
     assert (environment.parent / "ready.json").is_file()
 
 
-def test_startup_process_wait_uses_declared_gate_timeout() -> None:
+def test_startup_process_wait_is_independent_from_declared_gate_timeout() -> None:
     assert (
         participant_driver._startup_process_wait_seconds(  # noqa: SLF001
             {"startup_gate": {"timeout_seconds": 60}}
         )
-        == 60.0
+        == participant_driver.PROCESS_WAIT_SECONDS
     )
     assert (
         participant_driver._startup_process_wait_seconds(  # noqa: SLF001
             {"startup_gate": None}
         )
         == participant_driver.PROCESS_WAIT_SECONDS
+    )
+
+
+def test_startup_gate_schema_budget_stays_within_driver_start_timeout() -> None:
+    from ai_collab.participant import PARTICIPANT_START_TIMEOUT_SECONDS
+
+    assert (
+        participant_driver.STARTUP_GATE_MAX_SECONDS
+        + (2 * participant_driver.PROCESS_WAIT_SECONDS)
+        < PARTICIPANT_START_TIMEOUT_SECONDS
     )
 
 

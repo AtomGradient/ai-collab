@@ -2597,13 +2597,14 @@ class ScenarioStore:
                     is True
                     for participant_id in unresolved_participants
                 )
+                reason = (
+                    "participant_restore_incomplete"
+                    if failed
+                    else "participant_fault"
+                )
                 record["observed_state"] = "degraded"
                 record["degraded"] = {
-                    "reason": (
-                        "participant_restore_incomplete"
-                        if failed
-                        else "participant_fault"
-                    ),
+                    "reason": reason,
                     "cleanup_pending": cleanup_pending,
                     "owned_resource_evidence_sha256": canonical_json_sha256(
                         {
@@ -2611,7 +2612,11 @@ class ScenarioStore:
                             "unresolved_participant_ids": unresolved_participants,
                         }
                     ),
-                    "repair_action": "scenario.repair",
+                    "repair_action": (
+                        "scenario.repair"
+                        if reason == "participant_restore_incomplete"
+                        else "participant.recover"
+                    ),
                 }
             else:
                 record["observed_state"] = "running"
@@ -3572,17 +3577,15 @@ class ScenarioStore:
                 "running": "running",
                 "destroyed": "destroying",
             }[record["desired_state"]]
-            degraded = None
-            if target == "running":
-                participants, _ = self._participant_maps(item)
-                degraded = self._scenario_participant_fault_payload(
-                    record,
-                    participants,
-                    evidence_context={
-                        "scenario_repair_operation_id": operation_id,
-                        "workspace_evidence_sha256": workspace_evidence_sha256,
-                    },
-                )
+            participants, _ = self._participant_maps(item)
+            degraded = self._scenario_participant_fault_payload(
+                record,
+                participants,
+                evidence_context={
+                    "scenario_repair_operation_id": operation_id,
+                    "workspace_evidence_sha256": workspace_evidence_sha256,
+                },
+            )
             if degraded is None:
                 record["observed_state"] = target
                 record["degraded"] = None
@@ -5876,7 +5879,7 @@ class ScenarioStore:
                     "reason": "participant_fault",
                     "cleanup_pending": cleanup_pending,
                     "owned_resource_evidence_sha256": evidence,
-                    "repair_action": "scenario.repair",
+                    "repair_action": "participant.recover",
                 }
             state["state_revision"] += 1
             self._write_state(state)
@@ -5992,7 +5995,7 @@ class ScenarioStore:
                     "owned_resource_evidence_sha256": record["degraded"][
                         "owned_resource_evidence_sha256"
                     ],
-                    "repair_action": "scenario.repair",
+                    "repair_action": "participant.recover",
                 }
             state["state_revision"] += 1
             self._write_state(state)
@@ -7107,7 +7110,7 @@ class ScenarioStore:
                         "reason": "participant_fault",
                         "cleanup_pending": True,
                         "owned_resource_evidence_sha256": evidence,
-                        "repair_action": "scenario.repair",
+                        "repair_action": "participant.recover",
                     }
 
     def _scenario_participant_fault_payload(
@@ -7153,7 +7156,11 @@ class ScenarioStore:
                 for _, participant in degraded
             ),
             "owned_resource_evidence_sha256": evidence,
-            "repair_action": "scenario.repair",
+            "repair_action": (
+                "participant.recover"
+                if scenario.get("desired_state") == "running"
+                else "scenario.repair"
+            ),
         }
 
     def _reconcile_scenario_participant_faults(self, state: dict[str, Any]) -> None:

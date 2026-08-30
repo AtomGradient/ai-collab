@@ -75,7 +75,7 @@ PINGAGENT_CLIENT = PINGAGENT_BIN / "ai-ping"
 CONSUMPTION_TIMEOUT_SECONDS = 240.0
 STARTUP_POLL_SECONDS = 0.25
 STARTUP_STABLE_OBSERVATIONS = 4
-STARTUP_GATE_MAX_SECONDS = 300
+STARTUP_GATE_MAX_SECONDS = 240
 SENDER_SESSION_CONNECT_ATTEMPTS = 3
 SENDER_SESSION_RETRY_SECONDS = 0.1
 PROXY_ENVIRONMENT_KEYS = (
@@ -1587,14 +1587,17 @@ def _workspace_path(
 def _process_observation(pid: int) -> dict[str, Any]:
     if not isinstance(pid, int) or pid <= 1:
         raise DriverError("process identity is invalid")
-    completed = subprocess.run(
-        ("/bin/ps", "-p", str(pid), "-o", "lstart=", "-o", "command="),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
-        timeout=3,
-        check=False,
-    )
+    try:
+        completed = subprocess.run(
+            ("/bin/ps", "-p", str(pid), "-o", "lstart=", "-o", "command="),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise DriverError("owned process observation is unavailable") from exc
     line = completed.stdout.strip()
     if completed.returncode != 0 or not line:
         raise DriverError("owned process is absent")
@@ -1615,16 +1618,19 @@ def _matching_process_group_observations(
         or process_group_id <= 1
     ):
         raise DriverError("process identity is invalid")
-    completed = subprocess.run(
-        ("/bin/ps", "-g", str(process_group_id), "-o", "pid="),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
-        timeout=3,
-        check=False,
-    )
+    try:
+        completed = subprocess.run(
+            ("/bin/ps", "-g", str(process_group_id), "-o", "pid="),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return []
     if completed.returncode != 0:
-        raise DriverError("owned process relationship is unavailable")
+        return []
     observations: list[dict[str, Any]] = []
     for field in completed.stdout.split():
         try:
@@ -2139,12 +2145,7 @@ async def _connect_iterm_application(module: Any) -> tuple[Any, Any]:
     raise AssertionError("iTerm connection attempts exhausted")  # pragma: no cover
 
 
-def _startup_process_wait_seconds(profile: Mapping[str, Any]) -> float:
-    gate = profile.get("startup_gate")
-    if isinstance(gate, Mapping):
-        timeout = gate.get("timeout_seconds")
-        if isinstance(timeout, int) and not isinstance(timeout, bool) and timeout > 0:
-            return float(max(PROCESS_WAIT_SECONDS, timeout))
+def _startup_process_wait_seconds(_profile: Mapping[str, Any]) -> float:
     return PROCESS_WAIT_SECONDS
 
 

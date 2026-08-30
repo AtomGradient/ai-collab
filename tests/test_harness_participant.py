@@ -21,7 +21,11 @@ import pytest
 from ai_collab import cli as cli_main, participant_auth
 from ai_collab.client import HarnessClient, HarnessClientError
 from ai_collab.host import HarnessHost
-from ai_collab.participant import ParticipantCoordinator, ParticipantError
+from ai_collab.participant import (
+    PARTICIPANT_START_TIMEOUT_SECONDS,
+    ParticipantCoordinator,
+    ParticipantError,
+)
 from ai_collab.participant_auth import ParticipantAuthStore
 from ai_collab.project import ProjectError
 from ai_collab.protocol import canonical_json_sha256
@@ -326,6 +330,7 @@ class FakeDriver:
         self.per_participant_resource_digests = False
         self.supervision_sequence = 0
         self.fail_supervision = False
+        self.call_timeouts: list[tuple[str, float]] = []
         self.boot_digest = BOOT_DIGEST
         self.fence_digest = FENCE_DIGEST
         self.resource_digest = RESOURCE_DIGEST
@@ -337,6 +342,7 @@ class FakeDriver:
         *,
         timeout_seconds: float = 300,
     ) -> dict[str, Any]:
+        self.call_timeouts.append((operation, timeout_seconds))
         runtime = _runtime_descriptor()
         if self.support_exact_resume:
             runtime.update(
@@ -966,6 +972,7 @@ def test_real_ipc_participant_add_start_status_stop(tmp_path: Path) -> None:
         assert ready["runtime_binding_id"] == "runtime-binding-one"
         assert ready["presentation_binding_id"] == "presentation-instance-one"
         assert driver.running
+        assert ("start", PARTICIPANT_START_TIMEOUT_SECONDS) in driver.call_timeouts
         contexts = list((state_root / "participant-contexts").glob("*.json"))
         assert contexts == [
             Path(driver.start_participant_clients[-1]["context_path"])
@@ -1212,6 +1219,9 @@ def test_participant_replace_rotates_exactly_once_and_preserves_run_intent(
         assert replaced["state_revision"] == ready["state_revision"] + 3
         assert driver.stop_calls == [ready["runtime_binding_id"]]
         assert driver.start_generations[-1] == 2
+        assert driver.call_timeouts.count(
+            ("start", PARTICIPANT_START_TIMEOUT_SECONDS)
+        ) == 2
         contexts = list((state_root / "participant-contexts").glob("*.json"))
         assert len(contexts) == 1
         context = json.loads(contexts[0].read_text(encoding="utf-8"))
@@ -4143,6 +4153,7 @@ def test_host_restart_reconciles_legacy_running_scenario_participant_fault(
         )["scenario"]
         assert reconciled["observed_state"] == "degraded"
         assert reconciled["degraded"]["reason"] == "participant_fault"
+        assert reconciled["degraded"]["repair_action"] == "participant.recover"
         participant = client.list_participants(
             project_instance_id=PROJECT_ID,
             scenario_id=SCENARIO_ID,
@@ -4204,6 +4215,7 @@ def test_scenario_repair_keeps_unrecovered_participant_fault_repairable(
         )["participants"][0]
         assert degraded["observed_state"] == "degraded"
         assert degraded["degraded"]["reason"] == "participant_fault"
+        assert degraded["degraded"]["repair_action"] == "participant.recover"
 
         operation_id, replay, _ = host.store.begin_scenario_repair(
             request_id="repair-participant-fault-scenario-repair",
@@ -4226,6 +4238,7 @@ def test_scenario_repair_keeps_unrecovered_participant_fault_repairable(
         assert repaired["observed_state"] == "degraded"
         assert repaired["degraded"]["reason"] == "participant_fault"
         assert repaired["degraded"]["cleanup_pending"] is True
+        assert repaired["degraded"]["repair_action"] == "participant.recover"
 
         driver.fail_start = False
         recovered = client.recover_participant(
@@ -4245,6 +4258,75 @@ def test_scenario_repair_keeps_unrecovered_participant_fault_repairable(
         )["scenario"]
         assert final["observed_state"] == "running"
         assert final["degraded"] is None
+
+
+def test_scenario_repair_does_not_clear_closed_participant_fault(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    with running_host(state_root) as (host, client, driver):
+        created = client.create_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            project_binding_digest=PROJECT_DIGEST,
+            request_id="closed-participant-fault-create",
+        )["scenario"]
+        added = _add_test_participant(
+            client,
+            scenario=created,
+            participant_id=PARTICIPANT_ID,
+            request_prefix="closed-participant-fault",
+        )
+        opened = client.open_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=created["scenario_generation"],
+            scenario_state_revision=created["state_revision"],
+            request_id="closed-participant-fault-open",
+        )["scenario"]
+        driver.fail_start = True
+        with pytest.raises(HarnessClientError):
+            _start_test_participant(
+                client,
+                scenario=opened,
+                participant=added,
+                participant_id=PARTICIPANT_ID,
+                request_prefix="closed-participant-fault",
+            )
+
+        degraded = client.scenario_status(
+            project_instance_id=PROJECT_ID, scenario_id=SCENARIO_ID
+        )["scenario"]
+        operation_id, replay, _ = host.store.begin_scenario_repair(
+            request_id="closed-participant-fault-scenario-repair",
+            request_digest="7" * 64,
+            host_generation=host.host_generation,
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=degraded["scenario_generation"],
+            scenario_state_revision=degraded["state_revision"],
+            expected_wip_summary_digest="8" * 64,
+        )
+        assert replay is None
+        with host.store._lock:  # noqa: SLF001 - legacy durable edge fixture
+            durable = host.store._read_state()  # noqa: SLF001
+            item = next(iter(durable["scenarios"].values()))
+            item["record"]["desired_state"] = "closed"
+            durable["state_revision"] += 1
+            host.store._write_state(durable)  # noqa: SLF001
+
+        repaired = host.store.finalize_scenario_repair(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            request_id="closed-participant-fault-scenario-repair",
+            operation_id=operation_id,
+            workspace_evidence_sha256="9" * 64,
+        )["scenario"]
+
+        assert repaired["desired_state"] == "closed"
+        assert repaired["observed_state"] == "degraded"
+        assert repaired["degraded"]["reason"] == "participant_fault"
+        assert repaired["degraded"]["repair_action"] == "scenario.repair"
 
 
 def test_participant_recover_failure_stays_degraded_without_generation_rotation(
