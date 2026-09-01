@@ -1524,7 +1524,12 @@ def test_iterm_dependency_env_rebuilds_incomplete_venv_with_symlinks(
     private_root = tmp_path / "participant-private"
     private_root.mkdir(mode=0o700)
     lock_digest = "a" * 64
-    environment = private_root / f"iterm-python-{lock_digest[:16]}" / "venv"
+    environment = (
+        participant_driver._iterm_install_root(  # noqa: SLF001
+            private_root, lock_digest
+        )
+        / "venv"
+    )
     environment.mkdir(parents=True)
     incomplete = environment / "incomplete"
     incomplete.write_text("failed bootstrap", encoding="utf-8")
@@ -1576,6 +1581,78 @@ def test_iterm_dependency_env_rebuilds_incomplete_venv_with_symlinks(
     ]
     assert not incomplete.exists()
     assert (environment.parent / "ready.json").is_file()
+
+
+def test_legacy_untagged_python_cache_is_not_reused(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    private_root = tmp_path / "participant-private"
+    private_root.mkdir(mode=0o700)
+    lock_digest = "b" * 64
+    legacy_root = private_root / f"iterm-python-{lock_digest[:16]}"
+    legacy_site_packages = legacy_root / "venv/lib/python3.11/site-packages"
+    legacy_site_packages.mkdir(parents=True)
+    (legacy_root / "venv/pyvenv.cfg").write_text(
+        "version = 3.11.12\n", encoding="utf-8"
+    )
+    legacy_ready = legacy_root / "ready.json"
+    legacy_ready.write_text(
+        json.dumps({"schema_version": 1, "lock_digest": lock_digest}),
+        encoding="utf-8",
+    )
+    legacy_ready.chmod(0o600)
+    monkeypatch.setattr(participant_driver, "_load_lock", lambda: ([], lock_digest))
+    expected_environment = (
+        private_root
+        / f"iterm-python-{lock_digest[:16]}-{sys.implementation.cache_tag}/venv"
+    )
+
+    class _Builder:
+        def __init__(self, **_options: Any) -> None:
+            pass
+
+        def create(self, target: Path) -> None:
+            assert Path(target) == expected_environment
+            (
+                Path(target)
+                / "lib"
+                / f"python{sys.version_info.major}.{sys.version_info.minor}"
+                / "site-packages"
+            ).mkdir(parents=True)
+            (Path(target) / "bin").mkdir()
+            (Path(target) / "bin/python").write_text("fixture", encoding="utf-8")
+
+    class _Completed:
+        returncode = 0
+
+    monkeypatch.setattr(participant_driver.venv, "EnvBuilder", _Builder)
+    monkeypatch.setattr(
+        participant_driver.subprocess,
+        "run",
+        lambda *args, **kwargs: _Completed(),
+    )
+    iterm_module = object()
+    monkeypatch.setitem(sys.modules, "iterm2", iterm_module)
+    path_before = list(sys.path)
+    site_packages = (
+        expected_environment
+        / "lib"
+        / f"python{sys.version_info.major}.{sys.version_info.minor}"
+        / "site-packages"
+    )
+    try:
+        assert (
+            participant_driver._ensure_iterm_module(private_root)  # noqa: SLF001
+            is iterm_module
+        )
+    finally:
+        sys.path[:] = path_before
+
+    assert legacy_site_packages.is_dir()
+    assert site_packages.is_dir()
+    assert json.loads(
+        (expected_environment.parent / "ready.json").read_text(encoding="utf-8")
+    )["runtime_cache_tag"] == sys.implementation.cache_tag
 
 
 def test_startup_process_wait_is_independent_from_declared_gate_timeout() -> None:
@@ -1779,7 +1856,12 @@ def test_repair_rotates_pre_binding_failure_without_deleting_private_evidence(
     private_root = tmp_path / "participant-private"
     private_root.mkdir(mode=0o700)
     lock_digest = "c" * 64
-    incomplete = private_root / f"iterm-python-{lock_digest[:16]}" / "venv"
+    incomplete = (
+        participant_driver._iterm_install_root(  # noqa: SLF001
+            private_root, lock_digest
+        )
+        / "venv"
+    )
     incomplete.mkdir(parents=True)
     (incomplete / "failure-marker").write_text("retained", encoding="utf-8")
     monkeypatch.setattr(participant_driver, "_load_lock", lambda: ([], lock_digest))
@@ -1802,7 +1884,12 @@ def test_repair_fails_closed_when_pre_binding_absence_is_not_provable(
     private_root = tmp_path / "participant-private"
     private_root.mkdir(mode=0o700)
     lock_digest = "d" * 64
-    ready = private_root / f"iterm-python-{lock_digest[:16]}" / "ready.json"
+    ready = (
+        participant_driver._iterm_install_root(  # noqa: SLF001
+            private_root, lock_digest
+        )
+        / "ready.json"
+    )
     ready.parent.mkdir(parents=True)
     ready.write_text("{}", encoding="utf-8")
     monkeypatch.setattr(participant_driver, "_load_lock", lambda: ([], lock_digest))
@@ -1821,7 +1908,12 @@ def test_repair_accepts_diagnosed_pre_window_failure_after_dependency_ready(
     private_root = tmp_path / "participant-private"
     private_root.mkdir(mode=0o700)
     lock_digest = "e" * 64
-    ready = private_root / f"iterm-python-{lock_digest[:16]}" / "ready.json"
+    ready = (
+        participant_driver._iterm_install_root(  # noqa: SLF001
+            private_root, lock_digest
+        )
+        / "ready.json"
+    )
     ready.parent.mkdir(parents=True)
     ready.write_text("{}", encoding="utf-8")
     participant_driver._record_launch_failure(  # noqa: SLF001

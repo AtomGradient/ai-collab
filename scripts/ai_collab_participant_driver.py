@@ -20,6 +20,7 @@ import signal
 import stat
 import subprocess
 import sys
+import sysconfig
 import time
 import urllib.request
 import uuid
@@ -2044,6 +2045,19 @@ def _load_lock() -> tuple[list[dict[str, Any]], str]:
     return value["artifacts"], digest(value)
 
 
+def _iterm_runtime_cache_tag() -> str:
+    tag = getattr(sys.implementation, "cache_tag", None)
+    if not isinstance(tag, str) or re.fullmatch(r"[a-z0-9_-]{1,40}", tag) is None:
+        raise DriverError("Python runtime cache tag is unavailable")
+    return tag
+
+
+def _iterm_install_root(private_root: Path, lock_digest: str) -> Path:
+    return private_root / (
+        f"iterm-python-{lock_digest[:16]}-{_iterm_runtime_cache_tag()}"
+    )
+
+
 def _file_sha256(path: Path) -> str:
     hasher = hashlib.sha256()
     with path.open("rb") as stream:
@@ -2054,10 +2068,31 @@ def _file_sha256(path: Path) -> str:
 
 def _ensure_iterm_module(private_root: Path) -> Any:
     artifacts, lock_digest = _load_lock()
-    install_root = private_root / f"iterm-python-{lock_digest[:16]}"
+    runtime_cache_tag = _iterm_runtime_cache_tag()
+    install_root = _iterm_install_root(private_root, lock_digest)
     environment = install_root / "venv"
     ready = install_root / "ready.json"
-    if not ready.is_file():
+    python_version = f"python{sys.version_info.major}.{sys.version_info.minor}"
+    site_packages = environment / "lib" / python_version / "site-packages"
+    expected_ready = {
+        "schema_version": 1,
+        "lock_digest": lock_digest,
+        "runtime_cache_tag": runtime_cache_tag,
+        "runtime_platform": sysconfig.get_platform(),
+    }
+    try:
+        ready_details = ready.stat() if not ready.is_symlink() else None
+        ready_value = (
+            json.loads(ready.read_text(encoding="utf-8"))
+            if ready_details is not None
+            and ready.is_file()
+            and ready_details.st_uid == os.getuid()
+            and stat.S_IMODE(ready_details.st_mode) == 0o600
+            else None
+        )
+    except (OSError, json.JSONDecodeError):
+        ready_value = None
+    if ready_value != expected_ready or not site_packages.is_dir():
         install_root.mkdir(mode=0o700, exist_ok=True)
         downloads = install_root / "downloads"
         downloads.mkdir(mode=0o700, exist_ok=True)
@@ -2102,9 +2137,7 @@ def _ensure_iterm_module(private_root: Path) -> Any:
         )
         if completed.returncode != 0:
             raise DriverError("iTerm dependency installation failed")
-        _write_private(ready, {"schema_version": 1, "lock_digest": lock_digest})
-    python_version = f"python{sys.version_info.major}.{sys.version_info.minor}"
-    site_packages = environment / "lib" / python_version / "site-packages"
+        _write_private(ready, expected_ready)
     if not site_packages.is_dir():
         raise DriverError("iTerm dependency environment is unavailable")
     sys.path.insert(0, str(site_packages))
@@ -4150,7 +4183,7 @@ def repair(payload: Mapping[str, Any]) -> dict[str, Any]:
             and diagnostic["cleanup_outcome"] == "not-required"
         )
     _, lock_digest = _load_lock()
-    ready = private_root / f"iterm-python-{lock_digest[:16]}" / "ready.json"
+    ready = _iterm_install_root(private_root, lock_digest) / "ready.json"
     launcher = private_root / "runtime-launcher.zsh"
     if not pre_window_failure and (
         ready.exists()
@@ -4159,9 +4192,9 @@ def repair(payload: Mapping[str, Any]) -> dict[str, Any]:
         or launcher.is_symlink()
     ):
         raise DriverError("repair cannot prove pre-binding resource absence")
-    # start() cannot enter the iTerm external-effect path until ready.json is
-    # durably written by _ensure_iterm_module.  Its absence therefore proves
-    # this generation failed before any window/process could be created.
+    # runtime-launcher.zsh is durably written before window creation and is
+    # independent of the interpreter-specific dependency cache. Its absence
+    # therefore proves this generation never entered the external-effect path.
     return _recovery_result(
         payload,
         recovery_class="pre_binding_absent",
