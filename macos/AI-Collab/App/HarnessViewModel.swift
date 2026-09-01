@@ -3,6 +3,7 @@
 // 版权所有 © 2026 质子梯度（北京）科技有限公司
 
 import AppKit
+import Darwin
 import Foundation
 import SwiftUI
 
@@ -306,7 +307,13 @@ final class HarnessViewModel: ObservableObject {
             let status = try await self.client.call(
                 HarnessCall(operation: "host.status", target: ["scope": "host"])
             )
-            self.hostStatus = status["status"] as? String ?? "ready"
+            let runtime = Bundle.main.bundleURL.appending(path: "Contents/Resources/HarnessService/runtime", directoryHint: .isDirectory)
+            var runtimeDetails = stat()
+            let identity = status["host_runtime_identity"] as? [String: NSNumber]
+            let fresh = lstat(runtime.path, &runtimeDetails) == 0
+                && identity?["dev"]?.int64Value == Int64(runtimeDetails.st_dev)
+                && identity?["ino"]?.uint64Value == UInt64(runtimeDetails.st_ino)
+            self.hostStatus = fresh ? (status["status"] as? String ?? "ready") : "stale-bundle"
             try await self.reloadProjects()
             await self.refreshProjectReconciliations()
             try await self.reloadTemplates()
@@ -1904,7 +1911,7 @@ final class HarnessViewModel: ObservableObject {
     ) async {
         do {
             try await work()
-            hostStatus = "ready"
+            if hostStatus != "stale-bundle" { hostStatus = "ready" }
         } catch {
             report(error)
         }
@@ -1938,7 +1945,7 @@ final class HarnessViewModel: ObservableObject {
         }
         do {
             try await work()
-            hostStatus = "ready"
+            if hostStatus != "stale-bundle" { hostStatus = "ready" }
             if success() != nil { noteSuccess(success() ?? "") }
         } catch {
             report(error)

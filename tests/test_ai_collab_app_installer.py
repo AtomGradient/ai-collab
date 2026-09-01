@@ -207,6 +207,7 @@ def test_health_requires_registration_from_installed_bundle(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     app = tmp_path / "AI Collab.app"
+    (app / "Contents/Resources/HarnessService/runtime").mkdir(parents=True)
     registration = tmp_path / "state/installation/service-registration.json"
     registration.parent.mkdir(parents=True)
     registration.write_text(
@@ -249,10 +250,20 @@ def test_health_check_disables_user_site_packages(
         environment = kwargs["env"]
         assert isinstance(environment, dict)
         captured_environment.update(environment)
+        details = runtime.stat()
         return INSTALLER.subprocess.CompletedProcess(
             argv,
             0,
-            stdout='{"status":"ready","host_generation":7}',
+            stdout=json.dumps(
+                {
+                    "status": "ready",
+                    "host_generation": 7,
+                    "host_runtime_identity": {
+                        "dev": details.st_dev,
+                        "ino": details.st_ino,
+                    },
+                }
+            ),
             stderr="",
         )
 
@@ -264,6 +275,47 @@ def test_health_check_disables_user_site_packages(
     assert captured_environment["PYTHONHOME"] == str(runtime)
     assert captured_environment["PYTHONDONTWRITEBYTECODE"] == "1"
     assert captured_environment["PYTHONNOUSERSITE"] == "1"
+
+
+def test_health_check_rejects_host_from_replaced_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = tmp_path / "AI Collab.app"
+    runtime = app / "Contents/Resources/HarnessService/runtime"
+    runtime.mkdir(parents=True)
+    state_root = tmp_path / "state"
+    registration = state_root / "installation/service-registration.json"
+    registration.parent.mkdir(parents=True)
+    registration.write_text(
+        json.dumps(
+            {
+                "service_build_digest": "a" * 64,
+                "app_bundle_path": str(app),
+            }
+        ),
+        encoding="utf-8",
+    )
+    stale = {"dev": -1, "ino": -1}
+    monkeypatch.setattr(INSTALLER.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        INSTALLER.subprocess,
+        "run",
+        lambda argv, **_kwargs: INSTALLER.subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout=json.dumps(
+                {
+                    "status": "ready",
+                    "host_generation": 7,
+                    "host_runtime_identity": stale,
+                }
+            ),
+            stderr="",
+        ),
+    )
+
+    with pytest.raises(INSTALLER.InstallError, match="--unregister"):
+        INSTALLER._health_check(app, state_root, "a" * 64, 0.01)
 
 
 def test_first_install_failure_unregisters_bad_service(

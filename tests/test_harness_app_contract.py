@@ -104,6 +104,17 @@ def test_app_exposes_scenario_resume_and_participant_reports() -> None:
     assert 'result["resume_summary"]' in view_model
 
 
+def test_stale_host_bundle_status_survives_successful_refreshes_and_mutations() -> None:
+    view_model = (APP_ROOT / "HarnessViewModel.swift").read_text(encoding="utf-8")
+    assert 'status["host_runtime_identity"]' in view_model
+    assert "lstat(runtime.path, &runtimeDetails)" in view_model
+    assert 'self.hostStatus = fresh ?' in view_model
+    assert 'else { self.hostStatus = "stale-bundle"; return }' not in view_model
+    assert view_model.count(
+        'if hostStatus != "stale-bundle" { hostStatus = "ready" }'
+    ) == 2
+
+
 def test_app_live_refreshes_selected_scenario_deliveries_without_full_page_polling() -> None:
     content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
     view_model = (APP_ROOT / "HarnessViewModel.swift").read_text(encoding="utf-8")

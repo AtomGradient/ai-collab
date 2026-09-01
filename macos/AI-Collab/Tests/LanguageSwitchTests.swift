@@ -95,4 +95,13 @@ final class LanguageSwitchTests: XCTestCase {
             "Delivery health is unavailable. Harness Host returned an invalid reply."
         )
     }
+
+    func testStaleBundleStatusRetranslates() {
+        let model = HarnessViewModel()
+        model.hostStatus = "stale-bundle"
+        XCTAssertEqual(model.hostStatusDisplay, "Restart your Mac to finish updating AI Collab")
+
+        L10n.shared.preference = .simplifiedChinese
+        XCTAssertEqual(model.hostStatusDisplay, "重新启动 Mac 以完成 AI Collab 更新")
+    }
 }

@@ -243,6 +243,8 @@ class HarnessHost:
         self._workspace_join_attempted_this_host: set[str] = set()
         self.host_generation = 0
         self.host_instance_fingerprint = "0" * 64
+        runtime_identity = os.stat(sys.prefix)
+        self.host_runtime_identity = {"dev": runtime_identity.st_dev, "ino": runtime_identity.st_ino}
         self.participant_auth = ParticipantAuthStore(
             self.state_root, self.socket_path
         )
@@ -1613,6 +1615,7 @@ class HarnessHost:
                     )
         elif operation == "host.status":
             result = self.store.host_status()
+            result["host_runtime_identity"] = self.host_runtime_identity
             operation_id = f"read-{request['request_id']}"
         elif operation in (
             "presentation.permission-probe",

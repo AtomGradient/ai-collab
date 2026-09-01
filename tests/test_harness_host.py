@@ -112,6 +112,30 @@ def running_host(
             assert not errors
 
 
+def test_host_status_keeps_startup_runtime_identity_after_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    startup_details = runtime.stat()
+    monkeypatch.setattr("ai_collab.host.sys.prefix", str(runtime))
+
+    with running_host(tmp_path / "state") as (_, client):
+        runtime.rename(tmp_path / "old-runtime")
+        runtime.mkdir()
+
+        identity = client.host_status()["host_runtime_identity"]
+        assert identity == {
+            "dev": startup_details.st_dev,
+            "ino": startup_details.st_ino,
+        }
+        current_details = runtime.stat()
+        assert identity != {
+            "dev": current_details.st_dev,
+            "ino": current_details.st_ino,
+        }
+
+
 def test_real_host_create_open_status_list_and_restart(tmp_path: Path) -> None:
     state_root = tmp_path / "state"
     with running_host(state_root) as (first_host, client):
@@ -119,6 +143,7 @@ def test_real_host_create_open_status_list_and_restart(tmp_path: Path) -> None:
             "status": "ready",
             "host_generation": first_host.host_generation,
             "scenario_count": 0,
+            "host_runtime_identity": first_host.host_runtime_identity,
         }
         created = client.create_scenario(
             project_instance_id=PROJECT_ID,

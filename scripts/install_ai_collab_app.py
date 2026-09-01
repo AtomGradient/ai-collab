@@ -248,6 +248,8 @@ def _health_check(app: Path, state_root: Path, expected_digest: str, timeout: fl
     runtime = app / "Contents/Resources/HarnessService/runtime"
     python = runtime / "bin/python3"
     python_path = app / "Contents/Resources/HarnessService/python"
+    runtime_details = runtime.stat()
+    expected_runtime_identity = {"dev": runtime_details.st_dev, "ino": runtime_details.st_ino}
     deadline = time.monotonic() + timeout
     last_detail = "Host did not become ready"
     while time.monotonic() < deadline:
@@ -281,6 +283,10 @@ def _health_check(app: Path, state_root: Path, expected_digest: str, timeout: fl
             )
             if completed.returncode == 0:
                 value = json.loads(completed.stdout)
+                if value.get("host_runtime_identity") != expected_runtime_identity:
+                    raise ValueError(
+                        "Stale Host runtime %r; bundle runtime %r. Run --unregister --target %r, then retry."
+                        % (value.get("host_runtime_identity"), expected_runtime_identity, str(app)))
                 if value.get("status") == "ready":
                     return value
             last_detail = (completed.stderr or completed.stdout).strip() or last_detail

@@ -59,6 +59,7 @@ enum S {
             if token == "ready" { return t("ready", "就绪") }
             if token == "unavailable" { return t("unavailable", "不可用") }
             if token == "registration-failed" { return t("registration failed", "注册失败") }
+            if token == "stale-bundle" { return t("Restart your Mac to finish updating AI Collab", "重新启动 Mac 以完成 AI Collab 更新") }
             if token.hasPrefix("starting:") {
                 let label = String(token.dropFirst("starting:".count))
                 return t("starting · \(Service.statusLabel(label))", "启动中 · \(Service.statusLabel(label))")
