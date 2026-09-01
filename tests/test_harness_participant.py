@@ -30,7 +30,7 @@ from ai_collab.participant_auth import ParticipantAuthStore
 from ai_collab.project import ProjectError
 from ai_collab.protocol import canonical_json_sha256
 from ai_collab.security import SecurityCoordinator
-from ai_collab.store import ScenarioStore
+from ai_collab.store import ScenarioStore, StoreError
 
 
 PROJECT_ID = "project-one"
@@ -3200,6 +3200,90 @@ def test_scenario_start_participants_progress_and_cooperative_cancel(
         assert driver.start_calls == 1
 
 
+def test_scenario_start_participants_reports_cancel_accepted_during_last_unit(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    second_id = "participant-two"
+    with running_host(state_root) as (_, client, driver):
+        driver.per_participant_resource_digests = True
+        created = client.create_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            project_binding_digest=PROJECT_DIGEST,
+            request_id="start-all-last-cancel-create",
+        )["scenario"]
+        for participant_id in (PARTICIPANT_ID, second_id):
+            _add_test_participant(
+                client,
+                scenario=created,
+                participant_id=participant_id,
+                request_prefix=f"start-all-last-cancel-{participant_id}",
+            )
+        opened = client.open_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=created["scenario_generation"],
+            scenario_state_revision=created["state_revision"],
+            request_id="start-all-last-cancel-open",
+        )["scenario"]
+        original_call = driver.call
+        last_started = threading.Event()
+        release_last = threading.Event()
+
+        def block_last_start(
+            operation: str,
+            payload: Mapping[str, Any],
+            *,
+            timeout_seconds: float = 300,
+        ) -> dict[str, Any]:
+            if (
+                operation == "start"
+                and payload["context"]["participant_id"] == second_id
+            ):
+                last_started.set()
+                assert release_last.wait(timeout=10)
+            return original_call(
+                operation, payload, timeout_seconds=timeout_seconds
+            )
+
+        driver.call = block_last_start  # type: ignore[method-assign]
+        progress: list[dict[str, Any]] = []
+        failures: list[HarnessClientError] = []
+
+        def start_all() -> None:
+            try:
+                client.start_scenario_participants(
+                    project_instance_id=PROJECT_ID,
+                    scenario_id=SCENARIO_ID,
+                    scenario_generation=opened["scenario_generation"],
+                    scenario_state_revision=opened["state_revision"],
+                    request_id="start-all-last-cancel",
+                    progress_callback=progress.append,
+                )
+            except HarnessClientError as exc:
+                failures.append(exc)
+
+        thread = threading.Thread(target=start_all)
+        thread.start()
+        assert last_started.wait(timeout=3)
+        operation_id = progress[0]["operation_id"]
+        assert client.cancel_operation(operation_id)["outcome"] == "accepted"
+        release_last.set()
+        thread.join(timeout=10)
+
+        assert not thread.is_alive()
+        assert len(failures) == 1
+        assert failures[0].code == "operation.cancelled"
+        assert failures[0].mutation_state == "committed"
+        assert progress[-1]["state"] == "cancelled"
+        participants = client.list_participants(
+            project_instance_id=PROJECT_ID, scenario_id=SCENARIO_ID
+        )["participants"]
+        assert {value["observed_state"] for value in participants} == {"ready"}
+        assert driver.start_calls == 2
+
+
 def test_host_restart_finishes_migrated_pending_scenario_resume(
     tmp_path: Path,
 ) -> None:
@@ -3278,6 +3362,56 @@ def test_host_restart_finishes_migrated_pending_scenario_resume(
         assert request["status"] == "completed"
         assert request["result"]["resume_summary"]["all_targets_ready"] is True
         assert driver.start_calls == 1
+
+
+def test_live_scenario_open_failure_clears_pending_resume(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    with running_host(state_root) as (host, client, _driver):
+        opened, _ready = _start_ready_participant(client)
+        closed = client.close_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=opened["scenario_generation"],
+            scenario_state_revision=opened["state_revision"],
+            drain_timeout_ms=2_000,
+            request_id="live-resume-failure-close",
+        )["scenario"]
+
+        def fail_during_live_resume(
+            project_instance_id: str, scenario_id: str
+        ) -> list[dict[str, Any]]:
+            raise StoreError(
+                "scenario.restore-plan-invalid",
+                "injected live resume failure",
+            )
+
+        host.store.scenario_restore_plan = (  # type: ignore[method-assign]
+            fail_during_live_resume
+        )
+        with pytest.raises(HarnessClientError):
+            client.open_scenario(
+                project_instance_id=PROJECT_ID,
+                scenario_id=SCENARIO_ID,
+                scenario_generation=closed["scenario_generation"],
+                scenario_state_revision=closed["state_revision"],
+                request_id="live-resume-failure-open",
+            )
+
+        scenario = client.scenario_status(
+            project_instance_id=PROJECT_ID, scenario_id=SCENARIO_ID
+        )["scenario"]
+        assert scenario["observed_state"] == "degraded"
+        assert scenario["active_operation_id"] is None
+        assert scenario["degraded"]["reason"] == "participant_restore_incomplete"
+        assert scenario["degraded"]["repair_action"] == "scenario.repair"
+        durable = json.loads(
+            (state_root / "host-state.json").read_text(encoding="utf-8")
+        )
+        request = durable["requests"]["live-resume-failure-open"]
+        assert request["status"] == "failed"
+        assert "pending_resume_summary" not in request
 
 
 @pytest.mark.parametrize(
@@ -4154,6 +4288,103 @@ def test_clean_participant_close_failure_allows_scenario_repair(
         ]
 
 
+def test_repaired_incomplete_close_preserves_resume_targets(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    second_id = "participant-two"
+    with running_host(state_root) as (host, client, driver):
+        driver.per_participant_resource_digests = True
+        created = client.create_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            project_binding_digest=PROJECT_DIGEST,
+            request_id="repair-resume-create",
+        )["scenario"]
+        for participant_id in (PARTICIPANT_ID, second_id):
+            _add_test_participant(
+                client,
+                scenario=created,
+                participant_id=participant_id,
+                request_prefix=f"repair-resume-{participant_id}",
+            )
+        opened = client.open_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=created["scenario_generation"],
+            scenario_state_revision=created["state_revision"],
+            request_id="repair-resume-open-initial",
+        )["scenario"]
+        driver.fail_start_participant_ids = {PARTICIPANT_ID}
+        started = client.start_scenario_participants(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=opened["scenario_generation"],
+            scenario_state_revision=opened["state_revision"],
+            request_id="repair-resume-start-all",
+        )
+        assert started["start_summary"]["counts"]["failed"] == 1
+        assert started["start_summary"]["counts"]["started"] == 1
+
+        degraded = started["scenario"]
+        with pytest.raises(HarnessClientError):
+            client.close_scenario(
+                project_instance_id=PROJECT_ID,
+                scenario_id=SCENARIO_ID,
+                scenario_generation=degraded["scenario_generation"],
+                scenario_state_revision=degraded["state_revision"],
+                drain_timeout_ms=25,
+                request_id="repair-resume-close",
+            )
+        diagnostic = client.scenario_diagnostic(
+            project_instance_id=PROJECT_ID, scenario_id=SCENARIO_ID
+        )["diagnostic"]
+        assert diagnostic["latest_close"]["all_closed"] is False
+        assert {
+            target["participant_id"]
+            for target in diagnostic["latest_close"]["restore_targets"]
+        } == {PARTICIPANT_ID, second_id}
+
+        scenario = diagnostic["scenario"]
+        repair_id, replay, _ = host.store.begin_scenario_repair(
+            request_id="repair-resume-repair",
+            request_digest="a" * 64,
+            host_generation=host.host_generation,
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=scenario["scenario_generation"],
+            scenario_state_revision=scenario["state_revision"],
+            expected_wip_summary_digest="b" * 64,
+        )
+        assert replay is None
+        repaired = host.store.finalize_scenario_repair(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            request_id="repair-resume-repair",
+            operation_id=repair_id,
+            workspace_evidence_sha256="c" * 64,
+        )["scenario"]
+        assert repaired["observed_state"] == "closed"
+
+        driver.fail_start_participant_ids.clear()
+        resumed = client.open_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=repaired["scenario_generation"],
+            scenario_state_revision=repaired["state_revision"],
+            request_id="repair-resume-open-final",
+        )
+        assert resumed["scenario"]["observed_state"] == "running"
+        reports = resumed["resume_summary"]["reports"]
+        assert {report["participant_id"] for report in reports} == {
+            PARTICIPANT_ID,
+            second_id,
+        }
+        assert {report["outcome"] for report in reports} == {"recreated"}
+        assert all(report["repair_required"] is False for report in reports)
+        assert driver.start_calls == 4
+
+
 @pytest.mark.parametrize("mode", ["timeout", "unknown"])
 def test_scenario_safe_close_fails_closed_and_preserves_owned_binding(
     tmp_path: Path, mode: str
@@ -4205,6 +4436,9 @@ def test_scenario_safe_close_fails_closed_and_preserves_owned_binding(
         assert report["classification"] == mode
         assert report["closed"] is False
         assert diagnostic["latest_close"]["auto_force_stop_used"] is False
+        with pytest.raises(StoreError) as restore_blocked:
+            host.store.scenario_restore_plan(PROJECT_ID, SCENARIO_ID)
+        assert restore_blocked.value.code == "scenario.restore-plan-invalid"
         durable = json.loads(
             (state_root / "host-state.json").read_text(encoding="utf-8")
         )

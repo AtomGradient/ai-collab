@@ -2373,9 +2373,13 @@ class ScenarioStore:
             )
 
     def scenario_restore_plan(
-        self, project_instance_id: str, scenario_id: str
+        self,
+        project_instance_id: str,
+        scenario_id: str,
+        *,
+        active_restore_operation_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Return the last successful close's exact participant restore targets."""
+        """Return safe participant restore targets from the latest close record."""
 
         key = self._scenario_key(project_instance_id, scenario_id)
         with self._lock:
@@ -2432,8 +2436,43 @@ class ScenarioStore:
                 if isinstance(declared, list)
                 else []
             )
+            active_restore_operation = (
+                state["operations"].get(active_restore_operation_id)
+                if active_restore_operation_id is not None
+                else None
+            )
+            settled_after_repair = (
+                all(
+                    participant["desired_state"] == "stopped"
+                    and participant["observed_state"] == "stopped"
+                    and participant["runtime_binding_id"] is None
+                    and participant["presentation_binding_id"] is None
+                    and participant["active_operation_id"] is None
+                    for participant in participants.values()
+                )
+                and all(
+                    lease["status"] == "released"
+                    for lease in self._resource_leases(item).values()
+                )
+            )
+            completing_active_restore = (
+                isinstance(active_restore_operation, dict)
+                and active_restore_operation.get("operation_kind")
+                == "scenario.open"
+                and active_restore_operation.get("state")
+                == "executing_external"
+                and active_restore_operation.get("target", {}).get("scenario_id")
+                == scenario_id
+                and item["record"]["active_operation_id"]
+                == active_restore_operation_id
+                and item["record"]["observed_state"] == "opening"
+            )
             if (
-                latest.get("all_closed") is not True
+                (
+                    latest.get("all_closed") is not True
+                    and not settled_after_repair
+                    and not completing_active_restore
+                )
                 or not isinstance(declared, list)
                 or len(declared_ids) != len(declared)
                 or len(declared_ids) != len(set(declared_ids))
@@ -2452,8 +2491,11 @@ class ScenarioStore:
                 )
             normalized = copy.deepcopy(declared)
             for target in normalized:
-                if target["continuity_mode"] == "exact_resume" and not self._sha256(
-                    target.get("vendor_session_identity_sha256")
+                if latest.get("all_closed") is not True or (
+                    target["continuity_mode"] == "exact_resume"
+                    and not self._sha256(
+                        target.get("vendor_session_identity_sha256")
+                    )
                 ):
                     target["continuity_mode"] = "explicit_recreate"
                     target.pop("vendor_session_identity_sha256", None)
@@ -2543,7 +2585,9 @@ class ScenarioStore:
             if existing is not None:
                 return copy.deepcopy(request_result)
             restore_plan = self.scenario_restore_plan(
-                project_instance_id, scenario_id
+                project_instance_id,
+                scenario_id,
+                active_restore_operation_id=operation["operation_id"],
             )
             expected_by_id = {
                 value["participant_id"]: value for value in restore_plan

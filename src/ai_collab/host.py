@@ -1171,7 +1171,7 @@ class HarnessHost:
             counts[outcome] = sum(
                 report["outcome"] == outcome for report in reports
             )
-        if cancelled:
+        if cancelled or active.cancel_event.is_set():
             emit_progress(
                 "cancelled",
                 completed_units=sum(
@@ -1931,12 +1931,39 @@ class HarnessHost:
                 scenario_state_revision=request["payload"]["scenario_state_revision"],
             )
             if "resume_summary" not in result:
-                result = self._resume_scenario_participants(
-                    project_instance_id=target["project_instance_id"],
-                    scenario_id=target["scenario_id"],
-                    request_id=request["request_id"],
-                    request_digest=request_digest,
-                )
+                try:
+                    result = self._resume_scenario_participants(
+                        project_instance_id=target["project_instance_id"],
+                        scenario_id=target["scenario_id"],
+                        request_id=request["request_id"],
+                        request_digest=request_digest,
+                    )
+                except (
+                    ProjectError,
+                    StoreError,
+                    WorkspaceError,
+                    ParticipantAuthError,
+                    ParticipantError,
+                    DeliveryError,
+                    OperationFailed,
+                ) as exc:
+                    self.store.fail_scenario_open_resume(
+                        project_instance_id=target["project_instance_id"],
+                        scenario_id=target["scenario_id"],
+                        request_id=request["request_id"],
+                        request_digest=request_digest,
+                        failure_code=getattr(
+                            exc, "code", "scenario.restore-plan-invalid"
+                        ),
+                        retryable=getattr(exc, "retryable", False),
+                        cleanup_pending=True,
+                    )
+                    # Raise the failure exactly as persisted so the client and
+                    # subsequent idempotent replays observe one outcome.
+                    self.store.replay_request(
+                        request["request_id"], request_digest
+                    )
+                    raise
         elif operation == "scenario.force-destroy":
             if self.workspace is None or security_effect_preview is None:
                 self._mark_security_failure(security_consumption)
