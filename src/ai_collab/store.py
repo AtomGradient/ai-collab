@@ -2252,6 +2252,7 @@ class ScenarioStore:
                     self._stale_participant_resources(
                         item, participant, "close_incomplete"
                     )
+                    participant["desired_state"] = "stopped"
                     participant["observed_state"] = "degraded"
                     participant["active_operation_id"] = None
                     participant["state_revision"] = participant_revision + 1

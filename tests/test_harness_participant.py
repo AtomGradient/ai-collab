@@ -4075,12 +4075,91 @@ def test_restart_finishes_durably_authorized_resource_break(
         ) == 1
 
 
+def test_clean_participant_close_failure_allows_scenario_repair(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    with running_host(state_root) as (host, client, driver):
+        created = client.create_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            project_binding_digest=PROJECT_DIGEST,
+            request_id="clean-close-create",
+        )["scenario"]
+        added = _add_test_participant(
+            client,
+            scenario=created,
+            participant_id=PARTICIPANT_ID,
+            request_prefix="clean-close",
+        )
+        opened = client.open_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=created["scenario_generation"],
+            scenario_state_revision=created["state_revision"],
+            request_id="clean-close-open",
+        )["scenario"]
+        driver.fail_start = True
+        with pytest.raises(HarnessClientError):
+            _start_test_participant(
+                client,
+                scenario=opened,
+                participant=added,
+                participant_id=PARTICIPANT_ID,
+                request_prefix="clean-close",
+            )
+        degraded = client.scenario_status(
+            project_instance_id=PROJECT_ID, scenario_id=SCENARIO_ID
+        )["scenario"]
+        with pytest.raises(HarnessClientError) as failed:
+            client.close_scenario(
+                project_instance_id=PROJECT_ID,
+                scenario_id=SCENARIO_ID,
+                scenario_generation=degraded["scenario_generation"],
+                scenario_state_revision=degraded["state_revision"],
+                drain_timeout_ms=25,
+                request_id="clean-close-failed",
+            )
+        assert failed.value.code == "operation.external-failure"
+
+        diagnostic = client.scenario_diagnostic(
+            project_instance_id=PROJECT_ID, scenario_id=SCENARIO_ID
+        )["diagnostic"]
+        participant = diagnostic["participants"][0]
+        assert participant["desired_state"] == "stopped"
+        assert participant["observed_state"] == "degraded"
+        assert participant["runtime_binding_id"] is None
+        assert participant["presentation_binding_id"] is None
+        assert client.list_resources(
+            project_instance_id=PROJECT_ID, scenario_id=SCENARIO_ID
+        )["resources"] == []
+
+        common = {
+            "project_instance_id": PROJECT_ID,
+            "scenario_id": SCENARIO_ID,
+            "scenario_generation": diagnostic["scenario"]["scenario_generation"],
+            "scenario_state_revision": diagnostic["scenario"]["state_revision"],
+        }
+        repair = host.store.scenario_high_risk_preview(
+            **common, operation="scenario.repair"
+        )
+        destroy = host.store.scenario_high_risk_preview(
+            **common, operation="scenario.destroy"
+        )
+        assert repair["blockers"] == []
+        assert repair["eligible"] is True
+        assert destroy["blockers"] == [
+            "participant.not-detached-or-stopped",
+            "scenario.not-closed",
+        ]
+
+
 @pytest.mark.parametrize("mode", ["timeout", "unknown"])
 def test_scenario_safe_close_fails_closed_and_preserves_owned_binding(
     tmp_path: Path, mode: str
 ) -> None:
     state_root = tmp_path / "state"
-    with running_host(state_root) as (_, client, driver):
+    with running_host(state_root) as (host, client, driver):
         opened, ready = _start_ready_participant(client)
         driver.close_mode = mode
         for _ in range(2):
@@ -4111,9 +4190,17 @@ def test_scenario_safe_close_fails_closed_and_preserves_owned_binding(
             "scenario.repair",
         ]
         participant = diagnostic["participants"][0]
-        assert participant["desired_state"] == "running"
+        assert participant["desired_state"] == "stopped"
         assert participant["observed_state"] == "degraded"
         assert participant["runtime_binding_id"] == ready["runtime_binding_id"]
+        preview = host.store.scenario_high_risk_preview(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=diagnostic["scenario"]["scenario_generation"],
+            scenario_state_revision=diagnostic["scenario"]["state_revision"],
+            operation="scenario.repair",
+        )
+        assert "participant.cleanup-pending" in preview["blockers"]
         report = diagnostic["latest_close"]["reports"][0]
         assert report["classification"] == mode
         assert report["closed"] is False
