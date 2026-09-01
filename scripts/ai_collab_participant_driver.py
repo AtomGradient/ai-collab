@@ -728,6 +728,7 @@ def _launch_reason_code(stage: str, exc: BaseException) -> str:
     known = {
         "iTerm runtime process did not become ready": "process.readiness-timeout",
         "runtime TUI did not become input-ready": "tui.readiness-timeout",
+        "runtime TUI startup prompt needs attention": "tui.startup-prompt-unknown",
         "iTerm application state is unavailable": "iterm.application-unavailable",
         "iTerm private API is unavailable": "iterm.private-api-unavailable",
         "iTerm top-level window was not created": "iterm.window-not-created",
@@ -983,38 +984,83 @@ def _valid_safe_close(value: Any, startup_gate: Any) -> bool:
 def _valid_startup_gate(value: Any) -> bool:
     if value is None:
         return True
+    if not isinstance(value, dict):
+        return False
+    legacy_fields = {
+        "scope",
+        "prompt_pattern",
+        "ready_pattern",
+        "confirm_sequence",
+        "requires_workspace_path",
+        "timeout_seconds",
+    }
+    rules_fields = {
+        "scope",
+        "prompt_rules",
+        "ready_pattern",
+        "timeout_seconds",
+    }
     if (
-        not isinstance(value, dict)
-        or set(value)
-        != {
-            "scope",
-            "prompt_pattern",
-            "ready_pattern",
-            "confirm_sequence",
-            "requires_workspace_path",
-            "timeout_seconds",
-        }
+        frozenset(value) not in {frozenset(legacy_fields), frozenset(rules_fields)}
         or value.get("scope") != "harness_verified_workspace"
-        or value.get("requires_workspace_path") is not True
-        or not isinstance(value.get("prompt_pattern"), str)
-        or not value["prompt_pattern"]
-        or len(value["prompt_pattern"]) > 1024
         or not isinstance(value.get("ready_pattern"), str)
         or not value["ready_pattern"]
         or len(value["ready_pattern"]) > 512
-        or not isinstance(value.get("confirm_sequence"), list)
-        or not 1 <= len(value["confirm_sequence"]) <= 4
-        or any(key not in STARTUP_CONFIRM_KEYS for key in value["confirm_sequence"])
         or not isinstance(value.get("timeout_seconds"), int)
         or not 5 <= value["timeout_seconds"] <= STARTUP_GATE_MAX_SECONDS
     ):
         return False
+    rules = _startup_prompt_rules(value)
+    if any(not isinstance(rule, dict) for rule in rules):
+        return False
+    if (
+        not 1 <= len(rules) <= 8
+        or len({rule.get("rule_id") for rule in rules}) != len(rules)
+        or any(
+            set(rule)
+            != {
+                "rule_id",
+                "prompt_pattern",
+                "confirm_sequence",
+                "requires_workspace_path",
+            }
+            or not isinstance(rule.get("rule_id"), str)
+            or _PROFILE_ID_RE.fullmatch(rule["rule_id"]) is None
+            or not isinstance(rule.get("prompt_pattern"), str)
+            or not rule["prompt_pattern"]
+            or len(rule["prompt_pattern"]) > 1024
+            or not isinstance(rule.get("confirm_sequence"), list)
+            or not 1 <= len(rule["confirm_sequence"]) <= 4
+            or any(
+                key not in STARTUP_CONFIRM_KEYS
+                for key in rule["confirm_sequence"]
+            )
+            or rule.get("requires_workspace_path") is not True
+            for rule in rules
+        )
+    ):
+        return False
     try:
-        re.compile(value["prompt_pattern"])
         re.compile(value["ready_pattern"])
+        for rule in rules:
+            re.compile(rule["prompt_pattern"])
     except re.error:
         return False
     return True
+
+
+def _startup_prompt_rules(gate: Mapping[str, Any]) -> list[dict[str, Any]]:
+    rules = gate.get("prompt_rules")
+    if isinstance(rules, list):
+        return rules
+    return [
+        {
+            "rule_id": "startup.legacy-prompt",
+            "prompt_pattern": gate.get("prompt_pattern"),
+            "confirm_sequence": gate.get("confirm_sequence"),
+            "requires_workspace_path": gate.get("requires_workspace_path"),
+        }
+    ]
 
 
 def _runtime_profile(launch_spec: Mapping[str, Any]) -> dict[str, Any]:
@@ -2388,25 +2434,43 @@ async def _wait_startup_ready(
             "workspace_identity_sha256": None,
             "ready_screen_sha256": None,
         }
-    prompt_pattern = re.compile(gate["prompt_pattern"])
+    prompt_rules = [
+        (rule, re.compile(rule["prompt_pattern"]))
+        for rule in _startup_prompt_rules(gate)
+    ]
     ready_pattern = re.compile(gate["ready_pattern"])
     deadline = asyncio.get_running_loop().time() + gate["timeout_seconds"]
-    accepted = False
+    handled_rule_ids: set[str] = set()
     stable_digest: str | None = None
     stable_count = 0
     while True:
         screen = _screen_text(
             await _bounded(session.async_get_screen_contents())
         ).replace("\x00", " ")
-        if prompt_pattern.search(screen) is not None:
-            if not accepted:
-                if _process_cwd(process_pid) != workspace_path.resolve(strict=True):
+        matched_rules = [
+            rule for rule, pattern in prompt_rules if pattern.search(screen) is not None
+        ]
+        unhandled_rules = [
+            rule
+            for rule in matched_rules
+            if rule["rule_id"] not in handled_rule_ids
+        ]
+        if len(unhandled_rules) > 1:
+            raise DriverError("runtime TUI startup prompt needs attention")
+        if matched_rules:
+            rule = unhandled_rules[0] if unhandled_rules else matched_rules[0]
+            if rule["rule_id"] not in handled_rule_ids:
+                if (
+                    rule["requires_workspace_path"]
+                    and _process_cwd(process_pid)
+                    != workspace_path.resolve(strict=True)
+                ):
                     raise DriverError("startup trust gate workspace differs")
-                for value in gate["confirm_sequence"]:
+                for value in rule["confirm_sequence"]:
                     await _bounded(
                         session.async_send_text(value, suppress_broadcast=True)
                     )
-                accepted = True
+                handled_rule_ids.add(rule["rule_id"])
             stable_digest = None
             stable_count = 0
         elif ready_pattern.search(screen) is not None:
@@ -2419,7 +2483,9 @@ async def _wait_startup_ready(
             if stable_count >= STARTUP_STABLE_OBSERVATIONS:
                 return {
                     "scope": gate["scope"],
-                    "outcome": "accepted" if accepted else "already_satisfied",
+                    "outcome": (
+                        "accepted" if handled_rule_ids else "already_satisfied"
+                    ),
                     "workspace_identity_sha256": digest(
                         {"workspace_path": str(workspace_path.resolve(strict=True))}
                     ),

@@ -1704,8 +1704,31 @@ def test_startup_gate_validation_rejects_unknown_confirmation_keys() -> None:
     )
 
     assert participant_driver._valid_startup_gate(gate) is True  # noqa: SLF001
-    gate["confirm_sequence"] = ["yes", "\r"]
+    gate["prompt_rules"][0]["confirm_sequence"] = ["yes", "\r"]
     assert participant_driver._valid_startup_gate(gate) is False  # noqa: SLF001
+
+
+def test_startup_gate_validation_rejects_non_object_prompt_rules() -> None:
+    gate = copy.deepcopy(
+        participant_driver._runtime_profiles()["runtime-profile.codex"][  # noqa: SLF001
+            "startup_gate"
+        ]
+    )
+    gate["prompt_rules"] = ["invalid"]
+
+    assert participant_driver._valid_startup_gate(gate) is False  # noqa: SLF001
+
+
+def test_startup_gate_validation_accepts_legacy_single_prompt_shape() -> None:
+    gate = copy.deepcopy(
+        participant_driver._runtime_profiles()["runtime-profile.codex"][  # noqa: SLF001
+            "startup_gate"
+        ]
+    )
+    rule = gate.pop("prompt_rules")[0]
+    gate.update({key: value for key, value in rule.items() if key != "rule_id"})
+
+    assert participant_driver._valid_startup_gate(gate) is True  # noqa: SLF001
 
 
 def test_launch_failure_diagnostic_is_bounded_and_owner_private(
@@ -2268,6 +2291,7 @@ def test_claude_trust_prompt_pattern_requires_current_menu_shape() -> None:
     gate = participant_driver._runtime_profiles()["runtime-profile.claude"][  # noqa: SLF001
         "startup_gate"
     ]
+    pattern = gate["prompt_rules"][0]["prompt_pattern"]
     screen = (
         " Accessing workspace:\n\n"
         " /Users/atomgradient/Documents/Scenarios/workspace/bundle/EdgeStudio\n\n"
@@ -2278,17 +2302,17 @@ def test_claude_trust_prompt_pattern_requires_current_menu_shape() -> None:
         " Enter to confirm · Esc to cancel"
     )
 
-    assert re.search(gate["prompt_pattern"], screen) is not None
+    assert re.search(pattern, screen) is not None
     assert re.search(
-        gate["prompt_pattern"],
+        pattern,
         screen.replace("❯ No, exit\n   Yes", "  No, exit\n ❯ Yes"),
     ) is None
     assert re.search(
-        gate["prompt_pattern"],
+        pattern,
         screen.replace("❯ No, exit\n   Yes", "❯ Yes\n   No, exit"),
     ) is None
     assert re.search(
-        gate["prompt_pattern"],
+        pattern,
         screen.replace(
             "   Yes, I trust this folder",
             "   Yes, I trust this folder\n   Maybe later",
@@ -2324,6 +2348,82 @@ def test_startup_trust_gate_fails_closed_on_workspace_mismatch(
     else:  # pragma: no cover - fail-closed assertion
         raise AssertionError("mismatched startup trust workspace was accepted")
     assert session.sent == []
+
+
+def test_codex_update_prompt_is_skipped_before_waiting_for_ready(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    workspace = tmp_path / "trusted"
+    workspace.mkdir()
+    profile = participant_driver._runtime_profiles()[  # noqa: SLF001
+        "runtime-profile.codex"
+    ]
+    prompt = (
+        "✨ Update available! 0.151.0 -> 0.152.0\n\n"
+        "Release notes: https://github.com/openai/codex/releases/latest\n\n"
+        "› 1. Update now (runs `npm install -g @openai/codex`)\n"
+        "  2. Skip\n"
+        "  3. Skip until next version\n\n"
+        "Press enter to continue"
+    )
+    ready = ">_ OpenAI Codex (v0.151.0)\n›"
+    session = _StartupSession([prompt, prompt, ready, ready, ready, ready])
+    monkeypatch.setattr(participant_driver, "STARTUP_POLL_SECONDS", 0)
+    monkeypatch.setattr(participant_driver, "_process_cwd", lambda pid: workspace)
+
+    evidence = asyncio.run(
+        participant_driver._wait_startup_ready(  # noqa: SLF001
+            session, profile, workspace, 1234
+        )
+    )
+
+    assert session.sent == [("2", True)]
+    assert evidence["outcome"] == "accepted"
+
+
+def test_codex_startup_handles_update_then_trust_with_residual_text(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    workspace = tmp_path / "trusted"
+    workspace.mkdir()
+    profile = participant_driver._runtime_profiles()[  # noqa: SLF001
+        "runtime-profile.codex"
+    ]
+    update_prompt = (
+        "✨ Update available! 0.151.0 -> 0.152.0\n\n"
+        "Release notes: https://github.com/openai/codex/releases/latest\n\n"
+        "› 1. Update now (runs `npm install -g @openai/codex`)\n"
+        "  2. Skip\n"
+        "  3. Skip until next version\n\n"
+        "Press enter to continue"
+    )
+    trust_prompt = (
+        "You are in /tmp/trusted\n"
+        "Do you trust the contents of this directory?\n"
+        "1. Yes, continue\n2. No, quit"
+    )
+    ready = ">_ OpenAI Codex (v0.151.0)\n›"
+    session = _StartupSession(
+        [
+            update_prompt,
+            f"{update_prompt}\n\n{trust_prompt}",
+            ready,
+            ready,
+            ready,
+            ready,
+        ]
+    )
+    monkeypatch.setattr(participant_driver, "STARTUP_POLL_SECONDS", 0)
+    monkeypatch.setattr(participant_driver, "_process_cwd", lambda pid: workspace)
+
+    evidence = asyncio.run(
+        participant_driver._wait_startup_ready(  # noqa: SLF001
+            session, profile, workspace, 1234
+        )
+    )
+
+    assert session.sent == [("2", True), ("1", True), ("\r", True)]
+    assert evidence["outcome"] == "accepted"
 
 
 def test_startup_gate_does_not_type_when_workspace_is_already_trusted(

@@ -34,10 +34,21 @@
       },
       "startup_gate": {
         "scope": "harness_verified_workspace",
-        "prompt_pattern": "(?s)You\\s+are\\s+in.*Do\\s+you\\s+trust\\s+the\\s+contents\\s+of\\s+this\\s+directory\\?.*1\\.\\s+Yes,\\s+continue.*2\\.\\s+No,\\s+quit",
+        "prompt_rules": [
+          {
+            "rule_id": "startup.codex-workspace-trust",
+            "prompt_pattern": "(?s)You\\s+are\\s+in.*Do\\s+you\\s+trust\\s+the\\s+contents\\s+of\\s+this\\s+directory\\?.*1\\.\\s+Yes,\\s+continue.*2\\.\\s+No,\\s+quit",
+            "confirm_sequence": ["1", "\r"],
+            "requires_workspace_path": true
+          },
+          {
+            "rule_id": "startup.codex-update-skip",
+            "prompt_pattern": "(?s)Update\\s+available!\\s+\\S+\\s*->\\s*\\S+.*Release\\s+notes:\\s+https://github\\.com/openai/codex/releases/latest.*›\\s*1\\.\\s*Update\\s+now\\s+\\(runs\\s+`[^`\\r\\n]{1,200}`\\)\\s*2\\.\\s*Skip\\s*3\\.\\s*Skip\\s+until\\s+next\\s+version\\s*Press\\s+enter\\s+to\\s+continue",
+            "confirm_sequence": ["2"],
+            "requires_workspace_path": true
+          }
+        ],
         "ready_pattern": "(?m)^\\s*›(?!\\s*\\d+\\.).*$",
-        "confirm_sequence": ["1", "\r"],
-        "requires_workspace_path": true,
         "timeout_seconds": 180
       }
     },
@@ -59,10 +70,15 @@
       },
       "startup_gate": {
         "scope": "harness_verified_workspace",
-        "prompt_pattern": "(?s)Accessing\\s+workspace:.*Quick\\s+safety\\s+check:.*\\n[ \\t]*❯[ \\t]+No,\\s+exit[ \\t]*\\n[ \\t]+Yes,\\s+I\\s+trust\\s+this\\s+folder[ \\t]*\\n\\s*Enter\\s+to\\s+confirm",
+        "prompt_rules": [
+          {
+            "rule_id": "startup.claude-workspace-trust",
+            "prompt_pattern": "(?s)Accessing\\s+workspace:.*Quick\\s+safety\\s+check:.*\\n[ \\t]*❯[ \\t]+No,\\s+exit[ \\t]*\\n[ \\t]+Yes,\\s+I\\s+trust\\s+this\\s+folder[ \\t]*\\n\\s*Enter\\s+to\\s+confirm",
+            "confirm_sequence": ["\u001b[B", "\r"],
+            "requires_workspace_path": true
+          }
+        ],
         "ready_pattern": "(?m)^\\s*❯\\s*$",
-        "confirm_sequence": ["\u001b[B", "\r"],
-        "requires_workspace_path": true,
         "timeout_seconds": 180
       }
     }
