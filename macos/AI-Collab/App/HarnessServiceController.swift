@@ -2,6 +2,7 @@
 // Copyright © 2026 AtomGradient
 // 版权所有 © 2026 质子梯度（北京）科技有限公司
 
+import Darwin
 import Foundation
 import ServiceManagement
 
@@ -69,7 +70,8 @@ extension SMAppService: HarnessServiceManaging {}
 
 @available(macOS 13.0, *)
 final class HarnessServiceController: @unchecked Sendable {
-    static let launchAgentPlistName = "com.atomgradient.aicollab.host.plist"
+    static let launchAgentLabel = "com.atomgradient.aicollab.host"
+    static let launchAgentPlistName = "\(launchAgentLabel).plist"
     static let serviceBuildDigestKey = "AICollabServiceBuildDigest"
     private let service: any HarnessServiceManaging
     private let registrationReceipt: URL
@@ -140,6 +142,7 @@ final class HarnessServiceController: @unchecked Sendable {
             // status instead of guessing at a cause.
             throw HarnessServiceError.serviceUnresolved(status: current)
         }
+        Self.kickstartHost()
         return current
     }
 
@@ -191,6 +194,14 @@ final class HarnessServiceController: @unchecked Sendable {
 
     private static func isSHA256(_ value: String) -> Bool {
         value.count == 64 && value.allSatisfy { $0.isHexDigit && !$0.isUppercase }
+    }
+
+    private static func kickstartHost() {
+        guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else { return }
+        let process = Process()
+        process.executableURL = URL(filePath: "/bin/launchctl")
+        process.arguments = ["kickstart", "gui/\(getuid())/\(launchAgentLabel)"]
+        try? process.run()
     }
 
     private static func defaultStateRoot() -> URL {
