@@ -314,20 +314,13 @@ def build(
     print(output)
     if disk_image is not None:
         disk_image.parent.mkdir(parents=True, exist_ok=True)
-        _run(
-            [
-                "/usr/bin/hdiutil",
-                "create",
-                "-volname",
-                "AI Collab",
-                "-srcfolder",
-                str(output),
-                "-format",
-                "UDZO",
-                str(disk_image),
-            ],
-            cwd=ROOT,
-        )
+        with tempfile.TemporaryDirectory(prefix="ai-collab-dmg-") as staging:
+            dmg_root = Path(staging)
+            _run(["/usr/bin/ditto", str(output), str(dmg_root / "AICollab.app")], cwd=ROOT)
+            (dmg_root / "Applications").symlink_to("/Applications")
+            dmg_argv = ["/usr/bin/hdiutil", "create", "-volname", "AI Collab",
+                        "-srcfolder", str(dmg_root), "-format", "UDZO", str(disk_image)]
+            _run(dmg_argv, cwd=ROOT)
         if notarize:
             _codesign(
                 [
