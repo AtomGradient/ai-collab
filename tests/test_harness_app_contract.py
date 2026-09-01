@@ -89,7 +89,12 @@ def test_app_is_vendor_neutral_and_does_not_shell_out() -> None:
     assert "Codex" not in source
     assert "Claude" not in source
     assert "NSTask" not in source
-    assert "Process()" not in source
+    # Starting the Host is the App's sole permitted external process.
+    assert "Process()" not in source.replace(
+        'let process = Process()\n        process.executableURL = URL(filePath: "/bin/launchctl")',
+        "",
+        1,
+    )
     assert "canonical_project_path" not in source.replace(
         '"canonical_project_path": url.path', ""
     )
