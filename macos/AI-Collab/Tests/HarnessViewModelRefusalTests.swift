@@ -83,6 +83,8 @@ final class HarnessViewModelRefusalTests: XCTestCase {
                 "observed_state": observed,
                 "workspace_binding_id": "ws-1",
                 "participant_ids": [String](),
+                "objective": "",
+                "objective_history": [[String: Any]](),
             ])
         else {
             fatalError("fixture scenario could not be built")

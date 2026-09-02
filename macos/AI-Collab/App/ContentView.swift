@@ -393,14 +393,18 @@ struct ContentView: View {
 
     private var scenariosList: some View {
         VStack(spacing: 0) {
-            HStack {
+            VStack(spacing: 8) {
+                TextField(S.Rooms.objectivePlaceholder, text: $model.newScenarioObjective)
                 TextField(S.Rooms.identityPlaceholder, text: $model.newScenarioID)
                     .onSubmit {
                         guard model.selectedProject != nil, !model.isBusy else { return }
                         Task { await model.createScenario() }
                     }
-                Button(S.Rooms.createButton) { Task { await model.createScenario() } }
-                    .disabled(model.selectedProject == nil || model.isBusy)
+                HStack {
+                    Spacer()
+                    Button(S.Rooms.createButton) { Task { await model.createScenario() } }
+                        .disabled(model.selectedProject == nil || model.isBusy)
+                }
             }
             .padding()
             validationBanner(for: .scenarioCreate)
@@ -438,6 +442,7 @@ struct ContentView: View {
                         // machine view folded at the end, nothing removed.
                         scenarioHeader(scenario)
                         validationBanner(for: .scenarioLifecycle)
+                        objectiveSection(scenario)
                         healthCard(scenario)
                         collaborationHealthSection
                         needsAttentionSection
@@ -463,6 +468,52 @@ struct ContentView: View {
                 )
             }
         }
+    }
+
+    private func objectiveSection(_ scenario: ScenarioRecord) -> some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack {
+                Label(S.Objective.sectionTitle, systemImage: "scope")
+                    .font(.headline)
+                Spacer()
+                if scenario.objectiveRevision > 0 {
+                    Text(S.Objective.revision(scenario.objectiveRevision))
+                        .font(.caption.monospacedDigit())
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 6))
+                }
+            }
+            if scenario.objective.isEmpty {
+                Text(S.Objective.notSet)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text(scenario.objective)
+                    .font(.body)
+                if !scenario.acceptanceCriteria.isEmpty {
+                    Text(S.Objective.acceptanceCriteria)
+                        .font(.caption.bold())
+                        .foregroundStyle(.secondary)
+                    Text(scenario.acceptanceCriteria)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            HStack {
+                TextField(S.Objective.objectivePlaceholder, text: $model.objectiveDraft)
+                TextField(
+                    S.Objective.acceptancePlaceholder,
+                    text: $model.acceptanceCriteriaDraft
+                )
+                Button(S.Objective.addRevision, systemImage: "plus") {
+                    Task { await model.appendScenarioObjective() }
+                }
+                .disabled(model.isBusy)
+            }
+            validationBanner(for: .objective)
+        }
+        .padding(.vertical, 2)
     }
 
     // MARK: - Scenario header

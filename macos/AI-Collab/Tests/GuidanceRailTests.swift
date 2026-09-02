@@ -29,6 +29,8 @@ final class GuidanceRailTests: XCTestCase {
             "observed_state": observed,
             "workspace_binding_id": "ws-1",
             "participant_ids": [String](),
+            "objective": "",
+            "objective_history": [[String: Any]](),
         ])!
     }
 

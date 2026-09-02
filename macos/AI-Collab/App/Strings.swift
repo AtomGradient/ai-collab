@@ -127,6 +127,9 @@ enum S {
         static var createButton: String { t("Create", "创建") }
         static var noSelection: String { t("No Task Room selected", "尚未选择任务房间") }
         static var identityPlaceholder: String { t("Room name", "房间名字") }
+        static var objectivePlaceholder: String {
+            t("Objective (optional)", "目标（可选）")
+        }
         static var forceDelete: String {
             t("Force Delete Task Room…", "强制删除任务房间…")
         }
@@ -147,6 +150,22 @@ enum S {
                 "注册项目、创建任务房间，然后和你的 AI 同事在房间里开工。"
             )
         }
+    }
+
+    enum Objective {
+        static var sectionTitle: String { t("Objective", "目标") }
+        static var notSet: String { t("No objective set", "尚未设置目标") }
+        static func revision(_ value: Int) -> String { t("rev \(value)", "修订 \(value)") }
+        static var acceptanceCriteria: String {
+            t("Acceptance criteria", "验收标准")
+        }
+        static var objectivePlaceholder: String {
+            t("Revised objective", "修订后的目标")
+        }
+        static var acceptancePlaceholder: String {
+            t("Acceptance criteria (optional)", "验收标准（可选）")
+        }
+        static var addRevision: String { t("Add revision", "追加修订") }
     }
 
     // MARK: Task room detail actions
@@ -670,6 +689,9 @@ enum S {
             t("Register or select a project first.", "先注册或选择一个项目。")
         }
         static var nameTheRoom: String { t("Give the task room a name.", "给任务房间起个名字。") }
+        static var objectiveRequired: String {
+            t("Enter the revised objective.", "请输入修订后的目标。")
+        }
         static func roomNameTaken(_ id: String) -> String {
             t("This project already has a task room named “\(id)”.", "这个项目已有名为「\(id)」的任务房间。")
         }
@@ -798,6 +820,9 @@ enum S {
             t("Focusing and restoring room windows…", "正在聚焦并还原房间窗口…")
         }
         static func creatingRoom(_ id: String) -> String { t("Creating task room \(id)…", "正在创建任务房间 \(id)…") }
+        static var updatingObjective: String {
+            t("Adding an objective revision…", "正在追加目标修订…")
+        }
         static var planningWorkspace: String {
             t("Preparing the isolated workspace…", "正在准备隔离工作区…")
         }
@@ -842,6 +867,9 @@ enum S {
         static var updateApplied: String { t("Project update applied", "项目更新已应用") }
         static var windowsRestored: String { t("Restored the room windows.", "已还原房间窗口。") }
         static func createdRoom(_ id: String) -> String { t("Created task room \(id).", "已创建任务房间 \(id)。") }
+        static var objectiveUpdated: String {
+            t("Objective revision added.", "已追加目标修订。")
+        }
         static var workspaceReady: String { t("Workspace is ready.", "工作区已就绪。") }
         static var itermPythonAPICommandCopied: String {
             t(

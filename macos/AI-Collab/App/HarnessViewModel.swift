@@ -13,6 +13,7 @@ enum ValidationScope: String {
     case scenarioCreate
     case workspace
     case scenarioLifecycle
+    case objective
     case participantAdd
     case participantAction
     case policy
@@ -78,6 +79,9 @@ final class HarnessViewModel: ObservableObject {
     var policyMessage: String { policyNote?() ?? S.Defaults.policy }
     var deliveryMessage: String { deliveryNote?() ?? S.Defaults.delivery }
     @Published var newScenarioID = "research-\(HarnessViewModel.shortTimestamp())"
+    @Published var newScenarioObjective = ""
+    @Published var objectiveDraft = ""
+    @Published var acceptanceCriteriaDraft = ""
     @Published var newParticipantID = "analyst"
     /// Set only while a mutation is in flight. Read-only refreshes deliberately
     /// leave it false so browsing never disables the window.
@@ -723,6 +727,9 @@ final class HarnessViewModel: ObservableObject {
         guard !scenarios.contains(where: { $0.id == scenarioID }) else {
             return refuse(.scenarioCreate, S.Msg.roomNameTaken(scenarioID))
         }
+        let objective = newScenarioObjective.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
         await performMutation(
             activity: S.Msg.creatingRoom(scenarioID),
             scope: .scenarioCreate,
@@ -733,7 +740,11 @@ final class HarnessViewModel: ObservableObject {
                     operation: "scenario.create",
                     target: self.scenarioTarget(projectID: project.id, scenarioID: scenarioID),
                     fence: ["operation_generation": 0],
-                    payload: ["project_binding_digest": project.bindingDigest]
+                    payload: [
+                        "project_binding_digest": project.bindingDigest,
+                        "objective": objective,
+                        "acceptance_criteria": "",
+                    ]
                 )
             )
             guard result["scenario"] as? [String: Any] != nil else {
@@ -742,7 +753,50 @@ final class HarnessViewModel: ObservableObject {
             try await self.reloadScenarios()
             self.selectedScenarioID = scenarioID
             self.newScenarioID = "research-\(Self.shortTimestamp())"
+            self.newScenarioObjective = ""
             try await self.refreshSelectedScenarioValues()
+        }
+    }
+
+    func appendScenarioObjective() async {
+        guard let project = selectedProject, let scenario = selectedScenario else {
+            return refuse(.objective, S.Msg.selectRoomFirst)
+        }
+        let objective = objectiveDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !objective.isEmpty else {
+            return refuse(.objective, S.Msg.objectiveRequired)
+        }
+        let acceptanceCriteria = acceptanceCriteriaDraft.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        await performMutation(
+            activity: S.Msg.updatingObjective,
+            scope: .objective,
+            success: S.Msg.objectiveUpdated
+        ) {
+            let result = try await self.client.call(
+                HarnessCall(
+                    operation: "scenario.objective.append",
+                    target: self.scenarioTarget(
+                        projectID: project.id, scenarioID: scenario.id
+                    ),
+                    fence: ["operation_generation": scenario.stateRevision],
+                    payload: [
+                        "scenario_generation": scenario.generation,
+                        "scenario_state_revision": scenario.stateRevision,
+                        "objective": objective,
+                        "acceptance_criteria": acceptanceCriteria,
+                    ]
+                )
+            )
+            guard
+                let raw = result["scenario"] as? [String: Any],
+                let current = ScenarioRecord(raw)
+            else { throw HarnessIPCError.invalidReply }
+            if let index = self.scenarios.firstIndex(where: { $0.id == current.id }) {
+                self.scenarios[index] = current
+            }
+            self.syncObjectiveDraft(from: current)
         }
     }
 
@@ -1623,6 +1677,7 @@ final class HarnessViewModel: ObservableObject {
             if let index = scenarios.firstIndex(where: { $0.id == current.id }) {
                 scenarios[index] = current
             }
+            syncObjectiveDraft(from: current)
             try await reloadParticipants(project: project, scenario: current)
             if let plan = policyPlan,
                plan.scenarioGeneration != current.generation
@@ -1661,6 +1716,11 @@ final class HarnessViewModel: ObservableObject {
         guard let current = selectedScenario else { return }
         try await reloadPolicyTemplates()
         await reloadCollaboration(project: project, scenario: current)
+    }
+
+    private func syncObjectiveDraft(from scenario: ScenarioRecord) {
+        objectiveDraft = scenario.objective
+        acceptanceCriteriaDraft = scenario.acceptanceCriteria
     }
 
     private func reloadPreflight() async throws {

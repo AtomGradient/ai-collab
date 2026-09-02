@@ -644,7 +644,11 @@ final class HarnessContractTests: XCTestCase {
                 operation: "scenario.create",
                 target: target,
                 fence: ["operation_generation": 0],
-                payload: ["project_binding_digest": project.bindingDigest]
+                payload: [
+                    "project_binding_digest": project.bindingDigest,
+                    "objective": "",
+                    "acceptance_criteria": "",
+                ]
             )
         )
         let participants = try await client.call(

@@ -77,6 +77,26 @@ struct ProjectReconciliationRecord: Equatable {
     }
 }
 
+struct ScenarioObjectiveRevision: Identifiable, Equatable {
+    let revision: Int
+    let objective: String
+    let acceptanceCriteria: String
+
+    var id: Int { revision }
+
+    init?(_ value: [String: Any]) {
+        guard
+            let revision = value["revision"] as? Int,
+            revision > 0,
+            let objective = value["objective"] as? String,
+            let acceptanceCriteria = value["acceptance_criteria"] as? String
+        else { return nil }
+        self.revision = revision
+        self.objective = objective
+        self.acceptanceCriteria = acceptanceCriteria
+    }
+}
+
 struct ScenarioRecord: Identifiable, Equatable {
     let id: String
     let generation: Int
@@ -85,6 +105,13 @@ struct ScenarioRecord: Identifiable, Equatable {
     let observedState: String
     let workspaceBindingID: String
     let participantIDs: [String]
+    let objective: String
+    let objectiveHistory: [ScenarioObjectiveRevision]
+
+    var objectiveRevision: Int { objectiveHistory.last?.revision ?? 0 }
+    var acceptanceCriteria: String {
+        objectiveHistory.last?.acceptanceCriteria ?? ""
+    }
 
     init?(_ value: [String: Any]) {
         guard
@@ -94,7 +121,19 @@ struct ScenarioRecord: Identifiable, Equatable {
             let desiredState = value["desired_state"] as? String,
             let observedState = value["observed_state"] as? String,
             let workspaceBindingID = value["workspace_binding_id"] as? String,
-            let participantIDs = value["participant_ids"] as? [String]
+            let participantIDs = value["participant_ids"] as? [String],
+            let objective = value["objective"] as? String
+        else { return nil }
+        let rawObjectiveHistory = dictionaries(value["objective_history"])
+        let objectiveHistory = rawObjectiveHistory.compactMap(
+            ScenarioObjectiveRevision.init
+        )
+        guard
+            objectiveHistory.count == rawObjectiveHistory.count,
+            objectiveHistory.enumerated().allSatisfy({ offset, item in
+                item.revision == offset + 1
+            }),
+            objectiveHistory.last?.objective ?? "" == objective
         else { return nil }
         self.id = id
         self.generation = generation
@@ -103,6 +142,8 @@ struct ScenarioRecord: Identifiable, Equatable {
         self.observedState = observedState
         self.workspaceBindingID = workspaceBindingID
         self.participantIDs = participantIDs
+        self.objective = objective
+        self.objectiveHistory = objectiveHistory
     }
 }
 
