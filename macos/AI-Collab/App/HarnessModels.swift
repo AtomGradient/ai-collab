@@ -762,6 +762,92 @@ struct DeliveryRecord: Identifiable, Equatable {
     }
 }
 
+struct DeliverySummaryRecord: Equatable {
+    let total: Int
+    let states: [String: Int]
+    let kinds: [String: Int]
+    let replyExpectedTotal: Int
+    let replyExpectedClosed: Int
+    let deliveredWithReply: Int
+    let attemptedTotal: Int
+    let firstAttemptTotal: Int
+    let degradedTotal: Int
+
+    init?(_ value: [String: Any]) {
+        guard
+            let total = value["total"] as? Int,
+            let states = value["states"] as? [String: Int],
+            let kinds = value["kinds"] as? [String: Int],
+            let replyExpectedTotal = value["reply_expected_total"] as? Int,
+            let replyExpectedClosed = value["reply_expected_closed"] as? Int,
+            let deliveredWithReply = value["delivered_with_reply"] as? Int,
+            let attemptedTotal = value["attempted_total"] as? Int,
+            let firstAttemptTotal = value["first_attempt_total"] as? Int,
+            let degradedTotal = value["degraded_total"] as? Int,
+            total >= 0,
+            states.values.allSatisfy({ $0 >= 0 }),
+            kinds.values.allSatisfy({ $0 >= 0 }),
+            states.values.reduce(0, +) == total,
+            kinds.values.reduce(0, +) == total,
+            replyExpectedTotal >= 0,
+            (0 ... replyExpectedTotal).contains(replyExpectedClosed),
+            (0 ... total).contains(replyExpectedTotal),
+            (0 ... (states["delivered"] ?? 0)).contains(deliveredWithReply),
+            (0 ... total).contains(attemptedTotal),
+            (0 ... attemptedTotal).contains(firstAttemptTotal),
+            (0 ... total).contains(degradedTotal)
+        else { return nil }
+        self.total = total
+        self.states = states
+        self.kinds = kinds
+        self.replyExpectedTotal = replyExpectedTotal
+        self.replyExpectedClosed = replyExpectedClosed
+        self.deliveredWithReply = deliveredWithReply
+        self.attemptedTotal = attemptedTotal
+        self.firstAttemptTotal = firstAttemptTotal
+        self.degradedTotal = degradedTotal
+    }
+}
+
+struct CollaborationHealthRatio: Equatable {
+    let value: Int
+    let total: Int
+
+    var displayValue: String { "\(value)/\(total)" }
+}
+
+struct CollaborationHealthRecord: Equatable {
+    let teamReady: CollaborationHealthRatio
+    let requestsClosed: CollaborationHealthRatio
+    let endToEndEvidence: CollaborationHealthRatio
+    let firstAttemptDelivery: CollaborationHealthRatio
+    let degradedTotal: Int
+
+    init(
+        summary: DeliverySummaryRecord,
+        readyParticipants: Int,
+        totalParticipants: Int
+    ) {
+        teamReady = CollaborationHealthRatio(
+            value: readyParticipants,
+            total: totalParticipants
+        )
+        requestsClosed = CollaborationHealthRatio(
+            value: summary.replyExpectedClosed,
+            total: summary.replyExpectedTotal
+        )
+        endToEndEvidence = CollaborationHealthRatio(
+            value: (summary.states["consumed"] ?? 0) + summary.deliveredWithReply,
+            total: summary.total
+        )
+        firstAttemptDelivery = CollaborationHealthRatio(
+            value: summary.firstAttemptTotal,
+            total: summary.attemptedTotal
+        )
+        degradedTotal = summary.degradedTotal
+    }
+}
+
 struct DeliveryNextPage: Equatable {
     let afterDeliveryID: String
     let collectionDigest: String
@@ -779,22 +865,23 @@ struct DeliveryNextPage: Equatable {
 
 struct DeliveryCollectionRecord: Equatable {
     let deliveries: [DeliveryRecord]
+    let summary: DeliverySummaryRecord
     let total: Int
     let states: [String: Int]
     let nextPage: DeliveryNextPage?
 
     init?(_ value: [String: Any]) {
         guard
-            let summary = value["summary"] as? [String: Any],
-            let total = summary["total"] as? Int,
-            let states = summary["states"] as? [String: Int]
+            let rawSummary = value["summary"] as? [String: Any],
+            let summary = DeliverySummaryRecord(rawSummary)
         else { return nil }
         let rawDeliveries = dictionaries(value["deliveries"])
         let deliveries = rawDeliveries.compactMap(DeliveryRecord.init)
         guard deliveries.count == rawDeliveries.count else { return nil }
         self.deliveries = deliveries
-        self.total = total
-        self.states = states
+        self.summary = summary
+        self.total = summary.total
+        self.states = summary.states
         self.nextPage = DeliveryNextPage(value["next_page"] as? [String: Any])
     }
 }

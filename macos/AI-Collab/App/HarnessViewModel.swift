@@ -72,6 +72,7 @@ final class HarnessViewModel: ObservableObject {
     @Published var policyPlan: PolicyPlanRecord?
     @Published var policyStatus: PolicyStatusRecord?
     @Published var deliveries: [DeliveryRecord] = []
+    @Published var deliverySummary: DeliverySummaryRecord?
     @Published var deliveryTotal = 0
     @Published var deliveryStates: [String: Int] = [:]
     @Published var nextDeliveryPage: DeliveryNextPage?
@@ -183,6 +184,15 @@ final class HarnessViewModel: ObservableObject {
 
     var runningParticipantCount: Int {
         participants.filter { $0.observedState == "ready" }.count
+    }
+
+    var collaborationHealth: CollaborationHealthRecord? {
+        guard let deliverySummary else { return nil }
+        return CollaborationHealthRecord(
+            summary: deliverySummary,
+            readyParticipants: runningParticipantCount,
+            totalParticipants: participants.count
+        )
     }
 
     /// One line of plain language for the Scenario header, in place of the
@@ -1406,6 +1416,7 @@ final class HarnessViewModel: ObservableObject {
                 collectionDigest: cursor.collectionDigest
             )
             self.deliveries.append(contentsOf: page.deliveries)
+            self.deliverySummary = page.summary
             self.deliveryTotal = page.total
             self.deliveryStates = page.states
             self.nextDeliveryPage = page.nextPage
@@ -1426,6 +1437,7 @@ final class HarnessViewModel: ObservableObject {
                 )
                 guard selectedScenarioID == scenarioID else { return }
                 deliveries = page.deliveries
+                deliverySummary = page.summary
                 deliveryTotal = page.total
                 deliveryStates = page.states
                 nextDeliveryPage = page.nextPage
@@ -1731,6 +1743,7 @@ final class HarnessViewModel: ObservableObject {
             }
         } catch {
             deliveries = []
+            deliverySummary = nil
             deliveryTotal = 0
             deliveryStates = [:]
             nextDeliveryPage = nil
@@ -1759,6 +1772,7 @@ final class HarnessViewModel: ObservableObject {
     private func reloadDeliveries(project: ProjectRecord, scenario: ScenarioRecord) async throws {
         let page = try await fetchDeliveries(project: project, scenario: scenario)
         deliveries = page.deliveries
+        deliverySummary = page.summary
         deliveryTotal = page.total
         deliveryStates = page.states
         nextDeliveryPage = page.nextPage
@@ -1795,6 +1809,7 @@ final class HarnessViewModel: ObservableObject {
         policyTemplates = []
         selectedPolicyTemplateID = nil
         deliveries = []
+        deliverySummary = nil
         deliveryTotal = 0
         deliveryStates = [:]
         nextDeliveryPage = nil

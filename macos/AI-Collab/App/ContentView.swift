@@ -439,6 +439,7 @@ struct ContentView: View {
                         scenarioHeader(scenario)
                         validationBanner(for: .scenarioLifecycle)
                         healthCard(scenario)
+                        collaborationHealthSection
                         participantsSection
                         deliveriesSection
                         preflightSection
@@ -1098,6 +1099,64 @@ struct ContentView: View {
         .background(.secondary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
     }
 
+    private var collaborationHealthSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(S.CollaborationHealth.sectionTitle, systemImage: "waveform.path.ecg")
+                .font(.headline)
+            if let health = model.collaborationHealth {
+                LazyVGrid(
+                    columns: [
+                        GridItem(.adaptive(minimum: 140, maximum: 220), spacing: 10)
+                    ],
+                    alignment: .leading,
+                    spacing: 10
+                ) {
+                    CollaborationHealthMetricTile(
+                        title: S.CollaborationHealth.teamReady,
+                        value: health.teamReady.value,
+                        total: health.teamReady.total,
+                        color: healthColor(for: health.teamReady)
+                    )
+                    CollaborationHealthMetricTile(
+                        title: S.CollaborationHealth.requestsClosed,
+                        value: health.requestsClosed.value,
+                        total: health.requestsClosed.total,
+                        color: healthColor(for: health.requestsClosed)
+                    )
+                    CollaborationHealthMetricTile(
+                        title: S.CollaborationHealth.endToEndEvidence,
+                        value: health.endToEndEvidence.value,
+                        total: health.endToEndEvidence.total,
+                        color: healthColor(for: health.endToEndEvidence)
+                    )
+                    CollaborationHealthMetricTile(
+                        title: S.CollaborationHealth.firstAttemptDelivery,
+                        value: health.firstAttemptDelivery.value,
+                        total: health.firstAttemptDelivery.total,
+                        color: healthColor(for: health.firstAttemptDelivery)
+                    )
+                    CollaborationHealthMetricTile(
+                        title: S.CollaborationHealth.degraded,
+                        value: health.degradedTotal,
+                        total: nil,
+                        color: health.degradedTotal == 0 ? .green : .orange
+                    )
+                }
+            } else {
+                Text(S.CollaborationHealth.loading)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, 12)
+            }
+        }
+    }
+
+    private func healthColor(for ratio: CollaborationHealthRatio) -> Color {
+        guard ratio.total > 0 else { return .secondary }
+        return ratio.value == ratio.total ? .green : .orange
+    }
+
     private var inspectorSection: some View {
         DisclosureGroup(isExpanded: $showInspector) {
             TabView {
@@ -1601,6 +1660,53 @@ struct DiagnosticsView: View {
                     .foregroundStyle(.secondary)
             }
         }
+    }
+}
+
+private struct CollaborationHealthMetricTile: View {
+    let title: String
+    let value: Int
+    let total: Int?
+    let color: Color
+
+    private var accessibilityValue: String {
+        guard let total else { return String(value) }
+        return "\(value)/\(total)"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(color)
+                    .frame(width: 7, height: 7)
+                Text(title)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+            HStack(alignment: .firstTextBaseline, spacing: 3) {
+                Text(String(value))
+                    .font(.title3.weight(.semibold))
+                    .monospacedDigit()
+                if let total {
+                    Text("/ \(total)")
+                        .font(.callout)
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, minHeight: 58, alignment: .leading)
+        .padding(10)
+        .background(.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
+        .overlay {
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(color.opacity(0.24), lineWidth: 1)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(title)
+        .accessibilityValue(accessibilityValue)
     }
 }
 

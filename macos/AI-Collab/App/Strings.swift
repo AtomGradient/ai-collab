@@ -506,6 +506,20 @@ enum S {
         static var loadMore: String { t("Load More", "加载更多") }
     }
 
+    enum CollaborationHealth {
+        static var sectionTitle: String { t("Collaboration Health", "协作健康") }
+        static var loading: String { t("Loading health data…", "正在加载健康数据…") }
+        static var teamReady: String { t("Team ready", "团队就绪") }
+        static var requestsClosed: String { t("Requests closed", "请求闭环") }
+        static var endToEndEvidence: String {
+            t("End-to-end evidence", "端到端证据")
+        }
+        static var firstAttemptDelivery: String {
+            t("First-attempt delivery", "首次投递")
+        }
+        static var degraded: String { t("Degraded", "降级") }
+    }
+
     // MARK: Inspector
 
     enum Inspector {

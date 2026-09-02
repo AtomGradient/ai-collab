@@ -155,7 +155,20 @@ final class HarnessContractTests: XCTestCase {
             ],
         ]
         let collection = try XCTUnwrap(DeliveryCollectionRecord([
-            "summary": ["total": 1, "states": ["delivery_attempted": 1]],
+            "summary": [
+                "total": 1,
+                "states": ["delivery_attempted": 1],
+                "kinds": [
+                    "collaboration.message": 0,
+                    "collaboration.request": 1,
+                ],
+                "reply_expected_total": 1,
+                "reply_expected_closed": 0,
+                "delivered_with_reply": 0,
+                "attempted_total": 1,
+                "first_attempt_total": 0,
+                "degraded_total": 1,
+            ],
             "deliveries": [delivery],
             "next_page": [
                 "after_delivery_id": "delivery-one",
@@ -169,6 +182,78 @@ final class HarnessContractTests: XCTestCase {
         XCTAssertEqual(collection.deliveries.first?.errorCode, "transport.unavailable")
         XCTAssertTrue(collection.deliveries.first?.retryEligible == true)
         XCTAssertEqual(collection.nextPage?.afterDeliveryID, "delivery-one")
+    }
+
+    func testCollaborationHealthUsesCollectionSummaryMetricsIndependently() throws {
+        let fixture: [String: Any] = [
+            "total": 69,
+            "states": ["consumed": 50, "delivered": 19],
+            "kinds": [
+                "collaboration.message": 0,
+                "collaboration.notice": 12,
+                "collaboration.pushback": 5,
+                "collaboration.question": 1,
+                "collaboration.response": 5,
+                "collaboration.review-request": 23,
+                "collaboration.review-response": 23,
+            ],
+            "reply_expected_total": 29,
+            "reply_expected_closed": 29,
+            "delivered_with_reply": 11,
+            "attempted_total": 69,
+            "first_attempt_total": 69,
+            "degraded_total": 0,
+        ]
+        func values(
+            _ rawSummary: [String: Any],
+            readyParticipants: Int = 2
+        ) throws -> [String] {
+            let summary = try XCTUnwrap(DeliverySummaryRecord(rawSummary))
+            let health = CollaborationHealthRecord(
+                summary: summary,
+                readyParticipants: readyParticipants,
+                totalParticipants: 2
+            )
+            return [
+                health.teamReady.displayValue,
+                health.requestsClosed.displayValue,
+                health.endToEndEvidence.displayValue,
+                health.firstAttemptDelivery.displayValue,
+                String(health.degradedTotal),
+            ]
+        }
+        func replacing(_ key: String, with value: Any) -> [String: Any] {
+            var changed = fixture
+            changed[key] = value
+            return changed
+        }
+
+        XCTAssertEqual(try values(fixture), ["2/2", "29/29", "61/69", "69/69", "0"])
+        XCTAssertEqual(
+            try values(fixture, readyParticipants: 1),
+            ["1/2", "29/29", "61/69", "69/69", "0"]
+        )
+        XCTAssertEqual(
+            try values(replacing("reply_expected_closed", with: 28)),
+            ["2/2", "28/29", "61/69", "69/69", "0"]
+        )
+        XCTAssertEqual(
+            try values(replacing("delivered_with_reply", with: 10)),
+            ["2/2", "29/29", "60/69", "69/69", "0"]
+        )
+        XCTAssertEqual(
+            try values(replacing("first_attempt_total", with: 68)),
+            ["2/2", "29/29", "61/69", "68/69", "0"]
+        )
+        XCTAssertEqual(
+            try values(replacing("degraded_total", with: 1)),
+            ["2/2", "29/29", "61/69", "69/69", "1"]
+        )
+
+        let summary = try XCTUnwrap(DeliverySummaryRecord(fixture))
+        XCTAssertEqual(summary.states["consumed", default: 0] + 19, 69)
+        XCTAssertEqual(summary.deliveredWithReply + 8, 19)
+        XCTAssertEqual(summary.states["consumed", default: 0] + summary.deliveredWithReply, 61)
     }
 
     func testDegradedParticipantAndStaleResourceModelsExposeExactRepairActions() throws {
