@@ -1773,6 +1773,18 @@ final class HarnessViewModel: ObservableObject {
         updateReadyMoment()
     }
 
+    /// Leaves objective editing with the drafts mirroring what is actually
+    /// committed, so a later Edit opens on the current text instead of turning
+    /// into an accidental replace-from-empty that drops acceptance criteria.
+    func resetObjectiveDrafts() {
+        guard let scenario = selectedScenario else {
+            objectiveDraft = ""
+            acceptanceCriteriaDraft = ""
+            return
+        }
+        syncObjectiveDraft(from: scenario)
+    }
+
     private func syncObjectiveDraft(from scenario: ScenarioRecord) {
         objectiveDraft = scenario.objective
         acceptanceCriteriaDraft = scenario.acceptanceCriteria

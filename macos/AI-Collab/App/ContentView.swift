@@ -267,12 +267,12 @@ struct ContentView: View {
         }
     }
 
-    /// Leaves the objective editor and drops the unsaved draft, so a later
-    /// Edit never reopens with someone else's abandoned text.
+    /// Leaves the objective editor and restores the drafts to what is
+    /// committed, so a later Edit opens on the current objective rather than
+    /// on an empty form.
     private func endObjectiveEditing() {
         editingObjective = false
-        model.objectiveDraft = ""
-        model.acceptanceCriteriaDraft = ""
+        model.resetObjectiveDrafts()
     }
 
     private var flowEyebrow: String {

@@ -278,6 +278,47 @@ final class GuidanceRailTests: XCTestCase {
         XCTAssertEqual(unanimous.guidance, GuidanceStep.focusAndAssign)
     }
 
+    /// Leaving the objective editor must restore the committed text, not blank
+    /// it. Blanking turned Edit into a replace-from-empty that silently dropped
+    /// acceptance criteria when the user only meant to reword the objective.
+    func testLeavingObjectiveEditingRestoresTheCommittedText() {
+        let live = model(room: "running")
+        live.scenarios = [
+            ScenarioRecord([
+                "scenario_id": "room-1",
+                "scenario_generation": 3,
+                "state_revision": 7,
+                "desired_state": "running",
+                "observed_state": "running",
+                "workspace_binding_id": "ws-1",
+                "participant_ids": [String](),
+                "objective": "Ship the reviewed work overview",
+                "objective_history": [
+                    [
+                        "revision": 1,
+                        "objective": "Ship the reviewed work overview",
+                        "acceptance_criteria": "Full suites pass before packaging",
+                    ]
+                ],
+            ])!
+        ]
+        live.objectiveDraft = "half-typed replacement"
+        live.acceptanceCriteriaDraft = ""
+        live.resetObjectiveDrafts()
+        XCTAssertEqual(live.objectiveDraft, "Ship the reviewed work overview")
+        XCTAssertEqual(
+            live.acceptanceCriteriaDraft, "Full suites pass before packaging",
+            "acceptance criteria must survive an abandoned objective edit"
+        )
+
+        let empty = model()
+        empty.objectiveDraft = "orphaned"
+        empty.acceptanceCriteriaDraft = "orphaned"
+        empty.resetObjectiveDrafts()
+        XCTAssertEqual(empty.objectiveDraft, "")
+        XCTAssertEqual(empty.acceptanceCriteriaDraft, "")
+    }
+
     func testReadyMomentFiresOncePerGeneration() {
         let suite = "guidance-rail-tests-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
