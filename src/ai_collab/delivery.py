@@ -38,6 +38,14 @@ IMMUTABLE_FIELDS = {
     "payload_digest",
     "retry_profile",
 }
+REPLY_EXPECTED_MESSAGE_KINDS = frozenset(
+    {
+        "collaboration.request",
+        "collaboration.question",
+        "collaboration.review-request",
+        "collaboration.pushback",
+    }
+)
 
 
 @dataclass
@@ -924,8 +932,27 @@ class DeliveryCoordinator:
                     "collection_digest": digest,
                 }
             states: dict[str, int] = {}
+            kinds: dict[str, int] = {"collaboration.message": 0}
+            reply_expected_ids: set[str] = set()
+            reply_target_ids: set[str] = set()
+            delivered_ids: set[str] = set()
+            first_attempt_total = 0
+            degraded_total = 0
             for value in projections:
                 states[value["state"]] = states.get(value["state"], 0) + 1
+                kind = value["message_kind"]
+                kinds[kind] = kinds.get(kind, 0) + 1
+                if kind in REPLY_EXPECTED_MESSAGE_KINDS:
+                    reply_expected_ids.add(value["delivery_id"])
+                if value["reply_to_delivery_id"] is not None:
+                    reply_target_ids.add(value["reply_to_delivery_id"])
+                if value["state"] == "delivered":
+                    delivered_ids.add(value["delivery_id"])
+                last_event = value["last_event"]
+                if last_event is not None and last_event["attempt_number"] == 1:
+                    first_attempt_total += 1
+                if value["degraded_reason"] is not None:
+                    degraded_total += 1
             result = {
                 "scenario_id": scenario_id,
                 "collection_revision": state["state_revision"],
@@ -936,6 +963,14 @@ class DeliveryCoordinator:
                 "summary": {
                     "total": len(projections),
                     "states": dict(sorted(states.items())),
+                    "kinds": dict(sorted(kinds.items())),
+                    "reply_expected_total": len(reply_expected_ids),
+                    "reply_expected_closed": len(
+                        reply_expected_ids & reply_target_ids
+                    ),
+                    "delivered_with_reply": len(delivered_ids & reply_target_ids),
+                    "first_attempt_total": first_attempt_total,
+                    "degraded_total": degraded_total,
                 },
             }
             return f"read-deliveries-{scenario_id}", {

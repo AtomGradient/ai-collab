@@ -576,6 +576,210 @@ def _wait_delivery(
         time.sleep(0.01)
 
 
+def _summary_projection(
+    delivery_id: str,
+    *,
+    kind: str,
+    state: str = "consumed",
+    reply_to: str | None = None,
+    thread_root: str | None = None,
+    attempt_number: int = 1,
+    degraded_reason: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "delivery_id": delivery_id,
+        "message_kind": kind,
+        "thread_root_delivery_id": thread_root or delivery_id,
+        "reply_to_delivery_id": reply_to,
+        "state": state,
+        "degraded_reason": degraded_reason,
+        "last_event": {
+            "event": "consumed" if state == "consumed" else "ack_accepted",
+            "attempt_number": attempt_number,
+            "error_code": None,
+        },
+    }
+
+
+def _m2_delivery_summary_fixture() -> list[dict[str, Any]]:
+    projections: list[dict[str, Any]] = []
+    for index in range(23):
+        request_id = f"delivery-review-request-{index:02d}"
+        projections.append(
+            _summary_projection(
+                request_id,
+                kind="collaboration.review-request",
+                state="delivered" if index < 10 else "consumed",
+            )
+        )
+        projections.append(
+            _summary_projection(
+                f"delivery-review-response-{index:02d}",
+                kind="collaboration.review-response",
+                state="delivered" if index < 8 else "consumed",
+                reply_to=request_id,
+                thread_root=request_id,
+            )
+        )
+    for index in range(12):
+        projections.append(
+            _summary_projection(
+                f"delivery-notice-{index:02d}", kind="collaboration.notice"
+            )
+        )
+
+    first_pushback = "delivery-pushback-00"
+    nested_pushback = "delivery-pushback-01"
+    projections.extend(
+        [
+            _summary_projection(
+                first_pushback,
+                kind="collaboration.pushback",
+                state="delivered",
+            ),
+            _summary_projection(
+                nested_pushback,
+                kind="collaboration.pushback",
+                reply_to=first_pushback,
+                thread_root=first_pushback,
+            ),
+            _summary_projection(
+                "delivery-response-00",
+                kind="collaboration.response",
+                reply_to=nested_pushback,
+                thread_root=first_pushback,
+            ),
+        ]
+    )
+    for index in range(2, 5):
+        pushback_id = f"delivery-pushback-{index:02d}"
+        projections.append(
+            _summary_projection(pushback_id, kind="collaboration.pushback")
+        )
+        projections.append(
+            _summary_projection(
+                f"delivery-response-{index - 1:02d}",
+                kind="collaboration.response",
+                reply_to=pushback_id,
+                thread_root=pushback_id,
+            )
+        )
+    question_id = "delivery-question-00"
+    projections.extend(
+        [
+            _summary_projection(question_id, kind="collaboration.question"),
+            _summary_projection(
+                "delivery-response-04",
+                kind="collaboration.response",
+                reply_to=question_id,
+                thread_root=question_id,
+            ),
+        ]
+    )
+    assert len(projections) == 69
+    return projections
+
+
+def _list_projection_fixture(
+    projections: list[dict[str, Any]], *, limit: int
+) -> dict[str, Any]:
+    coordinator = object.__new__(DeliveryCoordinator)
+    coordinator._lock = threading.RLock()
+    coordinator._active_delivery_ids = set()
+    state = {
+        "state_revision": 1,
+        "deliveries": {
+            projection["delivery_id"]: {
+                "project_instance_id": PROJECT_ID,
+                "scenario_id": SCENARIO_ID,
+                "record": {"delivery_id": projection["delivery_id"]},
+                "thread_root_delivery_id": projection["thread_root_delivery_id"],
+                "projection": projection,
+            }
+            for projection in projections
+        },
+    }
+    coordinator._read_state = lambda: copy.deepcopy(state)
+    coordinator._delivery_projection = (
+        lambda item, *, in_flight: copy.deepcopy(item["projection"])
+    )
+    return coordinator.list_deliveries(
+        project_instance_id=PROJECT_ID,
+        scenario_id=SCENARIO_ID,
+        limit=limit,
+    )[1]["delivery_collection"]
+
+
+def test_delivery_summary_matches_m2_health_fixture() -> None:
+    collection = _list_projection_fixture(
+        _m2_delivery_summary_fixture(), limit=100
+    )
+
+    assert collection["next_page"] is None
+    assert collection["summary"] == {
+        "total": 69,
+        "states": {"consumed": 50, "delivered": 19},
+        "kinds": {
+            "collaboration.message": 0,
+            "collaboration.notice": 12,
+            "collaboration.pushback": 5,
+            "collaboration.question": 1,
+            "collaboration.response": 5,
+            "collaboration.review-request": 23,
+            "collaboration.review-response": 23,
+        },
+        "reply_expected_total": 29,
+        "reply_expected_closed": 29,
+        "delivered_with_reply": 11,
+        "first_attempt_total": 69,
+        "degraded_total": 0,
+    }
+    assert collection["summary"]["states"]["consumed"] + collection["summary"][
+        "states"
+    ]["delivered"] == 69
+    assert collection["summary"]["delivered_with_reply"] + 8 == 19
+    assert (
+        collection["summary"]["states"]["consumed"]
+        + collection["summary"]["delivered_with_reply"]
+        == 61
+    )
+
+
+def test_delivery_summary_is_full_collection_fact_across_page_limits() -> None:
+    projections = _m2_delivery_summary_fixture()
+    projections.extend(
+        _summary_projection(
+            f"delivery-extra-notice-{index:03d}", kind="collaboration.notice"
+        )
+        for index in range(60)
+    )
+
+    first_page = _list_projection_fixture(projections, limit=100)
+    full_page = _list_projection_fixture(projections, limit=256)
+
+    assert len(first_page["deliveries"]) == 100
+    assert len(full_page["deliveries"]) == 129
+    assert first_page["summary"] == full_page["summary"]
+    assert first_page["summary"] == {
+        "total": 129,
+        "states": {"consumed": 110, "delivered": 19},
+        "kinds": {
+            "collaboration.message": 0,
+            "collaboration.notice": 72,
+            "collaboration.pushback": 5,
+            "collaboration.question": 1,
+            "collaboration.response": 5,
+            "collaboration.review-request": 23,
+            "collaboration.review-response": 23,
+        },
+        "reply_expected_total": 29,
+        "reply_expected_closed": 29,
+        "delivered_with_reply": 11,
+        "first_attempt_total": 129,
+        "degraded_total": 0,
+    }
+
+
 def test_stopped_participant_delete_settles_delivery_and_readd_rotates_identity(
     tmp_path: Path,
 ) -> None:
@@ -673,6 +877,15 @@ def test_stopped_participant_delete_settles_delivery_and_readd_rotates_identity(
         assert delivery_view["summary"] == {
             "total": 1,
             "states": {"recipient_deleted": 1},
+            "kinds": {
+                "collaboration.message": 0,
+                "collaboration.request": 1,
+            },
+            "reply_expected_total": 1,
+            "reply_expected_closed": 0,
+            "delivered_with_reply": 0,
+            "first_attempt_total": 0,
+            "degraded_total": 1,
         }
         assert delivery_view["deliveries"][0]["state"] == "recipient_deleted"
         assert delivery_view["deliveries"][0]["degraded_reason"] == (
@@ -1418,7 +1631,20 @@ def test_participants_self_send_and_reply_with_scoped_identity(
             limit=1,
             thread_root_delivery_id=original["delivery_id"],
         )["delivery_collection"]
-        assert first_page["summary"] == {"total": 2, "states": {"consumed": 2}}
+        assert first_page["summary"] == {
+            "total": 2,
+            "states": {"consumed": 2},
+            "kinds": {
+                "collaboration.message": 0,
+                "collaboration.request": 1,
+                "collaboration.response": 1,
+            },
+            "reply_expected_total": 1,
+            "reply_expected_closed": 1,
+            "delivered_with_reply": 0,
+            "first_attempt_total": 2,
+            "degraded_total": 0,
+        }
         assert first_page["deliveries"][0] == {
             "delivery_id": original["delivery_id"],
             "message_kind": "collaboration.request",
