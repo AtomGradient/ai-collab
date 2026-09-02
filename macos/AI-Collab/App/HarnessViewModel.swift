@@ -1878,6 +1878,8 @@ final class HarnessViewModel: ObservableObject {
         deliveryNote = nil
     }
 
+    // This classification assumes policy.show is the sole source of the Host's
+    // overloaded target.delivery-not-found code; revisit it if that operation grows.
     static func policyReadiness(afterPolicyReadError error: Error) -> PolicyReadiness {
         guard case let HarnessIPCError.hostRejected(
             code, _, _, _, _, _
