@@ -936,6 +936,7 @@ class DeliveryCoordinator:
             reply_expected_ids: set[str] = set()
             reply_target_ids: set[str] = set()
             delivered_ids: set[str] = set()
+            attempted_total = 0
             first_attempt_total = 0
             degraded_total = 0
             for value in projections:
@@ -949,8 +950,10 @@ class DeliveryCoordinator:
                 if value["state"] == "delivered":
                     delivered_ids.add(value["delivery_id"])
                 last_event = value["last_event"]
-                if last_event is not None and last_event["attempt_number"] == 1:
-                    first_attempt_total += 1
+                if last_event is not None:
+                    attempted_total += 1
+                    if last_event["attempt_number"] == 1:
+                        first_attempt_total += 1
                 if value["degraded_reason"] is not None:
                     degraded_total += 1
             result = {
@@ -969,6 +972,7 @@ class DeliveryCoordinator:
                         reply_expected_ids & reply_target_ids
                     ),
                     "delivered_with_reply": len(delivered_ids & reply_target_ids),
+                    "attempted_total": attempted_total,
                     "first_attempt_total": first_attempt_total,
                     "degraded_total": degraded_total,
                 },

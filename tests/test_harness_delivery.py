@@ -583,7 +583,7 @@ def _summary_projection(
     state: str = "consumed",
     reply_to: str | None = None,
     thread_root: str | None = None,
-    attempt_number: int = 1,
+    attempt_number: int | None = 1,
     degraded_reason: str | None = None,
 ) -> dict[str, Any]:
     return {
@@ -593,11 +593,15 @@ def _summary_projection(
         "reply_to_delivery_id": reply_to,
         "state": state,
         "degraded_reason": degraded_reason,
-        "last_event": {
-            "event": "consumed" if state == "consumed" else "ack_accepted",
-            "attempt_number": attempt_number,
-            "error_code": None,
-        },
+        "last_event": (
+            {
+                "event": "consumed" if state == "consumed" else "ack_accepted",
+                "attempt_number": attempt_number,
+                "error_code": None,
+            }
+            if attempt_number is not None
+            else None
+        ),
     }
 
 
@@ -731,6 +735,7 @@ def test_delivery_summary_matches_m2_health_fixture() -> None:
         "reply_expected_total": 29,
         "reply_expected_closed": 29,
         "delivered_with_reply": 11,
+        "attempted_total": 69,
         "first_attempt_total": 69,
         "degraded_total": 0,
     }
@@ -775,9 +780,29 @@ def test_delivery_summary_is_full_collection_fact_across_page_limits() -> None:
         "reply_expected_total": 29,
         "reply_expected_closed": 29,
         "delivered_with_reply": 11,
+        "attempted_total": 129,
         "first_attempt_total": 129,
         "degraded_total": 0,
-    }
+}
+
+
+def test_unattempted_delivery_does_not_reduce_first_attempt_rate() -> None:
+    projections = _m2_delivery_summary_fixture()
+    projections.append(
+        _summary_projection(
+            "delivery-queued",
+            kind="collaboration.notice",
+            state="queued",
+            attempt_number=None,
+        )
+    )
+
+    summary = _list_projection_fixture(projections, limit=100)["summary"]
+
+    assert summary["total"] == 70
+    assert summary["attempted_total"] == 69
+    assert summary["first_attempt_total"] == 69
+    assert summary["first_attempt_total"] == summary["attempted_total"]
 
 
 def test_stopped_participant_delete_settles_delivery_and_readd_rotates_identity(
@@ -884,6 +909,7 @@ def test_stopped_participant_delete_settles_delivery_and_readd_rotates_identity(
             "reply_expected_total": 1,
             "reply_expected_closed": 0,
             "delivered_with_reply": 0,
+            "attempted_total": 0,
             "first_attempt_total": 0,
             "degraded_total": 1,
         }
@@ -1642,6 +1668,7 @@ def test_participants_self_send_and_reply_with_scoped_identity(
             "reply_expected_total": 1,
             "reply_expected_closed": 1,
             "delivered_with_reply": 0,
+            "attempted_total": 2,
             "first_attempt_total": 2,
             "degraded_total": 0,
         }
