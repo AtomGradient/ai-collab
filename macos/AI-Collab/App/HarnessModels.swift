@@ -723,6 +723,8 @@ struct DeliveryRecord: Identifiable, Equatable {
     let degradedReason: String?
     let eventSequence: Int
     let lastEvent: String
+    let attemptNumber: Int
+    let errorCode: String?
     let retryEligible: Bool
     let retryReason: String
 
@@ -753,6 +755,8 @@ struct DeliveryRecord: Identifiable, Equatable {
         self.degradedReason = value["degraded_reason"] as? String
         self.eventSequence = eventSequence
         self.lastEvent = lastEventName
+        self.attemptNumber = lastEvent["attempt_number"] as? Int ?? 1
+        self.errorCode = lastEvent["error_code"] as? String
         self.retryEligible = retryEligible
         self.retryReason = retryReason
     }

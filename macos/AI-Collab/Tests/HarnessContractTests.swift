@@ -143,7 +143,11 @@ final class HarnessContractTests: XCTestCase {
             "state": "delivery_attempted",
             "degraded_reason": "transport.unavailable",
             "event_sequence": 2,
-            "last_event": ["event": "attempt_failed"],
+            "last_event": [
+                "event": "attempt_failed",
+                "attempt_number": 3,
+                "error_code": "transport.unavailable",
+            ],
             "retry_eligibility": [
                 "eligible": true,
                 "event_sequence": 2,
@@ -161,6 +165,8 @@ final class HarnessContractTests: XCTestCase {
         XCTAssertEqual(collection.total, 1)
         XCTAssertEqual(collection.states, ["delivery_attempted": 1])
         XCTAssertEqual(collection.deliveries.first?.sender.participantID, "analyst")
+        XCTAssertEqual(collection.deliveries.first?.attemptNumber, 3)
+        XCTAssertEqual(collection.deliveries.first?.errorCode, "transport.unavailable")
         XCTAssertTrue(collection.deliveries.first?.retryEligible == true)
         XCTAssertEqual(collection.nextPage?.afterDeliveryID, "delivery-one")
     }
