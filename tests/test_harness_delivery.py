@@ -25,7 +25,7 @@ from ai_collab.client import (
 from ai_collab.delivery import DeliveryCoordinator
 from ai_collab.host import HarnessHost
 from ai_collab.participant import ParticipantCoordinator, ParticipantError
-from ai_collab.protocol import canonical_json_sha256
+from ai_collab.protocol import canonical_json_bytes, canonical_json_sha256
 
 
 PROJECT_ID = "project-one"
@@ -535,7 +535,15 @@ def _policy_template(
     }
 
 
-def _send(client: HarnessClient, opened: Mapping[str, Any], sender: Mapping[str, Any], receiver: Mapping[str, Any], *, request_id: str = "send-one") -> dict[str, Any]:
+def _send(
+    client: HarnessClient,
+    opened: Mapping[str, Any],
+    sender: Mapping[str, Any],
+    receiver: Mapping[str, Any],
+    *,
+    request_id: str = "send-one",
+    message_id: str = "message-one",
+) -> dict[str, Any]:
     receiver_ref = {field: receiver[field] for field in ("scenario_id", "participant_id", "participant_generation")}
     return client.send_message(
         project_instance_id=PROJECT_ID,
@@ -546,7 +554,7 @@ def _send(client: HarnessClient, opened: Mapping[str, Any], sender: Mapping[str,
         sender_participant_generation=sender["participant_generation"],
         sender_participant_state_revision=sender["state_revision"],
         receiver_intent={"kind": "participant", "participant": receiver_ref},
-        message_id="message-one",
+        message_id=message_id,
         message_kind="collaboration.request",
         message="Review the exact M4 delivery contract.",
         request_id=request_id,
@@ -585,9 +593,11 @@ def _summary_projection(
     thread_root: str | None = None,
     attempt_number: int | None = 1,
     degraded_reason: str | None = None,
+    enqueue_sequence: int = 1,
 ) -> dict[str, Any]:
     return {
         "delivery_id": delivery_id,
+        "enqueue_sequence": enqueue_sequence,
         "message_kind": kind,
         "thread_root_delivery_id": thread_root or delivery_id,
         "reply_to_delivery_id": reply_to,
@@ -687,6 +697,10 @@ def _m2_delivery_summary_fixture() -> list[dict[str, Any]]:
 def _list_projection_fixture(
     projections: list[dict[str, Any]], *, limit: int
 ) -> dict[str, Any]:
+    projections = [
+        {**projection, "enqueue_sequence": index}
+        for index, projection in enumerate(projections, start=1)
+    ]
     coordinator = object.__new__(DeliveryCoordinator)
     coordinator._lock = threading.RLock()
     coordinator._active_delivery_ids = set()
@@ -803,6 +817,66 @@ def test_unattempted_delivery_does_not_reduce_first_attempt_rate() -> None:
     assert summary["attempted_total"] == 69
     assert summary["first_attempt_total"] == 69
     assert summary["first_attempt_total"] == summary["attempted_total"]
+
+
+def test_delivery_list_orders_recent_items_by_monotonic_enqueue_sequence(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    accepted_ids: list[str] = []
+    with running_host(state_root) as (host, client, _):
+        opened, sender, receiver = _prepare(client)
+        client.apply_policy(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=1,
+            scenario_state_revision=opened["state_revision"],
+            policy_pack=_policy(sender, receiver),
+        )
+        host.delivery.stop_supervision()
+        for index in range(1, 4):
+            result = _send(
+                client,
+                opened,
+                sender,
+                receiver,
+                request_id=f"sequence-send-{index}",
+                message_id=f"sequence-message-{index}",
+            )
+            accepted_ids.append(result["deliveries"][0]["delivery_id"])
+
+        recent = client.list_deliveries(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            limit=2,
+        )["delivery_collection"]["deliveries"]
+        assert [value["delivery_id"] for value in recent] == list(
+            reversed(accepted_ids[1:])
+        )
+        assert [value["enqueue_sequence"] for value in recent] == [3, 2]
+        durable = json.loads(
+            (state_root / "delivery-state.json").read_text(encoding="utf-8")
+        )["deliveries"]
+        assert [durable[value]["enqueue_sequence"] for value in accepted_ids] == [
+            1,
+            2,
+            3,
+        ]
+
+    state_path = state_root / "delivery-state.json"
+    legacy = json.loads(state_path.read_text(encoding="utf-8"))
+    for item in legacy["deliveries"].values():
+        item.pop("enqueue_sequence")
+    state_path.write_bytes(canonical_json_bytes(legacy) + b"\n")
+
+    with running_host(state_root) as (host, client, _):
+        host.delivery.stop_supervision()
+        migrated = client.list_deliveries(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            limit=3,
+        )["delivery_collection"]["deliveries"]
+        assert [value["enqueue_sequence"] for value in migrated] == [3, 2, 1]
 
 
 def test_stopped_participant_delete_settles_delivery_and_readd_rotates_identity(
@@ -1673,16 +1747,17 @@ def test_participants_self_send_and_reply_with_scoped_identity(
             "degraded_total": 0,
         }
         assert first_page["deliveries"][0] == {
-            "delivery_id": original["delivery_id"],
-            "message_kind": "collaboration.request",
-            "sender": {"participant_id": SENDER_ID, "participant_generation": 1},
+            "delivery_id": reply["delivery_id"],
+            "enqueue_sequence": 2,
+            "message_kind": "collaboration.response",
+            "sender": {"participant_id": RECEIVER_ID, "participant_generation": 1},
             "receiver": {
-                "participant_id": RECEIVER_ID,
+                "participant_id": SENDER_ID,
                 "participant_generation": 1,
             },
-            "policy_snapshot": original["policy_snapshot"],
+            "policy_snapshot": reply["policy_snapshot"],
             "thread_root_delivery_id": original["delivery_id"],
-            "reply_to_delivery_id": None,
+            "reply_to_delivery_id": original["delivery_id"],
             "state": "consumed",
             "degraded_reason": None,
             "event_sequence": 3,
@@ -1709,10 +1784,9 @@ def test_participants_self_send_and_reply_with_scoped_identity(
         )["delivery_collection"]
         assert [
             value["delivery_id"] for value in second_page["deliveries"]
-        ] == [reply["delivery_id"]]
-        assert second_page["deliveries"][0]["reply_to_delivery_id"] == original[
-            "delivery_id"
-        ]
+        ] == [original["delivery_id"]]
+        assert second_page["deliveries"][0]["enqueue_sequence"] == 1
+        assert second_page["deliveries"][0]["reply_to_delivery_id"] is None
         assert second_page["next_page"] is None
         public_json = json.dumps({"first": first_page, "second": second_page})
         assert "Review this fixed implementation." not in public_json

@@ -127,6 +127,32 @@ class DeliveryCoordinator:
             or not isinstance(value["requests"], dict)
         ):
             raise DeliveryError("delivery.state-invalid", "delivery state schema differs")
+        used_sequences: set[int] = set()
+        missing_sequence_ids: list[str] = []
+        for delivery_id in sorted(value["deliveries"]):
+            item = value["deliveries"][delivery_id]
+            if not isinstance(item, dict):
+                raise DeliveryError(
+                    "delivery.state-invalid", "delivery state item differs"
+                )
+            sequence = item.get("enqueue_sequence")
+            if sequence is None:
+                missing_sequence_ids.append(delivery_id)
+            elif (
+                not isinstance(sequence, int)
+                or isinstance(sequence, bool)
+                or sequence < 1
+                or sequence in used_sequences
+            ):
+                raise DeliveryError(
+                    "delivery.state-invalid", "delivery enqueue sequence differs"
+                )
+            else:
+                used_sequences.add(sequence)
+        next_sequence = max(used_sequences, default=0) + 1
+        for delivery_id in missing_sequence_ids:
+            value["deliveries"][delivery_id]["enqueue_sequence"] = next_sequence
+            next_sequence += 1
         return value
 
     def _write_state(self, value: Mapping[str, Any]) -> None:
@@ -659,9 +685,17 @@ class DeliveryCoordinator:
                     raise DeliveryError("policy.denied", decision["denial_code"])
                 operation_id = f"delivery-operation-{uuid.uuid4().hex}"
                 delivery_ids: list[str] = []
+                enqueue_sequence = max(
+                    (
+                        item["enqueue_sequence"]
+                        for item in state["deliveries"].values()
+                    ),
+                    default=0,
+                )
                 for receiver in targets:
                     delivery_id = f"delivery-{uuid.uuid4().hex}"
                     delivery_ids.append(delivery_id)
+                    enqueue_sequence += 1
                     record = self._enqueue_record(
                         delivery_id,
                         route_request,
@@ -673,6 +707,7 @@ class DeliveryCoordinator:
                     state["deliveries"][delivery_id] = {
                         "project_instance_id": project_instance_id,
                         "scenario_id": scenario_id,
+                        "enqueue_sequence": enqueue_sequence,
                         "record": record,
                         "message": message,
                         "message_kind": message_kind,
@@ -888,11 +923,8 @@ class DeliveryCoordinator:
                 )
             ]
             projections.sort(
-                key=lambda value: (
-                    value["thread_root_delivery_id"],
-                    value["reply_to_delivery_id"] is not None,
-                    value["delivery_id"],
-                )
+                key=lambda value: value["enqueue_sequence"],
+                reverse=True,
             )
             digest = canonical_json_sha256(
                 {
@@ -1322,6 +1354,7 @@ class DeliveryCoordinator:
             }
         return {
             "delivery_id": record["delivery_id"],
+            "enqueue_sequence": item["enqueue_sequence"],
             "message_kind": item.get("message_kind", "collaboration.request"),
             "sender": cls._redacted_participant_ref(record["target"]["sender"]),
             "receiver": cls._redacted_participant_ref(record["target"]["receiver"]),
