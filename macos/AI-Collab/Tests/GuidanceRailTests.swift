@@ -233,6 +233,51 @@ final class GuidanceRailTests: XCTestCase {
         )
     }
 
+    /// Readiness is unanimous. A room holding one ready and one stopped
+    /// colleague still has work for Start All, and must not claim it is ready
+    /// nor fire the once-per-generation all-green moment.
+    func testMixedColleagueStatesNeverReportTheRoomReady() {
+        let suite = "guidance-rail-tests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let mixed = model(
+            room: "running", workspaceReady: true,
+            participants: [participant("ready"), participant("stopped")],
+            defaults: defaults
+        )
+        XCTAssertEqual(
+            mixed.guidance, GuidanceStep.startColleagues,
+            "a startable colleague must win over the ready one"
+        )
+        mixed.updateReadyMoment()
+        XCTAssertFalse(
+            mixed.showReadyMoment, "a partly started room is not the ready moment"
+        )
+
+        // Nothing is startable and something is still transitioning: the Host
+        // would refuse Start All, so guidance must offer no action at all.
+        let starting = model(
+            room: "running", workspaceReady: true,
+            participants: [participant("ready"), participant("starting")],
+            defaults: defaults
+        )
+        XCTAssertEqual(
+            starting.guidance, GuidanceStep.working(S.Status.label("starting"))
+        )
+        XCTAssertNil(
+            starting.guidePresentation().actionable,
+            "transitional colleagues must not produce an action"
+        )
+
+        let unanimous = model(
+            room: "running", workspaceReady: true,
+            participants: [participant("ready"), participant("ready")],
+            defaults: defaults
+        )
+        XCTAssertEqual(unanimous.guidance, GuidanceStep.focusAndAssign)
+    }
+
     func testReadyMomentFiresOncePerGeneration() {
         let suite = "guidance-rail-tests-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
@@ -367,10 +412,10 @@ final class GuidanceRailTests: XCTestCase {
         let model = HarnessViewModel()
         model.guideStep = 4
         L10n.shared.preference = .english
-        XCTAssertTrue(S.Guide.policySay.contains("Resume the room first"))
+        XCTAssertTrue(S.Guide.policySay.contains("no collaboration rules yet"))
         L10n.shared.preference = .simplifiedChinese
         XCTAssertEqual(model.guideStep, 4, "switching language must not close the card")
-        XCTAssertTrue(S.Guide.policySay.contains("房间休会中先点恢复打开房间"))
+        XCTAssertTrue(S.Guide.policySay.contains("还没有协作规则"))
         L10n.shared.preference = .english
     }
 }

@@ -270,10 +270,21 @@ final class HarnessViewModel: ObservableObject {
             case .current:
                 break
             }
-            if interactive.contains(where: { $0.observedState == "ready" }) {
+            // Readiness is unanimous, not "at least one". A room holding one
+            // ready and one stopped colleague still has work for Start All,
+            // and must not report itself ready or fire the all-green moment.
+            if interactive.allSatisfy({ $0.observedState == "ready" }) {
                 return .focusAndAssign
             }
-            return .startColleagues
+            if interactive.contains(where: \.canStart) {
+                return .startColleagues
+            }
+            // Some colleague is mid-transition and none is startable: the
+            // Host would refuse Start All, so offer nothing.
+            let transitional = interactive.first { $0.observedState != "ready" }
+            return .working(
+                Self.humanState(transitional?.observedState ?? "starting")
+            )
         default:
             return .attend(Self.humanState(scenario.observedState))
         }

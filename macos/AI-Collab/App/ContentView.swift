@@ -200,6 +200,7 @@ struct ContentView: View {
         .overlay { guideCard }
         .overlay(alignment: .bottom) { successToast }
         .overlay { activityOverlay }
+        .onChange(of: model.selectedScenarioID) { _, _ in endObjectiveEditing() }
         .task { await model.bootstrap() }
         .frame(minWidth: 1100, minHeight: 720)
     }
@@ -264,6 +265,14 @@ struct ContentView: View {
             .padding(13)
             .background(.secondary.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
         }
+    }
+
+    /// Leaves the objective editor and drops the unsaved draft, so a later
+    /// Edit never reopens with someone else's abandoned text.
+    private func endObjectiveEditing() {
+        editingObjective = false
+        model.objectiveDraft = ""
+        model.acceptanceCriteriaDraft = ""
     }
 
     private var flowEyebrow: String {
@@ -680,13 +689,20 @@ struct ContentView: View {
                     .controlSize(.small)
                     Button(S.Objective.addRevision, systemImage: "plus") {
                         Task {
+                            // Close only on a committed revision. A blank draft
+                            // or a Host refusal returns normally, and closing
+                            // here would take away both the field and the
+                            // scoped explanation the user needs to correct it.
+                            let before = model.selectedScenario?.objectiveRevision
                             await model.appendScenarioObjective()
-                            editingObjective = false
+                            if model.selectedScenario?.objectiveRevision != before {
+                                endObjectiveEditing()
+                            }
                         }
                     }
                     .controlSize(.small)
                     .disabled(model.isBusy)
-                    Button(S.Common.cancel) { editingObjective = false }
+                    Button(S.Common.cancel) { endObjectiveEditing() }
                         .controlSize(.small)
                 }
                 .font(.callout)
@@ -717,37 +733,21 @@ struct ContentView: View {
                         Task { await model.refreshSelectedScenario() }
                     }
                     .labelStyle(.iconOnly)
-                    Button(S.Detail.prepareWorkspace) {
-                        Task { await model.prepareWorkspace() }
-                    }
-                    .disabled(model.isBusy || model.lifecycleActionsPreempted)
-                    Button(S.Detail.resume) { Task { await model.openScenario() } }
+                    // Prepare / Resume / Start All now live in the
+                    // persistent flow section, which offers exactly the one
+                    // step whose Host precondition currently holds. Keeping
+                    // header duplicates meant offering operations the Host
+                    // refuses: workspace.plan needs a closed Scenario,
+                    // scenario.open needs a ready workspace, and close accepts
+                    // only opening/running/degraded.
+                    Button(S.Detail.close) { Task { await model.closeScenario() } }
                         .disabled(
                             model.isBusy
                                 || model.lifecycleActionsPreempted
-                                || !["closed", "degraded"].contains(scenario.observedState)
+                                || !["opening", "running", "degraded"].contains(
+                                    scenario.observedState
+                                )
                         )
-                    Button(S.Detail.startAll) {
-                        Task { await model.startAllParticipants() }
-                    }
-                    .disabled(
-                        model.isBusy
-                            || model.lifecycleActionsPreempted
-                            // A room without an applied collaboration policy
-                            // starts fine and then fails on the first message,
-                            // so readiness gates Start All rather than warning.
-                            || model.guidance == .configurePolicy
-                            || !model.participants.contains(where: \.canStart)
-                            || scenario.desiredState != "running"
-                            || !["running", "opening", "degraded"].contains(
-                                scenario.observedState
-                            )
-                    )
-                    .help(
-                        S.Detail.startAllHelp
-                    )
-                    Button(S.Detail.close) { Task { await model.closeScenario() } }
-                        .disabled(model.isBusy || model.lifecycleActionsPreempted)
                 }
             }
             HStack(spacing: 16) {

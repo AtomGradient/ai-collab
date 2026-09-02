@@ -103,7 +103,11 @@ def test_app_is_vendor_neutral_and_does_not_shell_out() -> None:
 def test_app_exposes_scenario_resume_and_participant_reports() -> None:
     content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
     view_model = (APP_ROOT / "HarnessViewModel.swift").read_text(encoding="utf-8")
-    assert 'Button(S.Detail.resume)' in content
+    # Resume moved out of the header and into the persistent flow section,
+    # which offers exactly the one step whose Host precondition holds. The
+    # contract is that the App still exposes resume from the UI, not that it
+    # sits in any particular control.
+    assert "await model.openScenario()" in content
     assert 'InspectorText(title: S.Inspector.resume, text: model.resumeText)' in content
     assert 'operation: "scenario.open"' in view_model
     assert 'result["resume_summary"]' in view_model
