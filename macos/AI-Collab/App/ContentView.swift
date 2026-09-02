@@ -440,6 +440,7 @@ struct ContentView: View {
                         validationBanner(for: .scenarioLifecycle)
                         healthCard(scenario)
                         collaborationHealthSection
+                        deliveryDistributionSection
                         participantsSection
                         deliveriesSection
                         preflightSection
@@ -1160,6 +1161,21 @@ struct ContentView: View {
         }
     }
 
+    @ViewBuilder
+    private var deliveryDistributionSection: some View {
+        if let summary = model.deliverySummary {
+            let distribution = DeliveryDistributionRecord(summary: summary)
+            LazyVGrid(
+                columns: [GridItem(.adaptive(minimum: 300), spacing: 12)],
+                alignment: .leading,
+                spacing: 12
+            ) {
+                DeliveryStateDistributionPanel(distribution: distribution)
+                DeliveryKindDistributionPanel(kinds: distribution.kinds)
+            }
+        }
+    }
+
     private var inspectorSection: some View {
         DisclosureGroup(isExpanded: $showInspector) {
             TabView {
@@ -1663,6 +1679,138 @@ struct DiagnosticsView: View {
                     .foregroundStyle(.secondary)
             }
         }
+    }
+}
+
+private struct DeliveryStateDistributionPanel: View {
+    let distribution: DeliveryDistributionRecord
+
+    private var segments: [(title: String, count: Int, color: Color)] {
+        [
+            (
+                S.DeliveryDistribution.consumptionAcknowledged,
+                distribution.consumptionAcknowledged,
+                .teal
+            ),
+            (
+                S.DeliveryDistribution.repliedWithoutConsumptionAck,
+                distribution.repliedWithoutConsumptionAck,
+                .green
+            ),
+            (
+                S.DeliveryDistribution.noConsumptionAckOrReply,
+                distribution.noConsumptionAckOrReply,
+                .orange
+            ),
+        ]
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(S.DeliveryDistribution.finalState)
+                .font(.subheadline.weight(.semibold))
+            if distribution.settledTotal == 0 {
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(.quaternary)
+                    .frame(height: 28)
+                Text(S.DeliveryDistribution.noSettled)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                GeometryReader { proxy in
+                    HStack(spacing: 0) {
+                        ForEach(Array(segments.enumerated()), id: \.offset) { _, segment in
+                            let width = proxy.size.width
+                                * CGFloat(segment.count)
+                                / CGFloat(distribution.settledTotal)
+                            ZStack {
+                                Rectangle().fill(segment.color)
+                                if width >= 30 {
+                                    Text(String(segment.count))
+                                        .font(.caption.weight(.semibold))
+                                        .monospacedDigit()
+                                        .foregroundStyle(.white)
+                                }
+                            }
+                            .frame(width: width)
+                        }
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
+                }
+                .frame(height: 28)
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(Array(segments.enumerated()), id: \.offset) { _, segment in
+                        HStack(spacing: 8) {
+                            RoundedRectangle(cornerRadius: 2)
+                                .fill(segment.color)
+                                .frame(width: 10, height: 10)
+                            Text(segment.title)
+                                .font(.caption)
+                            Spacer(minLength: 8)
+                            Text(String(segment.count))
+                                .font(.caption.weight(.semibold))
+                                .monospacedDigit()
+                        }
+                    }
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, minHeight: 220, alignment: .topLeading)
+        .padding(12)
+        .background(.secondary.opacity(0.05), in: RoundedRectangle(cornerRadius: 6))
+        .accessibilityElement(children: .contain)
+    }
+}
+
+private struct DeliveryKindDistributionPanel: View {
+    let kinds: [DeliveryKindCount]
+
+    private var maximumCount: Int {
+        kinds.map(\.count).max() ?? 0
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(S.DeliveryDistribution.messageKind)
+                .font(.subheadline.weight(.semibold))
+            ForEach(kinds) { kind in
+                let generic = kind.id == "collaboration.message"
+                HStack(spacing: 8) {
+                    Text(S.DeliveryDistribution.kind(kind.id))
+                        .font(.caption.weight(generic ? .semibold : .regular))
+                        .foregroundStyle(generic ? .green : .secondary)
+                        .frame(width: 104, alignment: .trailing)
+                        .lineLimit(1)
+                    GeometryReader { proxy in
+                        let fraction = maximumCount > 0
+                            ? CGFloat(kind.count) / CGFloat(maximumCount)
+                            : 0
+                        ZStack(alignment: .leading) {
+                            RoundedRectangle(cornerRadius: 3)
+                                .fill(.quaternary)
+                            RoundedRectangle(cornerRadius: 3)
+                                .fill(generic ? Color.green : Color.teal)
+                                .frame(width: proxy.size.width * fraction)
+                        }
+                    }
+                    .frame(height: 8)
+                    Text(String(kind.count))
+                        .font(.caption.weight(.semibold))
+                        .monospacedDigit()
+                        .foregroundStyle(generic ? .green : .primary)
+                        .frame(width: 28, alignment: .trailing)
+                }
+                .frame(minHeight: 18)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(S.DeliveryDistribution.kind(kind.id))
+                .accessibilityValue(String(kind.count))
+            }
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, minHeight: 220, alignment: .topLeading)
+        .padding(12)
+        .background(.secondary.opacity(0.05), in: RoundedRectangle(cornerRadius: 6))
     }
 }
 

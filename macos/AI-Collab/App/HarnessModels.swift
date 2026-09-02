@@ -862,6 +862,51 @@ struct CollaborationHealthRecord: Equatable {
     }
 }
 
+struct DeliveryKindCount: Identifiable, Equatable {
+    let id: String
+    let count: Int
+}
+
+struct DeliveryDistributionRecord: Equatable {
+    static let preferredKinds = [
+        "collaboration.review-request",
+        "collaboration.review-response",
+        "collaboration.notice",
+        "collaboration.pushback",
+        "collaboration.response",
+        "collaboration.question",
+        "collaboration.request",
+        "collaboration.done",
+    ]
+
+    let consumptionAcknowledged: Int
+    let repliedWithoutConsumptionAck: Int
+    let noConsumptionAckOrReply: Int
+    let settledTotal: Int
+    let kinds: [DeliveryKindCount]
+
+    init(summary: DeliverySummaryRecord) {
+        let consumed = summary.states["consumed"] ?? 0
+        let settled = consumed
+            + (summary.states["delivered"] ?? 0)
+            + (summary.states["recipient_deleted"] ?? 0)
+        consumptionAcknowledged = consumed
+        repliedWithoutConsumptionAck = summary.deliveredWithReply
+        noConsumptionAckOrReply = settled - consumed - summary.deliveredWithReply
+        settledTotal = settled
+        let preferred = Self.preferredKinds.filter { (summary.kinds[$0] ?? 0) > 0 }
+        let preferredSet = Set(preferred)
+        let additional = summary.kinds.keys.filter {
+            $0 != "collaboration.message"
+                && !preferredSet.contains($0)
+                && (summary.kinds[$0] ?? 0) > 0
+        }.sorted()
+        kinds = (preferred + additional + ["collaboration.message"]).map {
+            DeliveryKindCount(id: $0, count: summary.kinds[$0] ?? 0)
+        }
+    }
+}
+
 struct DeliveryNextPage: Equatable {
     let afterDeliveryID: String
     let collectionDigest: String

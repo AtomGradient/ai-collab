@@ -7,6 +7,28 @@ import XCTest
 @testable import AICollab
 
 final class HarnessContractTests: XCTestCase {
+    private var m2DeliverySummaryFixture: [String: Any] {
+        [
+            "total": 69,
+            "states": ["consumed": 50, "delivered": 19],
+            "kinds": [
+                "collaboration.message": 0,
+                "collaboration.notice": 12,
+                "collaboration.pushback": 5,
+                "collaboration.question": 1,
+                "collaboration.response": 5,
+                "collaboration.review-request": 23,
+                "collaboration.review-response": 23,
+            ],
+            "reply_expected_total": 29,
+            "reply_expected_closed": 29,
+            "delivered_with_reply": 11,
+            "attempted_total": 69,
+            "first_attempt_total": 69,
+            "degraded_total": 0,
+        ]
+    }
+
     func testCanonicalJSONMatchesHostOrderingAndEscaping() throws {
         let value: [String: Any] = ["z": "路径/ok", "a": [2, 1], "flag": true]
         let data = try HarnessIPCClient.canonicalJSON(value)
@@ -185,25 +207,7 @@ final class HarnessContractTests: XCTestCase {
     }
 
     func testCollaborationHealthUsesCollectionSummaryMetricsIndependently() throws {
-        let fixture: [String: Any] = [
-            "total": 69,
-            "states": ["consumed": 50, "delivered": 19],
-            "kinds": [
-                "collaboration.message": 0,
-                "collaboration.notice": 12,
-                "collaboration.pushback": 5,
-                "collaboration.question": 1,
-                "collaboration.response": 5,
-                "collaboration.review-request": 23,
-                "collaboration.review-response": 23,
-            ],
-            "reply_expected_total": 29,
-            "reply_expected_closed": 29,
-            "delivered_with_reply": 11,
-            "attempted_total": 69,
-            "first_attempt_total": 69,
-            "degraded_total": 0,
-        ]
+        let fixture = m2DeliverySummaryFixture
         func values(
             _ rawSummary: [String: Any],
             readyParticipants: Int = 2
@@ -287,6 +291,31 @@ final class HarnessContractTests: XCTestCase {
         XCTAssertEqual(summary.states["consumed", default: 0] + 19, 69)
         XCTAssertEqual(summary.deliveredWithReply + 8, 19)
         XCTAssertEqual(summary.states["consumed", default: 0] + summary.deliveredWithReply, 61)
+    }
+
+    func testDeliveryDistributionMatchesM2SummaryAndKeepsGenericZero() throws {
+        let summary = try XCTUnwrap(DeliverySummaryRecord(m2DeliverySummaryFixture))
+        let distribution = DeliveryDistributionRecord(summary: summary)
+
+        XCTAssertEqual(distribution.consumptionAcknowledged, 50)
+        XCTAssertEqual(distribution.repliedWithoutConsumptionAck, 11)
+        XCTAssertEqual(distribution.noConsumptionAckOrReply, 8)
+        XCTAssertEqual(distribution.settledTotal, 69)
+        XCTAssertEqual(
+            distribution.kinds.map(\.id),
+            [
+                "collaboration.review-request",
+                "collaboration.review-response",
+                "collaboration.notice",
+                "collaboration.pushback",
+                "collaboration.response",
+                "collaboration.question",
+                "collaboration.message",
+            ]
+        )
+        XCTAssertEqual(distribution.kinds.map(\.count), [23, 23, 12, 5, 5, 1, 0])
+        XCTAssertEqual(distribution.kinds.last?.id, "collaboration.message")
+        XCTAssertEqual(distribution.kinds.last?.count, 0)
     }
 
     func testDegradedParticipantAndStaleResourceModelsExposeExactRepairActions() throws {

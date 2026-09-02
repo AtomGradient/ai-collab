@@ -520,6 +520,37 @@ enum S {
         static var degraded: String { t("Degraded", "降级") }
     }
 
+    enum DeliveryDistribution {
+        static var finalState: String { t("Delivery final state", "投递最终状态") }
+        static var messageKind: String { t("Message kind", "消息类型") }
+        static var noSettled: String {
+            t("No settled deliveries yet.", "还没有已停歇的投递。")
+        }
+        static var consumptionAcknowledged: String {
+            t("Consumption ack stored", "consumption ack 已落库")
+        }
+        static var repliedWithoutConsumptionAck: String {
+            t("Ack not stored, but direct reply exists", "ack 未落库，但已有直接回复")
+        }
+        static var noConsumptionAckOrReply: String {
+            t("Ack not stored and no reply", "ack 未落库，且无回复")
+        }
+        static func kind(_ value: String) -> String {
+            switch value {
+            case "collaboration.review-request": return "review-request"
+            case "collaboration.review-response": return "review-response"
+            case "collaboration.notice": return "notice"
+            case "collaboration.pushback": return "pushback"
+            case "collaboration.response": return "response"
+            case "collaboration.question": return "question"
+            case "collaboration.request": return "request"
+            case "collaboration.done": return "done"
+            case "collaboration.message": return "generic msg"
+            default: return value.replacingOccurrences(of: "collaboration.", with: "")
+            }
+        }
+    }
+
     // MARK: Inspector
 
     enum Inspector {
