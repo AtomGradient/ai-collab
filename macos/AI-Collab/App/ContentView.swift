@@ -1298,8 +1298,6 @@ struct ContentView: View {
                     .padding(.vertical, 12)
             }
         }
-        .padding(10)
-        .background(.secondary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
     }
 
     private func healthColor(for ratio: CollaborationHealthRatio) -> Color {
@@ -1999,7 +1997,6 @@ private struct CollaborationHealthMetricTile: View {
                 Text(title)
                     .font(.system(size: 10, weight: .medium))
                     .textCase(.uppercase)
-                    .tracking(0.7)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
