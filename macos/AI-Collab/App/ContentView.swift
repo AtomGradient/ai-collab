@@ -440,6 +440,7 @@ struct ContentView: View {
                         validationBanner(for: .scenarioLifecycle)
                         healthCard(scenario)
                         collaborationHealthSection
+                        needsAttentionSection
                         deliveryDistributionSection
                         participantsSection
                         deliveriesSection
@@ -517,15 +518,15 @@ struct ContentView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 Label(
-                    S.Colleagues.deliveryCount(model.deliveryTotal),
+                    S.Colleagues.deliveryCount(model.deliverySummary?.total ?? 0),
                     systemImage: "envelope.fill"
                 )
                 .font(.caption)
                 .foregroundStyle(.secondary)
-                if !model.deliveryStates.isEmpty {
+                if let states = model.deliverySummary?.states, !states.isEmpty {
                     Text(
-                        model.deliveryStates.keys.sorted().map {
-                            "\(S.Delivery.stateLabel($0)) \(model.deliveryStates[$0] ?? 0)"
+                        states.keys.sorted().map {
+                            "\(S.Delivery.stateLabel($0)) \(states[$0] ?? 0)"
                         }.joined(separator: " · ")
                     )
                     .font(.caption)
@@ -1041,8 +1042,6 @@ struct ContentView: View {
                     ForEach(model.deliveries) { delivery in
                         VStack(alignment: .leading, spacing: 5) {
                             HStack {
-                                Text(delivery.isThreadRoot ? S.Deliveries.thread : S.Deliveries.reply)
-                                    .font(.caption.bold())
                                 Text(String(delivery.id.prefix(12)))
                                     .font(.system(.caption, design: .monospaced))
                                 Text(delivery.messageKind)
@@ -1072,25 +1071,18 @@ struct ContentView: View {
                                     .foregroundStyle(.orange)
                             }
                         }
-                        .padding(.leading, delivery.isThreadRoot ? 0 : 18)
                         Divider()
-                    }
-                    if model.nextDeliveryPage != nil {
-                        Button(S.Deliveries.loadMore) {
-                            Task { await model.loadMoreDeliveries() }
-                        }
-                        .controlSize(.small)
                     }
                 }
             }
             .padding(.vertical, 6)
         } label: {
             HStack {
-                Label(S.Sections.activity, systemImage: "envelope.fill")
+                Label(S.Deliveries.rawActivity, systemImage: "envelope.fill")
                     .font(.headline)
                 Spacer()
-                if model.deliveryTotal > 0 {
-                    Text("\(model.deliveryTotal)")
+                if let total = model.deliverySummary?.total, total > 0 {
+                    Text("\(total)")
                         .font(.caption.bold())
                         .foregroundStyle(.secondary)
                 }
@@ -1098,6 +1090,35 @@ struct ContentView: View {
         }
         .padding(10)
         .background(.secondary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var needsAttentionSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label(S.NeedsAttention.sectionTitle, systemImage: "exclamationmark.triangle.fill")
+                .font(.headline)
+            if model.deliveryAttention.isEmpty {
+                Label(S.NeedsAttention.allClear, systemImage: "checkmark.circle.fill")
+                    .font(.callout)
+                    .foregroundStyle(.green)
+            } else {
+                ForEach(model.deliveryAttention) { item in
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: "exclamationmark.circle.fill")
+                            .foregroundStyle(.orange)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Button(String(item.delivery.id.prefix(12))) {
+                                showDeliveries = true
+                            }
+                            .buttonStyle(.link)
+                            .font(.system(.callout, design: .monospaced).bold())
+                            Text(S.NeedsAttention.reason(item.reason))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+        }
     }
 
     private var collaborationHealthSection: some View {

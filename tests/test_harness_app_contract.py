@@ -134,6 +134,27 @@ def test_app_live_refreshes_selected_scenario_deliveries_without_full_page_polli
     assert "Task.sleep(nanoseconds: 2_000_000_000)" in monitor
 
 
+def test_harness_app_raw_activity_has_no_pagination_callpoints() -> None:
+    view_model = (APP_ROOT / "HarnessViewModel.swift").read_text(encoding="utf-8")
+    models = (APP_ROOT / "HarnessModels.swift").read_text(encoding="utf-8")
+    content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
+
+    assert '["limit": DeliveryCollectionRecord.rawActivityLimit]' in view_model
+    assert "static let rawActivityLimit = 5" in models
+    for removed in (
+        "nextDeliveryPage",
+        "loadMoreDeliveries",
+        "DeliveryNextPage",
+        "afterDeliveryID",
+        "collectionDigest",
+        "S.Deliveries.thread",
+        "S.Deliveries.reply",
+        "S.Deliveries.loadMore",
+        ".padding(.leading, delivery.isThreadRoot",
+    ):
+        assert removed not in view_model + models + content
+
+
 def test_app_exposes_participant_replace_without_detach() -> None:
     content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
     view_model = (APP_ROOT / "HarnessViewModel.swift").read_text(encoding="utf-8")
@@ -461,7 +482,7 @@ def test_degraded_room_shows_a_visible_repair_entry() -> None:
     detail = content.split("private var scenarioDetail", 1)[1].split("private ", 1)[0]
     assert "healthCard(scenario)" in detail
     assert "Label(S.Sections.health" in card
-    assert "Label(S.Sections.activity" in content
+    assert "Label(S.Deliveries.rawActivity" in content
 
 
 def test_guide_is_a_dismissable_centered_card_deck() -> None:

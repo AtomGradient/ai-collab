@@ -497,13 +497,29 @@ enum S {
 
     enum Deliveries {
         static var sectionTitle: String { t("Deliveries", "消息投递") }
+        static var rawActivity: String { t("Raw activity", "原始活动") }
         static var empty: String { t("No deliveries recorded yet.", "还没有消息记录。") }
-        static var thread: String { t("Thread", "主题") }
-        static var reply: String { t("Reply", "回复") }
         static func lastEvent(_ event: String, _ sequence: Int) -> String {
             t("Last: \(event) · seq \(sequence)", "最近事件：\(event) · 序号 \(sequence)")
         }
-        static var loadMore: String { t("Load More", "加载更多") }
+    }
+
+    enum NeedsAttention {
+        static var sectionTitle: String { t("Needs attention", "需要关注") }
+        static var allClear: String {
+            t("No delivery needs attention.", "没有需要关注的投递。")
+        }
+        static func reason(_ reason: DeliveryAttentionRecord.Reason) -> String {
+            switch reason {
+            case let .degraded(detail):
+                return t("Degraded: \(detail)", "投递降级：\(detail)")
+            case let .repeatedAttempt(attempt):
+                return t(
+                    "Delivery required \(attempt) attempts.",
+                    "投递进行了 \(attempt) 次尝试。"
+                )
+            }
+        }
     }
 
     enum CollaborationHealth {

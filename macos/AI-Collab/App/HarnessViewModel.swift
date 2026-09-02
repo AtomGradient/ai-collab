@@ -73,9 +73,6 @@ final class HarnessViewModel: ObservableObject {
     @Published var policyStatus: PolicyStatusRecord?
     @Published var deliveries: [DeliveryRecord] = []
     @Published var deliverySummary: DeliverySummaryRecord?
-    @Published var deliveryTotal = 0
-    @Published var deliveryStates: [String: Int] = [:]
-    @Published var nextDeliveryPage: DeliveryNextPage?
     @Published private var policyNote: (() -> String)?
     @Published private var deliveryNote: (() -> String)?
     var policyMessage: String { policyNote?() ?? S.Defaults.policy }
@@ -193,6 +190,10 @@ final class HarnessViewModel: ObservableObject {
             readyParticipants: runningParticipantCount,
             totalParticipants: participants.count
         )
+    }
+
+    var deliveryAttention: [DeliveryAttentionRecord] {
+        DeliveryAttentionRecord.items(from: deliveries)
     }
 
     /// One line of plain language for the Scenario header, in place of the
@@ -1402,27 +1403,6 @@ final class HarnessViewModel: ObservableObject {
         }
     }
 
-    func loadMoreDeliveries() async {
-        guard
-            let project = selectedProject,
-            let scenario = selectedScenario,
-            let cursor = nextDeliveryPage
-        else { return refuse(.delivery, S.Msg.noMoreDeliveries) }
-        await performRead {
-            let page = try await self.fetchDeliveries(
-                project: project,
-                scenario: scenario,
-                afterDeliveryID: cursor.afterDeliveryID,
-                collectionDigest: cursor.collectionDigest
-            )
-            self.deliveries.append(contentsOf: page.deliveries)
-            self.deliverySummary = page.summary
-            self.deliveryTotal = page.total
-            self.deliveryStates = page.states
-            self.nextDeliveryPage = page.nextPage
-        }
-    }
-
     func monitorDeliveries(for scenarioID: String) async {
         while !Task.isCancelled {
             guard
@@ -1438,11 +1418,8 @@ final class HarnessViewModel: ObservableObject {
                 guard selectedScenarioID == scenarioID else { return }
                 deliveries = page.deliveries
                 deliverySummary = page.summary
-                deliveryTotal = page.total
-                deliveryStates = page.states
-                nextDeliveryPage = page.nextPage
                 let shown = page.deliveries.count
-                let total = page.total
+                let total = page.summary.total
                 deliveryNote = {
                     total == 0 ? S.DeliveryNote.none : S.DeliveryNote.showing(shown, total)
                 }
@@ -1737,16 +1714,13 @@ final class HarnessViewModel: ObservableObject {
         do {
             try await reloadDeliveries(project: project, scenario: scenario)
             let shown = deliveries.count
-            let total = deliveryTotal
+            let total = deliverySummary?.total ?? 0
             deliveryNote = {
                 total == 0 ? S.DeliveryNote.none : S.DeliveryNote.showing(shown, total)
             }
         } catch {
             deliveries = []
             deliverySummary = nil
-            deliveryTotal = 0
-            deliveryStates = [:]
-            nextDeliveryPage = nil
             presentDeliveryFailure(error, live: false)
         }
     }
@@ -1773,27 +1747,17 @@ final class HarnessViewModel: ObservableObject {
         let page = try await fetchDeliveries(project: project, scenario: scenario)
         deliveries = page.deliveries
         deliverySummary = page.summary
-        deliveryTotal = page.total
-        deliveryStates = page.states
-        nextDeliveryPage = page.nextPage
     }
 
     private func fetchDeliveries(
         project: ProjectRecord,
-        scenario: ScenarioRecord,
-        afterDeliveryID: String? = nil,
-        collectionDigest: String? = nil
+        scenario: ScenarioRecord
     ) async throws -> DeliveryCollectionRecord {
-        var payload: [String: Any] = ["limit": 100]
-        if let afterDeliveryID, let collectionDigest {
-            payload["after_delivery_id"] = afterDeliveryID
-            payload["collection_digest"] = collectionDigest
-        }
         let result = try await client.call(
             HarnessCall(
                 operation: "delivery.list",
                 target: scenarioTarget(projectID: project.id, scenarioID: scenario.id),
-                payload: payload
+                payload: ["limit": DeliveryCollectionRecord.rawActivityLimit]
             )
         )
         guard
@@ -1810,9 +1774,6 @@ final class HarnessViewModel: ObservableObject {
         selectedPolicyTemplateID = nil
         deliveries = []
         deliverySummary = nil
-        deliveryTotal = 0
-        deliveryStates = [:]
-        nextDeliveryPage = nil
         policyNote = nil
         deliveryNote = nil
     }

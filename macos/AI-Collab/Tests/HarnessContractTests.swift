@@ -157,6 +157,7 @@ final class HarnessContractTests: XCTestCase {
     func testDeliveryCollectionModelContainsOnlyControlPlaneProjection() throws {
         let delivery: [String: Any] = [
             "delivery_id": "delivery-one",
+            "enqueue_sequence": 1,
             "message_kind": "collaboration.request",
             "sender": ["participant_id": "analyst", "participant_generation": 1],
             "receiver": ["participant_id": "reviewer", "participant_generation": 2],
@@ -197,13 +198,63 @@ final class HarnessContractTests: XCTestCase {
                 "collection_digest": String(repeating: "b", count: 64),
             ],
         ]))
-        XCTAssertEqual(collection.total, 1)
-        XCTAssertEqual(collection.states, ["delivery_attempted": 1])
+        XCTAssertEqual(collection.summary.total, 1)
+        XCTAssertEqual(collection.summary.states, ["delivery_attempted": 1])
         XCTAssertEqual(collection.deliveries.first?.sender.participantID, "analyst")
+        XCTAssertEqual(collection.deliveries.first?.enqueueSequence, 1)
         XCTAssertEqual(collection.deliveries.first?.attemptNumber, 3)
         XCTAssertEqual(collection.deliveries.first?.errorCode, "transport.unavailable")
         XCTAssertTrue(collection.deliveries.first?.retryEligible == true)
-        XCTAssertEqual(collection.nextPage?.afterDeliveryID, "delivery-one")
+        XCTAssertEqual(DeliveryAttentionRecord.items(from: collection.deliveries).count, 1)
+    }
+
+    func testRawActivityIsLimitedAndAttentionShowsOnlyConcreteAnomalies() throws {
+        func delivery(_ sequence: Int, degraded: String? = nil) -> [String: Any] {
+            [
+                "delivery_id": "delivery-\(sequence)",
+                "enqueue_sequence": sequence,
+                "message_kind": "collaboration.notice",
+                "sender": ["participant_id": "analyst", "participant_generation": 1],
+                "receiver": ["participant_id": "reviewer", "participant_generation": 1],
+                "thread_root_delivery_id": "delivery-\(sequence)",
+                "reply_to_delivery_id": NSNull(),
+                "state": "consumed",
+                "degraded_reason": (degraded as Any?) ?? NSNull(),
+                "event_sequence": 2,
+                "last_event": ["event": "consumption_acknowledged", "attempt_number": 1],
+                "retry_eligibility": [
+                    "eligible": false,
+                    "event_sequence": 2,
+                    "reason": "delivery.already-consumed",
+                ],
+            ]
+        }
+        let rawDeliveries = (1 ... 6).reversed().map { delivery($0) }
+        let collection = try XCTUnwrap(DeliveryCollectionRecord([
+            "summary": [
+                "total": 6,
+                "states": ["consumed": 6],
+                "kinds": ["collaboration.message": 0, "collaboration.notice": 6],
+                "reply_expected_total": 0,
+                "reply_expected_closed": 0,
+                "delivered_with_reply": 0,
+                "attempted_total": 6,
+                "first_attempt_total": 6,
+                "degraded_total": 0,
+            ],
+            "deliveries": rawDeliveries,
+            "next_page": [
+                "after_delivery_id": "delivery-1",
+                "collection_digest": String(repeating: "b", count: 64),
+            ],
+        ]))
+        XCTAssertEqual(collection.deliveries.map(\.enqueueSequence), [6, 5, 4, 3, 2])
+        XCTAssertTrue(DeliveryAttentionRecord.items(from: collection.deliveries).isEmpty)
+
+        let degraded = try XCTUnwrap(DeliveryRecord(delivery(6, degraded: "transport")))
+        let attention = DeliveryAttentionRecord.items(from: [degraded])
+        XCTAssertEqual(attention.count, 1)
+        XCTAssertEqual(attention.first?.id, "delivery-6")
     }
 
     func testCollaborationHealthUsesCollectionSummaryMetricsIndependently() throws {

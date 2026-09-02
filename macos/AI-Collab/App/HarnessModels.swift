@@ -714,6 +714,7 @@ struct DeliveryParticipantRef: Equatable {
 
 struct DeliveryRecord: Identifiable, Equatable {
     let id: String
+    let enqueueSequence: Int
     let messageKind: String
     let sender: DeliveryParticipantRef
     let receiver: DeliveryParticipantRef
@@ -728,11 +729,11 @@ struct DeliveryRecord: Identifiable, Equatable {
     let retryEligible: Bool
     let retryReason: String
 
-    var isThreadRoot: Bool { replyToDeliveryID == nil }
-
     init?(_ value: [String: Any]) {
         guard
             let id = value["delivery_id"] as? String,
+            let enqueueSequence = value["enqueue_sequence"] as? Int,
+            enqueueSequence > 0,
             let messageKind = value["message_kind"] as? String,
             let sender = DeliveryParticipantRef(value["sender"] as? [String: Any]),
             let receiver = DeliveryParticipantRef(value["receiver"] as? [String: Any]),
@@ -746,6 +747,7 @@ struct DeliveryRecord: Identifiable, Equatable {
             let retryReason = retry["reason"] as? String
         else { return nil }
         self.id = id
+        self.enqueueSequence = enqueueSequence
         self.messageKind = messageKind
         self.sender = sender
         self.receiver = receiver
@@ -759,6 +761,36 @@ struct DeliveryRecord: Identifiable, Equatable {
         self.errorCode = lastEvent["error_code"] as? String
         self.retryEligible = retryEligible
         self.retryReason = retryReason
+    }
+}
+
+struct DeliveryAttentionRecord: Identifiable, Equatable {
+    enum Reason: Equatable {
+        case degraded(String)
+        case repeatedAttempt(Int)
+    }
+
+    let delivery: DeliveryRecord
+    let reason: Reason
+
+    var id: String { delivery.id }
+
+    static func items(from deliveries: [DeliveryRecord]) -> [DeliveryAttentionRecord] {
+        Array(deliveries.compactMap { delivery in
+            if let reason = delivery.degradedReason {
+                return DeliveryAttentionRecord(
+                    delivery: delivery,
+                    reason: .degraded(reason)
+                )
+            }
+            if delivery.attemptNumber > 1 {
+                return DeliveryAttentionRecord(
+                    delivery: delivery,
+                    reason: .repeatedAttempt(delivery.attemptNumber)
+                )
+            }
+            return nil
+        }.prefix(3))
     }
 }
 
@@ -946,27 +978,11 @@ struct DeliveryDistributionRecord: Equatable {
     }
 }
 
-struct DeliveryNextPage: Equatable {
-    let afterDeliveryID: String
-    let collectionDigest: String
-
-    init?(_ value: [String: Any]?) {
-        guard
-            let value,
-            let afterDeliveryID = value["after_delivery_id"] as? String,
-            let collectionDigest = value["collection_digest"] as? String
-        else { return nil }
-        self.afterDeliveryID = afterDeliveryID
-        self.collectionDigest = collectionDigest
-    }
-}
-
 struct DeliveryCollectionRecord: Equatable {
+    static let rawActivityLimit = 5
+
     let deliveries: [DeliveryRecord]
     let summary: DeliverySummaryRecord
-    let total: Int
-    let states: [String: Int]
-    let nextPage: DeliveryNextPage?
 
     init?(_ value: [String: Any]) {
         guard
@@ -976,11 +992,8 @@ struct DeliveryCollectionRecord: Equatable {
         let rawDeliveries = dictionaries(value["deliveries"])
         let deliveries = rawDeliveries.compactMap(DeliveryRecord.init)
         guard deliveries.count == rawDeliveries.count else { return nil }
-        self.deliveries = deliveries
+        self.deliveries = Array(deliveries.prefix(Self.rawActivityLimit))
         self.summary = summary
-        self.total = summary.total
-        self.states = summary.states
-        self.nextPage = DeliveryNextPage(value["next_page"] as? [String: Any])
     }
 }
 
