@@ -16,6 +16,9 @@ from typing import Any, Mapping
 
 CONTRACT_VERSION = 1
 MAX_MESSAGE_BYTES = 1_048_576
+MAX_OBJECTIVE_CHARACTERS = 2_000
+MAX_ACCEPTANCE_CRITERIA_CHARACTERS = 1_500
+MAX_OBJECTIVE_CONTEXT_CHARACTERS = 2_500
 OPAQUE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -136,8 +139,27 @@ PROJECT_UNREGISTER_RESULT_SCHEMA = {
 }
 CREATE_REQUEST_SCHEMA = {
     "type": "object",
-    "required": ["project_binding_digest"],
-    "properties": {"project_binding_digest": {"type": "sha256"}},
+    "required": ["project_binding_digest", "objective", "acceptance_criteria"],
+    "properties": {
+        "project_binding_digest": {"type": "sha256"},
+        "objective": {"type": "string"},
+        "acceptance_criteria": {"type": "string"},
+    },
+}
+OBJECTIVE_APPEND_REQUEST_SCHEMA = {
+    "type": "object",
+    "required": [
+        "scenario_generation",
+        "scenario_state_revision",
+        "objective",
+        "acceptance_criteria",
+    ],
+    "properties": {
+        "scenario_generation": {"type": "positive_integer"},
+        "scenario_state_revision": {"type": "positive_integer"},
+        "objective": {"type": "string"},
+        "acceptance_criteria": {"type": "string"},
+    },
 }
 OPEN_REQUEST_SCHEMA = {
     "type": "object",
@@ -671,6 +693,15 @@ OPERATION_DESCRIPTORS = (
         required_fences=["host_generation", "operation_generation"],
         mutation_class="durable_state",
         request_schema=CREATE_REQUEST_SCHEMA,
+        result_schema=SCENARIO_RESULT_SCHEMA,
+    ),
+    _descriptor(
+        "scenario.objective.append",
+        capability="scenario.manage",
+        target_scope="scenario",
+        required_fences=["host_generation", "operation_generation"],
+        mutation_class="durable_state",
+        request_schema=OBJECTIVE_APPEND_REQUEST_SCHEMA,
         result_schema=SCENARIO_RESULT_SCHEMA,
     ),
     _descriptor(
@@ -1422,9 +1453,36 @@ def _validate_payload(operation: str, value: Any) -> None:
             )
         return
     if operation == "scenario.create":
-        payload = _require_exact_fields(value, {"project_binding_digest"}, label="scenario create payload")
+        payload = _require_exact_fields(
+            value,
+            {"project_binding_digest", "objective", "acceptance_criteria"},
+            label="scenario create payload",
+        )
         if not isinstance(payload["project_binding_digest"], str) or SHA256_RE.fullmatch(payload["project_binding_digest"]) is None:
             raise ProtocolError("ipc.operation-schema-mismatch", "protocol", "project binding digest is invalid")
+        _validate_objective_texts(
+            payload["objective"],
+            payload["acceptance_criteria"],
+            allow_empty=True,
+        )
+        return
+    if operation == "scenario.objective.append":
+        payload = _require_exact_fields(
+            value,
+            {
+                "scenario_generation",
+                "scenario_state_revision",
+                "objective",
+                "acceptance_criteria",
+            },
+            label="scenario objective payload",
+        )
+        _validate_scenario_revision(payload)
+        _validate_objective_texts(
+            payload["objective"],
+            payload["acceptance_criteria"],
+            allow_empty=False,
+        )
         return
     if operation == "scenario.open":
         payload = _require_exact_fields(
@@ -1795,6 +1853,38 @@ def _validate_scenario_revision(payload: Mapping[str, Any]) -> None:
     revisions = (payload["scenario_generation"], payload["scenario_state_revision"])
     if any(not isinstance(item, int) or isinstance(item, bool) or item < 1 for item in revisions):
         raise ProtocolError("ipc.operation-schema-mismatch", "protocol", "workspace revision is invalid")
+
+
+def _validate_objective_texts(
+    objective: Any,
+    acceptance_criteria: Any,
+    *,
+    allow_empty: bool,
+) -> None:
+    if (
+        not isinstance(objective, str)
+        or not isinstance(acceptance_criteria, str)
+        or "\x00" in objective
+        or "\x00" in acceptance_criteria
+        or (not allow_empty and not objective.strip())
+        or (not objective.strip() and bool(acceptance_criteria.strip()))
+    ):
+        raise ProtocolError(
+            "scenario.objective-invalid",
+            "protocol",
+            "Scenario objective text is invalid",
+        )
+    if (
+        len(objective) > MAX_OBJECTIVE_CHARACTERS
+        or len(acceptance_criteria) > MAX_ACCEPTANCE_CRITERIA_CHARACTERS
+        or len(objective) + len(acceptance_criteria)
+        > MAX_OBJECTIVE_CONTEXT_CHARACTERS
+    ):
+        raise ProtocolError(
+            "scenario.objective-too-long",
+            "protocol",
+            "Scenario objective exceeds the collaboration context budget",
+        )
 
 
 def validate_runtime_launch_spec(value: Any) -> None:

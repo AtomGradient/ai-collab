@@ -1754,6 +1754,29 @@ class HarnessHost:
                 target["project_instance_id"], target["scenario_id"]
             )
             operation_id = f"read-{request['request_id']}"
+        elif operation == "scenario.objective.append":
+            payload = request["payload"]
+            if (
+                request["fence"]["operation_generation"]
+                != payload["scenario_state_revision"]
+            ):
+                raise ProtocolError(
+                    "fence.stale-operation-generation",
+                    "fencing",
+                    "Scenario objective operation generation differs from revision",
+                    retryable=True,
+                )
+            operation_id, result = self.store.append_scenario_objective(
+                request_id=request["request_id"],
+                request_digest=request_digest,
+                host_generation=self.host_generation,
+                project_instance_id=target["project_instance_id"],
+                scenario_id=target["scenario_id"],
+                scenario_generation=payload["scenario_generation"],
+                scenario_state_revision=payload["scenario_state_revision"],
+                objective=payload["objective"],
+                acceptance_criteria=payload["acceptance_criteria"],
+            )
         elif operation == "scenario.diagnostic":
             result = self.store.scenario_diagnostic(
                 target["project_instance_id"], target["scenario_id"]
@@ -1903,6 +1926,8 @@ class HarnessHost:
                     project_instance_id=target["project_instance_id"],
                     scenario_id=target["scenario_id"],
                     project_binding_digest=request["payload"]["project_binding_digest"],
+                    objective=request["payload"]["objective"],
+                    acceptance_criteria=request["payload"]["acceptance_criteria"],
                     project_contract_snapshot=project_contract_snapshot,
                 )
         elif operation == "scenario.open":

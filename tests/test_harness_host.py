@@ -540,11 +540,108 @@ def test_wrong_capability_is_rejected_without_state_mutation(tmp_path: Path) -> 
                     "scenario_id": SCENARIO_ID,
                 },
                 {"operation_generation": 0},
-                {"project_binding_digest": PROJECT_DIGEST},
+                {
+                    "project_binding_digest": PROJECT_DIGEST,
+                    "objective": "",
+                    "acceptance_criteria": "",
+                },
                 capability_override="wrong-capability",
             )
         assert exc.value.code == "auth.capability-denied"
         assert (state_root / "host-state.json").read_bytes() == before
+
+
+def test_scenario_objective_history_is_owner_only_append_only_and_bounded(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    with running_host(state_root) as (host, client):
+        current = client.create_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            project_binding_digest=PROJECT_DIGEST,
+            request_id="request-create-objective",
+        )["scenario"]
+        assert current["objective"] == ""
+        assert current["objective_history"] == []
+
+        first = client.append_scenario_objective(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=current["scenario_generation"],
+            scenario_state_revision=current["state_revision"],
+            objective="Ship the work overview",
+            acceptance_criteria="All eight acceptance tests pass.",
+            request_id="request-objective-one",
+        )["scenario"]
+        second = client.append_scenario_objective(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=first["scenario_generation"],
+            scenario_state_revision=first["state_revision"],
+            objective="Ship the reviewed work overview",
+            acceptance_criteria="Claude review has no blocking findings.",
+            request_id="request-objective-two",
+        )["scenario"]
+        assert second["objective"] == "Ship the reviewed work overview"
+        assert second["objective_history"] == [
+            {
+                "revision": 1,
+                "objective": "Ship the work overview",
+                "acceptance_criteria": "All eight acceptance tests pass.",
+            },
+            {
+                "revision": 2,
+                "objective": "Ship the reviewed work overview",
+                "acceptance_criteria": "Claude review has no blocking findings.",
+            },
+        ]
+
+        before = state_root.joinpath("host-state.json").read_bytes()
+        with pytest.raises(HarnessClientError) as too_long:
+            client.append_scenario_objective(
+                project_instance_id=PROJECT_ID,
+                scenario_id=SCENARIO_ID,
+                scenario_generation=second["scenario_generation"],
+                scenario_state_revision=second["state_revision"],
+                objective="x" * 2_001,
+                request_id="request-objective-too-long",
+            )
+        assert too_long.value.code == "scenario.objective-too-long"
+        assert state_root.joinpath("host-state.json").read_bytes() == before
+
+        material = host.participant_auth.ensure(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            participant_id="analyst",
+            participant_generation=1,
+            participant_state_revision=1,
+        )
+        participant_secret = json.loads(
+            Path(material["context_path"]).read_text(encoding="utf-8")
+        )["participant_capability"]
+        with pytest.raises(HarnessClientError) as denied:
+            client._call(  # noqa: SLF001 - explicit owner boundary test
+                "scenario.objective.append",
+                {
+                    "scope": "scenario",
+                    "project_instance_id": PROJECT_ID,
+                    "scenario_id": SCENARIO_ID,
+                },
+                {"operation_generation": second["state_revision"]},
+                {
+                    "scenario_generation": second["scenario_generation"],
+                    "scenario_state_revision": second["state_revision"],
+                    "objective": "Participant must not write this",
+                    "acceptance_criteria": "",
+                },
+                capability_secret_override=participant_secret,
+            )
+        assert denied.value.code == "auth.capability-denied"
+        assert client.scenario_status(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+        )["scenario"] == second
 
 
 def test_workspace_failure_is_durable_and_replayed(

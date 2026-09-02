@@ -49,6 +49,7 @@ EXPECTED_DEFS = {
     "nullable_participant_state",
     "degraded_observation",
     "nullable_degraded_observation",
+    "objective_revision",
     "scenario_record",
     "participant_record",
     "operation_target_scenario",
@@ -117,6 +118,7 @@ PARTICIPANT_TRANSITIONS = (
 )
 SCENARIO_OPERATION_DESIRED = {
     "scenario.create": {"closed"},
+    "scenario.objective.append": {"closed", "running", "destroyed"},
     "scenario.open": {"running"},
     "scenario.close": {"closed"},
     "scenario.repair": {"closed", "running", "destroyed"},

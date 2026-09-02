@@ -144,6 +144,8 @@ class HarnessClient:
         project_instance_id: str,
         scenario_id: str,
         project_binding_digest: str,
+        objective: str = "",
+        acceptance_criteria: str = "",
         request_id: str | None = None,
     ) -> dict[str, Any]:
         return self._call(
@@ -154,7 +156,35 @@ class HarnessClient:
                 "scenario_id": scenario_id,
             },
             {"operation_generation": 0},
-            {"project_binding_digest": project_binding_digest},
+            {
+                "project_binding_digest": project_binding_digest,
+                "objective": objective,
+                "acceptance_criteria": acceptance_criteria,
+            },
+            request_id=request_id,
+        )
+
+    def append_scenario_objective(
+        self,
+        *,
+        project_instance_id: str,
+        scenario_id: str,
+        scenario_generation: int,
+        scenario_state_revision: int,
+        objective: str,
+        acceptance_criteria: str = "",
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        return self._call(
+            "scenario.objective.append",
+            self._scenario_target(project_instance_id, scenario_id),
+            {"operation_generation": scenario_state_revision},
+            {
+                "scenario_generation": scenario_generation,
+                "scenario_state_revision": scenario_state_revision,
+                "objective": objective,
+                "acceptance_criteria": acceptance_criteria,
+            },
             request_id=request_id,
         )
 

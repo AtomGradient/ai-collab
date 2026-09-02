@@ -138,6 +138,16 @@
         {"$ref": "#/$defs/degraded_observation"}
       ]
     },
+    "objective_revision": {
+      "type": "object",
+      "required": ["revision", "objective", "acceptance_criteria"],
+      "properties": {
+        "revision": {"$ref": "#/$defs/revision"},
+        "objective": {"type": "string"},
+        "acceptance_criteria": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
     "scenario_record": {
       "type": "object",
       "required": [
@@ -151,7 +161,9 @@
         "participant_ids",
         "active_operation_id",
         "degraded",
-        "journal_head_sequence"
+        "journal_head_sequence",
+        "objective",
+        "objective_history"
       ],
       "properties": {
         "scenario_id": {"$ref": "#/$defs/opaque_id"},
@@ -168,7 +180,12 @@
         },
         "active_operation_id": {"$ref": "#/$defs/nullable_opaque_id"},
         "degraded": {"$ref": "#/$defs/nullable_degraded_observation"},
-        "journal_head_sequence": {"$ref": "#/$defs/revision"}
+        "journal_head_sequence": {"$ref": "#/$defs/revision"},
+        "objective": {"type": "string"},
+        "objective_history": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/objective_revision"}
+        }
       },
       "additionalProperties": false
     },
@@ -277,6 +294,7 @@
         "operation_kind": {
           "enum": [
             "scenario.create",
+            "scenario.objective.append",
             "scenario.open",
             "scenario.close",
             "scenario.repair",
@@ -349,6 +367,7 @@
           "enum": [
             "planned",
             "desired_state_committed",
+            "objective_revision_appended",
             "external_started",
             "external_succeeded",
             "external_failed",

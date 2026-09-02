@@ -20,6 +20,9 @@ from pathlib import Path
 from typing import Any
 
 from .protocol import (
+    MAX_ACCEPTANCE_CRITERIA_CHARACTERS,
+    MAX_OBJECTIVE_CHARACTERS,
+    MAX_OBJECTIVE_CONTEXT_CHARACTERS,
     ProtocolError,
     canonical_json_bytes,
     canonical_json_sha256,
@@ -212,6 +215,7 @@ class ScenarioStore:
                 ScenarioStore._validate_project_contract_snapshot(
                     item["project_contract_snapshot"]
                 )
+                ScenarioStore._validate_objective_record(item["record"])
                 ScenarioStore._participant_history(item)
         for request_id, request in value["requests"].items():
             ScenarioStore._validate_workspace_join_request_ledger(
@@ -225,6 +229,78 @@ class ScenarioStore:
                 value["operations"],
             )
         return value
+
+    @staticmethod
+    def _validate_objective_texts(
+        objective: Any,
+        acceptance_criteria: Any,
+        *,
+        allow_empty: bool,
+    ) -> None:
+        if (
+            not isinstance(objective, str)
+            or not isinstance(acceptance_criteria, str)
+            or "\x00" in objective
+            or "\x00" in acceptance_criteria
+            or (objective == "" and (not allow_empty or acceptance_criteria != ""))
+            or (objective != "" and not objective.strip())
+        ):
+            raise StoreError(
+                "scenario.objective-invalid", "Scenario objective text is invalid"
+            )
+        if (
+            len(objective) > MAX_OBJECTIVE_CHARACTERS
+            or len(acceptance_criteria) > MAX_ACCEPTANCE_CRITERIA_CHARACTERS
+            or len(objective) + len(acceptance_criteria)
+            > MAX_OBJECTIVE_CONTEXT_CHARACTERS
+        ):
+            raise StoreError(
+                "scenario.objective-too-long",
+                "Scenario objective exceeds the collaboration context budget",
+            )
+
+    @staticmethod
+    def _validate_objective_record(record: Any) -> None:
+        if not isinstance(record, dict):
+            raise StoreError("host.state-invalid", "Scenario record differs")
+        has_objective = "objective" in record
+        has_history = "objective_history" in record
+        if not has_objective and not has_history:
+            record["objective"] = ""
+            record["objective_history"] = []
+            return
+        if not has_objective or not has_history:
+            raise StoreError("host.state-invalid", "Scenario objective state differs")
+        objective = record["objective"]
+        history = record["objective_history"]
+        if not isinstance(history, list):
+            raise StoreError("host.state-invalid", "Scenario objective history differs")
+        if not history:
+            if objective != "":
+                raise StoreError("host.state-invalid", "Scenario objective state differs")
+            return
+        for expected_revision, revision in enumerate(history, start=1):
+            if (
+                not isinstance(revision, dict)
+                or set(revision)
+                != {"revision", "objective", "acceptance_criteria"}
+                or revision["revision"] != expected_revision
+            ):
+                raise StoreError(
+                    "host.state-invalid", "Scenario objective history differs"
+                )
+            try:
+                ScenarioStore._validate_objective_texts(
+                    revision["objective"],
+                    revision["acceptance_criteria"],
+                    allow_empty=False,
+                )
+            except StoreError as exc:
+                raise StoreError(
+                    "host.state-invalid", "Scenario objective history differs"
+                ) from exc
+        if objective != history[-1]["objective"]:
+            raise StoreError("host.state-invalid", "Scenario objective state differs")
 
     @classmethod
     def _validate_participant_destroy_request_ledger(
@@ -1670,8 +1746,15 @@ class ScenarioStore:
         project_instance_id: str,
         scenario_id: str,
         project_binding_digest: str,
+        objective: str = "",
+        acceptance_criteria: str = "",
         project_contract_snapshot: dict[str, Any] | None = None,
     ) -> tuple[str, dict[str, Any]]:
+        self._validate_objective_texts(
+            objective,
+            acceptance_criteria,
+            allow_empty=True,
+        )
         self._validate_project_contract_snapshot(
             project_contract_snapshot,
             require_collaboration_snapshot=True,
@@ -1726,6 +1809,18 @@ class ScenarioStore:
                 "active_operation_id": operation["operation_id"],
                 "degraded": None,
                 "journal_head_sequence": 0,
+                "objective": objective,
+                "objective_history": (
+                    [
+                        {
+                            "revision": 1,
+                            "objective": objective,
+                            "acceptance_criteria": acceptance_criteria,
+                        }
+                    ]
+                    if objective
+                    else []
+                ),
             }
             state["scenarios"][key] = {
                 "project_instance_id": project_instance_id,
@@ -1810,6 +1905,87 @@ class ScenarioStore:
                     "unknown",
                     False,
                 ) from exc
+        return operation["operation_id"], result
+
+    def append_scenario_objective(
+        self,
+        *,
+        request_id: str,
+        request_digest: str,
+        host_generation: int,
+        project_instance_id: str,
+        scenario_id: str,
+        scenario_generation: int,
+        scenario_state_revision: int,
+        objective: str,
+        acceptance_criteria: str,
+    ) -> tuple[str, dict[str, Any]]:
+        self._validate_objective_texts(
+            objective,
+            acceptance_criteria,
+            allow_empty=False,
+        )
+        key = self._scenario_key(project_instance_id, scenario_id)
+        with self._lock:
+            state = self._read_state()
+            previous = self._previous_request(state, request_id, request_digest)
+            if previous is not None:
+                return previous
+            item = state["scenarios"].get(key)
+            if item is None:
+                raise StoreError("scenario.not-found", "scenario does not exist")
+            record = item["record"]
+            self._check_scenario_fence(
+                record, scenario_generation, scenario_state_revision
+            )
+            if record["active_operation_id"] is not None:
+                raise StoreError(
+                    "scenario.operation-in-progress",
+                    "Scenario objective cannot change during a lifecycle operation",
+                )
+            operation = self._new_scenario_operation(
+                state,
+                request_id=request_id,
+                request_digest=request_digest,
+                host_generation=host_generation,
+                operation_kind="scenario.objective.append",
+                scenario_id=scenario_id,
+                scenario_generation=scenario_generation,
+                scenario_state_revision=scenario_state_revision,
+                desired_state_after=record["desired_state"],
+                resulting_scenario_generation=scenario_generation,
+            )
+            history = record["objective_history"]
+            history.append(
+                {
+                    "revision": len(history) + 1,
+                    "objective": objective,
+                    "acceptance_criteria": acceptance_criteria,
+                }
+            )
+            record["objective"] = objective
+            record["state_revision"] += 1
+            self._append_operation_event(
+                state,
+                operation,
+                event="objective_revision_appended",
+                before_revision=scenario_state_revision,
+                after_revision=record["state_revision"],
+                mutation_state="committed",
+            )
+            record["journal_head_sequence"] = state["journal_head_sequence"]
+            operation["state"] = "succeeded"
+            operation["mutation_state"] = "committed"
+            result = {"scenario": copy.deepcopy(record)}
+            state["requests"][request_id] = {
+                "request_digest": request_digest,
+                "operation_id": operation["operation_id"],
+                "status": "completed",
+                "result": result,
+                "error": None,
+            }
+            state["state_revision"] += 1
+            self._write_state(state)
             return operation["operation_id"], result
 
     def open_scenario(
