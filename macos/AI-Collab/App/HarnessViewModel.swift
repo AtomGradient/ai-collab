@@ -39,11 +39,20 @@ enum GuidanceStep: Equatable {
     case prepareWorkspace
     case addColleague
     case resumeRoom
+    case configurePolicy
     case startColleagues
     case focusAndAssign
     case attend(String)
     case working(String)
     case inconsistent
+}
+
+enum PolicyReadiness: Equatable {
+    case loading
+    case missing
+    case current
+    case replanRequired
+    case unavailable
 }
 
 @MainActor
@@ -72,6 +81,9 @@ final class HarnessViewModel: ObservableObject {
     @Published var selectedPolicyTemplateID: String?
     @Published var policyPlan: PolicyPlanRecord?
     @Published var policyStatus: PolicyStatusRecord?
+    /// Explicit because `nil` policyStatus used to conflate an absent policy
+    /// with a failed read, which could not safely drive the setup flow.
+    @Published var policyReadiness: PolicyReadiness = .loading
     @Published var deliveries: [DeliveryRecord] = []
     @Published var deliverySummary: DeliverySummaryRecord?
     @Published private var policyNote: (() -> String)?
@@ -248,6 +260,16 @@ final class HarnessViewModel: ObservableObject {
                 return .inconsistent
             }
             if interactive.isEmpty { return .addColleague }
+            switch policyReadiness {
+            case .loading:
+                return .working(S.Policy.loadingRules)
+            case .missing, .replanRequired:
+                return .configurePolicy
+            case .unavailable:
+                return .inconsistent
+            case .current:
+                break
+            }
             if interactive.contains(where: { $0.observedState == "ready" }) {
                 return .focusAndAssign
             }
@@ -268,6 +290,7 @@ final class HarnessViewModel: ObservableObject {
         case .prepareWorkspace: return (2, .prepareWorkspace)
         case .addColleague: return (3, .addColleague)
         case .resumeRoom: return (4, .resumeRoom)
+        case .configurePolicy: return (4, .configurePolicy)
         case .startColleagues: return (4, .startColleagues)
         case .focusAndAssign: return (5, .focusAndAssign)
         case .attend, .working, .inconsistent:
@@ -1401,6 +1424,16 @@ final class HarnessViewModel: ObservableObject {
         }
     }
 
+    /// One employee decision, while preserving the Host's two-step
+    /// plan/apply fence. Clearing the preview first ensures a failed plan can
+    /// never fall through and apply stale UI state.
+    func applyRecommendedPolicy() async {
+        policyPlan = nil
+        await planSelectedPolicy()
+        guard policyPlan?.canApply == true else { return }
+        await applySelectedPolicyPlan()
+    }
+
     func applySelectedPolicyPlan() async {
         guard let project = selectedProject, let scenario = selectedScenario else {
             return refuse(.policy, S.Msg.selectRoomFirst)
@@ -1702,7 +1735,6 @@ final class HarnessViewModel: ObservableObject {
         } else {
             workspaceReady = false
         }
-        updateReadyMoment()
         let resourceResult = try await client.call(
             HarnessCall(operation: "resource.list", target: target)
         )
@@ -1716,6 +1748,7 @@ final class HarnessViewModel: ObservableObject {
         guard let current = selectedScenario else { return }
         try await reloadPolicyTemplates()
         await reloadCollaboration(project: project, scenario: current)
+        updateReadyMoment()
     }
 
     private func syncObjectiveDraft(from scenario: ScenarioRecord) {
@@ -1764,12 +1797,17 @@ final class HarnessViewModel: ObservableObject {
     }
 
     private func reloadCollaboration(project: ProjectRecord, scenario: ScenarioRecord) async {
+        policyReadiness = .loading
         do {
             try await reloadPolicy(project: project, scenario: scenario)
         } catch {
             policyStatus = nil
             policyTextOverride = error.localizedDescription
-            policyNote = { S.PolicyNote.noActive }
+            let readiness = Self.policyReadiness(afterPolicyReadError: error)
+            policyReadiness = readiness
+            policyNote = {
+                readiness == .missing ? S.PolicyNote.noActive : S.PolicyNote.unavailable
+            }
         }
         do {
             try await reloadDeliveries(project: project, scenario: scenario)
@@ -1796,6 +1834,7 @@ final class HarnessViewModel: ObservableObject {
             throw HarnessIPCError.invalidReply
         }
         policyStatus = status
+        policyReadiness = status.requiresReplan ? .replanRequired : .current
         policyTextOverride = prettyJSON(result)
         let requiresReplan = status.requiresReplan
         policyNote = {
@@ -1829,6 +1868,7 @@ final class HarnessViewModel: ObservableObject {
 
     private func clearCollaborationValues() {
         policyStatus = nil
+        policyReadiness = .loading
         policyPlan = nil
         policyTemplates = []
         selectedPolicyTemplateID = nil
@@ -1836,6 +1876,13 @@ final class HarnessViewModel: ObservableObject {
         deliverySummary = nil
         policyNote = nil
         deliveryNote = nil
+    }
+
+    static func policyReadiness(afterPolicyReadError error: Error) -> PolicyReadiness {
+        guard case let HarnessIPCError.hostRejected(
+            code, _, _, _, _, _
+        ) = error else { return .unavailable }
+        return code == "target.delivery-not-found" ? .missing : .unavailable
     }
 
     private func clearDestroyPreview() {

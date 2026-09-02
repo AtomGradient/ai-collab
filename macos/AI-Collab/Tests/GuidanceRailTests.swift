@@ -58,6 +58,7 @@ final class GuidanceRailTests: XCTestCase {
         generation: Int = 3,
         workspaceReady: Bool = false,
         participants: [ParticipantRecord] = [],
+        policyReadiness: PolicyReadiness = .current,
         defaults: UserDefaults = .standard
     ) -> HarnessViewModel {
         let model = HarnessViewModel(readyMomentDefaults: defaults)
@@ -69,6 +70,7 @@ final class GuidanceRailTests: XCTestCase {
         }
         model.workspaceReady = workspaceReady
         model.participants = participants
+        model.policyReadiness = policyReadiness
         return model
     }
 
@@ -112,6 +114,74 @@ final class GuidanceRailTests: XCTestCase {
             model(room: "running", workspaceReady: false).guidance,
             .inconsistent,
             "running without workspace evidence must never offer Prepare"
+        )
+    }
+
+    func testPolicyGatePrecedesStartAndFocus() {
+        let stopped = [participant("stopped")]
+        let ready = [participant("ready")]
+        let suite = "guidance-policy-gate-tests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        XCTAssertEqual(
+            model(
+                room: "running", workspaceReady: true, participants: stopped,
+                policyReadiness: .missing
+            ).guidance,
+            .configurePolicy
+        )
+        let drifted = model(
+            room: "running", workspaceReady: true, participants: ready,
+            policyReadiness: .replanRequired, defaults: defaults
+        )
+        XCTAssertEqual(
+            drifted.guidance,
+            .configurePolicy,
+            "generation drift must suppress the false ready/focus state"
+        )
+        drifted.updateReadyMoment()
+        XCTAssertFalse(
+            drifted.showReadyMoment,
+            "policy drift must not emit a false all-ready milestone"
+        )
+        XCTAssertEqual(
+            model(
+                room: "running", workspaceReady: true, participants: stopped,
+                policyReadiness: .loading
+            ).guidance,
+            .working(S.Policy.loadingRules)
+        )
+        XCTAssertEqual(
+            model(
+                room: "running", workspaceReady: true, participants: ready,
+                policyReadiness: .unavailable
+            ).guidance,
+            .inconsistent,
+            "an unknown policy read failure must fail closed without an action"
+        )
+    }
+
+    func testPolicyReadErrorsOnlyClassifyTypedAbsenceAsMissing() {
+        let missing = HarnessIPCError.hostRejected(
+            code: "target.delivery-not-found", category: "identity",
+            message: "scenario policy is unavailable", retryable: false,
+            mutationState: "not_started", repairAction: nil
+        )
+        XCTAssertEqual(
+            HarnessViewModel.policyReadiness(afterPolicyReadError: missing), .missing
+        )
+        XCTAssertEqual(
+            HarnessViewModel.policyReadiness(afterPolicyReadError: HarnessIPCError.hostUnavailable),
+            .unavailable
+        )
+        let rejected = HarnessIPCError.hostRejected(
+            code: "operation.precondition-failed", category: "operation",
+            message: "failed", retryable: true,
+            mutationState: "not_started", repairAction: nil
+        )
+        XCTAssertEqual(
+            HarnessViewModel.policyReadiness(afterPolicyReadError: rejected), .unavailable
         )
     }
 
@@ -222,6 +292,13 @@ final class GuidanceRailTests: XCTestCase {
         )
         XCTAssertEqual(resume.guidePresentation().index, 4)
         XCTAssertEqual(resume.guidePresentation().actionable, .resumeRoom)
+
+        let configure = model(
+            room: "running", workspaceReady: true,
+            participants: [participant("stopped")], policyReadiness: .missing
+        )
+        XCTAssertEqual(configure.guidePresentation().index, 4)
+        XCTAssertEqual(configure.guidePresentation().actionable, .configurePolicy)
 
         let start = model(
             room: "running", workspaceReady: true,

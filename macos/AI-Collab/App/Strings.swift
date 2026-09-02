@@ -512,6 +512,9 @@ enum S {
         static var createRepairPlan: String { t("Create Repair Plan", "生成修复方案") }
         static var previewPlan: String { t("Preview Plan", "预览方案") }
         static var applyPlan: String { t("Apply Plan", "应用方案") }
+        static var loadingRules: String {
+            t("Loading collaboration rules", "正在载入协作规则")
+        }
         static func teamLine(_ members: String) -> String {
             t("Team: \(members)", "团队：\(members)")
         }
@@ -989,6 +992,12 @@ enum S {
                 "尚未启用协作规则。预览一个团队模板以继续。"
             )
         }
+        static var unavailable: String {
+            t(
+                "Collaboration policy status is unavailable. Refresh before continuing.",
+                "暂时无法读取协作规则状态。请刷新后再继续。"
+            )
+        }
         static var replanRequired: String {
             t(
                 "Colleague generations changed. Create and explicitly apply a repair plan.",
@@ -1324,6 +1333,9 @@ enum S {
             t("The room is closed — resume it to continue.", "房间在休会中——恢复后继续。")
         }
         static var resumeAction: String { t("Resume Room", "恢复房间") }
+        static var configurePolicyAction: String {
+            t("Apply Collaboration Rules", "应用协作规则")
+        }
         static var startSay: String {
             t("Colleagues are in place — start them working.", "同事已就位，开工。")
         }

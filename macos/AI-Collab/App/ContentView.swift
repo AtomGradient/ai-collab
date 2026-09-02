@@ -242,6 +242,11 @@ struct ContentView: View {
             return (S.Guide.addAction, { Task { await model.addParticipant() } })
         case .resumeRoom:
             return (S.Guide.resumeAction, { Task { await model.openScenario() } })
+        case .configurePolicy:
+            return (
+                S.Guide.configurePolicyAction,
+                { Task { await model.applyRecommendedPolicy() } }
+            )
         case .startColleagues:
             return (S.Guide.startAction, { Task { await model.startAllParticipants() } })
         case .focusAndAssign:
