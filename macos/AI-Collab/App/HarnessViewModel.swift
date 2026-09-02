@@ -279,6 +279,17 @@ final class HarnessViewModel: ObservableObject {
         }
     }
 
+    /// Blocked and transitional guidance preempts the flow: while it holds,
+    /// no surface may offer a competing lifecycle action, because the Host
+    /// would refuse it. Derived from `guidance` so there is exactly one
+    /// source of flow truth.
+    var lifecycleActionsPreempted: Bool {
+        switch guidance {
+        case .attend, .working, .inconsistent: true
+        default: false
+        }
+    }
+
     /// Deck positioning and action gating, separated: `index` is where the
     /// card opens (by completed milestone for non-actionable states), and
     /// `actionable` is the exact live step whose real action the card may

@@ -199,6 +199,40 @@ final class GuidanceRailTests: XCTestCase {
         )
     }
 
+    /// The header must not offer a lifecycle action while guidance is blocked
+    /// or transitional; and a room without an applied policy must not offer
+    /// Start All, because it starts fine and then fails on the first message.
+    func testBlockedAndTransitionalStatesPreemptLifecycleActions() {
+        XCTAssertTrue(model(room: "degraded").lifecycleActionsPreempted)
+        XCTAssertTrue(model(room: "provision_failed").lifecycleActionsPreempted)
+        XCTAssertTrue(model(room: "provisioning").lifecycleActionsPreempted)
+        XCTAssertTrue(model(room: "closing").lifecycleActionsPreempted)
+
+        let ready = model(
+            room: "running",
+            workspaceReady: true,
+            participants: [participant("ready")],
+            policyReadiness: .current
+        )
+        XCTAssertEqual(ready.guidance, GuidanceStep.focusAndAssign)
+        XCTAssertFalse(
+            ready.lifecycleActionsPreempted,
+            "an operational room must keep its lifecycle actions"
+        )
+
+        let noPolicy = model(
+            room: "running",
+            workspaceReady: true,
+            participants: [participant("stopped")],
+            policyReadiness: .missing
+        )
+        XCTAssertEqual(noPolicy.guidance, GuidanceStep.configurePolicy)
+        XCTAssertFalse(
+            noPolicy.lifecycleActionsPreempted,
+            "a missing policy is actionable, not a preempting block"
+        )
+    }
+
     func testReadyMomentFiresOncePerGeneration() {
         let suite = "guidance-rail-tests-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!

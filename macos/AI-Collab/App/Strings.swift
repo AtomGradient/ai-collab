@@ -21,6 +21,14 @@ enum S {
 
     // MARK: Common actions
 
+    /// The one live next step, shown as the Scenario's primary action.
+    enum Flow {
+        static var nextStep: String { t("Next step", "下一步") }
+        static var attention: String { t("Needs you", "需要你处理") }
+        static var inProgress: String { t("In progress", "进行中") }
+        static var ready: String { t("Room is ready", "房间已就绪") }
+    }
+
     enum Common {
         static var cancel: String { t("Cancel", "取消") }
         static var retry: String { t("Retry", "重试") }
@@ -166,6 +174,8 @@ enum S {
             t("Acceptance criteria (optional)", "验收标准（可选）")
         }
         static var addRevision: String { t("Add revision", "追加修订") }
+        static var edit: String { t("Edit", "编辑") }
+        static var setObjective: String { t("Set objective", "设定目标") }
         static var issued: String { t("Issued", "已下发") }
         static var pendingIssuance: String {
             t("Pending issuance", "待下发")

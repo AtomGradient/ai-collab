@@ -223,6 +223,101 @@ struct ContentView: View {
         ]
     }
 
+    /// The live next step, rendered as the Scenario's own primary action
+    /// rather than a dismissible card. `HarnessViewModel.guidance` stays the
+    /// only source of flow truth; this view never re-derives it.
+    @ViewBuilder
+    private var scenarioFlowSection: some View {
+        if case .focusAndAssign = model.guidance {
+            // Operational: the flow collapses to one line so Collaboration
+            // Health and the team keep the first viewport.
+            HStack(spacing: 9) {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                Text(S.Flow.ready)
+                    .font(.callout.weight(.medium))
+                Spacer(minLength: 8)
+                if let action = liveGuideAction() {
+                    Button(action.label, action: action.perform)
+                        .controlSize(.small)
+                        .disabled(model.isBusy)
+                }
+            }
+            .padding(10)
+            .background(.secondary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
+        } else {
+            VStack(alignment: .leading, spacing: 9) {
+                Text(flowEyebrow)
+                    .font(.system(size: 10, weight: .semibold))
+                    .textCase(.uppercase)
+                    .foregroundStyle(model.lifecycleActionsPreempted ? .orange : .teal)
+                Text(liveGuideSay)
+                    .font(.title3.weight(.medium))
+                    .fixedSize(horizontal: false, vertical: true)
+                if let action = liveGuideAction() {
+                    Button(action.label, action: action.perform)
+                        .buttonStyle(.borderedProminent)
+                        .disabled(model.isBusy)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(13)
+            .background(.secondary.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
+        }
+    }
+
+    private var flowEyebrow: String {
+        switch model.guidance {
+        case .attend, .inconsistent: S.Flow.attention
+        case .working: S.Flow.inProgress
+        default: S.Flow.nextStep
+        }
+    }
+
+    private var liveGuideSay: String {
+        switch model.guidance {
+        case .registerProject: S.Guide.registerSay
+        case .createRoom: S.Guide.createSay
+        case .prepareWorkspace: S.Guide.prepareSay
+        case .addColleague: S.Guide.addSay
+        case .resumeRoom: S.Guide.resumeSay
+        case .configurePolicy: S.Guide.policySay
+        case .startColleagues: S.Guide.startSay
+        case .focusAndAssign: S.Guide.focusSay
+        case .attend(let state): S.Guide.attendSay(state)
+        case .working(let state): S.Guide.workingSay(state)
+        case .inconsistent: S.Guide.inconsistentSay
+        }
+    }
+
+    /// The real action for the exact live step. Blocked and transitional
+    /// states never produce one.
+    private func liveGuideAction() -> (label: String, perform: () -> Void)? {
+        switch model.guidance {
+        case .registerProject:
+            return (S.Guide.registerAction, { Task { await model.chooseAndRegisterProject() } })
+        case .createRoom:
+            return (S.Guide.createAction, { Task { await model.createScenario() } })
+        case .prepareWorkspace:
+            return (S.Guide.prepareAction, { Task { await model.prepareWorkspace() } })
+        case .addColleague:
+            return (S.Guide.addAction, { Task { await model.addParticipant() } })
+        case .resumeRoom:
+            return (S.Guide.resumeAction, { Task { await model.openScenario() } })
+        case .configurePolicy:
+            return (
+                S.Guide.configurePolicyAction,
+                { Task { await model.applyRecommendedPolicy() } }
+            )
+        case .startColleagues:
+            return (S.Guide.startAction, { Task { await model.startAllParticipants() } })
+        case .focusAndAssign:
+            return (S.Guide.focusAction, { Task { await model.focusScenario() } })
+        case .attend, .working, .inconsistent:
+            return nil
+        }
+    }
+
     /// The embedded real action for the exact live actionable step, if the
     /// open card is showing that step. Blocked/transitional states never
     /// produce a card action.
@@ -504,6 +599,7 @@ struct ContentView: View {
                         // machine view folded at the end, nothing removed.
                         scenarioHeader(scenario)
                         validationBanner(for: .scenarioLifecycle)
+                        scenarioFlowSection
                         objectiveSection(scenario)
                         healthCard(scenario)
                         collaborationHealthSection
@@ -538,6 +634,15 @@ struct ContentView: View {
                 Label(S.Objective.sectionTitle, systemImage: "scope")
                     .font(.headline)
                 Spacer()
+                if !editingObjective {
+                    Button(
+                        scenario.objective.isEmpty
+                            ? S.Objective.setObjective
+                            : S.Objective.edit
+                    ) { editingObjective = true }
+                    .controlSize(.small)
+                    .disabled(model.isBusy)
+                }
                 if scenario.objectiveRevision > 0 {
                     Text(S.Objective.revision(scenario.objectiveRevision))
                         .font(.caption.monospacedDigit())
@@ -564,22 +669,29 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            HStack {
-                TextField(S.Objective.objectivePlaceholder, text: $model.objectiveDraft)
+            if editingObjective {
+                HStack {
+                    TextField(S.Objective.objectivePlaceholder, text: $model.objectiveDraft)
+                        .controlSize(.small)
+                    TextField(
+                        S.Objective.acceptancePlaceholder,
+                        text: $model.acceptanceCriteriaDraft
+                    )
                     .controlSize(.small)
-                TextField(
-                    S.Objective.acceptancePlaceholder,
-                    text: $model.acceptanceCriteriaDraft
-                )
-                .controlSize(.small)
-                Button(S.Objective.addRevision, systemImage: "plus") {
-                    Task { await model.appendScenarioObjective() }
+                    Button(S.Objective.addRevision, systemImage: "plus") {
+                        Task {
+                            await model.appendScenarioObjective()
+                            editingObjective = false
+                        }
+                    }
+                    .controlSize(.small)
+                    .disabled(model.isBusy)
+                    Button(S.Common.cancel) { editingObjective = false }
+                        .controlSize(.small)
                 }
-                .controlSize(.small)
-                .disabled(model.isBusy)
+                .font(.callout)
+                validationBanner(for: .objective)
             }
-            .font(.callout)
-            validationBanner(for: .objective)
         }
         .padding(10)
         .background(.secondary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
@@ -608,9 +720,11 @@ struct ContentView: View {
                     Button(S.Detail.prepareWorkspace) {
                         Task { await model.prepareWorkspace() }
                     }
+                    .disabled(model.isBusy || model.lifecycleActionsPreempted)
                     Button(S.Detail.resume) { Task { await model.openScenario() } }
                         .disabled(
                             model.isBusy
+                                || model.lifecycleActionsPreempted
                                 || !["closed", "degraded"].contains(scenario.observedState)
                         )
                     Button(S.Detail.startAll) {
@@ -618,6 +732,11 @@ struct ContentView: View {
                     }
                     .disabled(
                         model.isBusy
+                            || model.lifecycleActionsPreempted
+                            // A room without an applied collaboration policy
+                            // starts fine and then fails on the first message,
+                            // so readiness gates Start All rather than warning.
+                            || model.guidance == .configurePolicy
                             || !model.participants.contains(where: \.canStart)
                             || scenario.desiredState != "running"
                             || !["running", "opening", "degraded"].contains(
@@ -628,6 +747,7 @@ struct ContentView: View {
                         S.Detail.startAllHelp
                     )
                     Button(S.Detail.close) { Task { await model.closeScenario() } }
+                        .disabled(model.isBusy || model.lifecycleActionsPreempted)
                 }
             }
             HStack(spacing: 16) {
@@ -847,6 +967,7 @@ struct ContentView: View {
     @State private var showPolicy = false
     @State private var showDeliveries = false
     @State private var showInspector = false
+    @State private var editingObjective = false
 
     private var preflightSection: some View {
         DisclosureGroup(isExpanded: $showPreflight) {
