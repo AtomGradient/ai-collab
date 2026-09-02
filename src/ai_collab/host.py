@@ -544,6 +544,17 @@ class HarnessHost:
                     "project_instance_id": project_instance_id,
                     "scenario_id": scenario_id,
                     "scenario_generation": scenario["scenario_generation"],
+                    "objective": {
+                        "revision": len(scenario["objective_history"]),
+                        "objective": scenario["objective"],
+                        "acceptance_criteria": (
+                            scenario["objective_history"][-1][
+                                "acceptance_criteria"
+                            ]
+                            if scenario["objective_history"]
+                            else ""
+                        ),
+                    },
                 },
                 "participant": {
                     "participant_id": participant_id,

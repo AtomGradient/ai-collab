@@ -14,7 +14,14 @@ import sys
 from pathlib import Path
 from typing import Any, Mapping
 
-from .protocol import CONTRACT_VERSION, canonical_json_bytes, canonical_json_sha256
+from .protocol import (
+    CONTRACT_VERSION,
+    MAX_ACCEPTANCE_CRITERIA_CHARACTERS,
+    MAX_OBJECTIVE_CHARACTERS,
+    MAX_OBJECTIVE_CONTEXT_CHARACTERS,
+    canonical_json_bytes,
+    canonical_json_sha256,
+)
 
 
 CONTEXT_SCHEMA_VERSION = 1
@@ -118,6 +125,11 @@ class ParticipantAuthStore:
                     "project_instance_id": project_instance_id,
                     "scenario_id": scenario_id,
                     "scenario_generation": 1,
+                    "objective": {
+                        "revision": 0,
+                        "objective": "",
+                        "acceptance_criteria": "",
+                    },
                 },
                 "participant": {
                     "participant_id": participant_id,
@@ -239,6 +251,23 @@ class ParticipantAuthStore:
         collaboration_context: Mapping[str, Any],
     ) -> dict[str, Any]:
         value = dict(collaboration_context)
+        original_unsigned = {
+            key: item for key, item in value.items() if key != "context_digest"
+        }
+        if value.get("context_digest") != canonical_json_sha256(original_unsigned):
+            raise ParticipantAuthError("participant collaboration digest differs")
+        scenario = value.get("scenario")
+        if isinstance(scenario, dict) and "objective" not in scenario:
+            scenario["objective"] = {
+                "revision": 0,
+                "objective": "",
+                "acceptance_criteria": "",
+            }
+            unsigned = {
+                key: item for key, item in value.items() if key != "context_digest"
+            }
+            value["context_digest"] = canonical_json_sha256(unsigned)
+        objective = scenario.get("objective") if isinstance(scenario, dict) else None
         if (
             set(value)
             != {
@@ -260,17 +289,27 @@ class ParticipantAuthStore:
             != identity["project_instance_id"]
             or value.get("scenario", {}).get("scenario_id")
             != identity["scenario_id"]
+            or not isinstance(objective, dict)
+            or set(objective)
+            != {"revision", "objective", "acceptance_criteria"}
+            or not isinstance(objective["revision"], int)
+            or isinstance(objective["revision"], bool)
+            or objective["revision"] < 0
+            or not isinstance(objective["objective"], str)
+            or not isinstance(objective["acceptance_criteria"], str)
+            or len(objective["objective"]) > MAX_OBJECTIVE_CHARACTERS
+            or len(objective["acceptance_criteria"])
+            > MAX_ACCEPTANCE_CRITERIA_CHARACTERS
+            or len(objective["objective"]) + len(objective["acceptance_criteria"])
+            > MAX_OBJECTIVE_CONTEXT_CHARACTERS
+            or (objective["revision"] == 0) != (objective["objective"] == "")
+            or (objective["objective"] == "" and objective["acceptance_criteria"] != "")
             or value.get("participant", {}).get("participant_id")
             != identity["participant_id"]
             or value.get("participant", {}).get("participant_generation")
             != identity["participant_generation"]
         ):
             raise ParticipantAuthError("participant collaboration context differs")
-        unsigned = {
-            key: item for key, item in value.items() if key != "context_digest"
-        }
-        if value["context_digest"] != canonical_json_sha256(unsigned):
-            raise ParticipantAuthError("participant collaboration digest differs")
         return value
 
     def _write(self, path: Path, value: Mapping[str, Any]) -> None:

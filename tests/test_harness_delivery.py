@@ -1441,6 +1441,11 @@ def test_typed_policy_route_delivery_and_consumption(tmp_path: Path) -> None:
             }
         ]
         assert collaboration["policy"] == applied["policy_snapshot"]
+        assert collaboration["scenario"]["objective"] == {
+            "revision": 0,
+            "objective": "",
+            "acceptance_criteria": "",
+        }
         assert collaboration["context_digest"] == canonical_json_sha256(
             {
                 key: value
@@ -1480,6 +1485,35 @@ def test_typed_policy_route_delivery_and_consumption(tmp_path: Path) -> None:
         assert stat.S_IMODE((state_root / "delivery-state.json").stat().st_mode) == 0o600
         durable = json.loads((state_root / "delivery-state.json").read_text(encoding="utf-8"))
         assert durable["deliveries"][record["delivery_id"]]["message"] == "Review the exact M4 delivery contract."
+
+
+def test_participant_collaboration_context_contains_current_objective_revision(
+    tmp_path: Path,
+) -> None:
+    with running_host(tmp_path / "state") as (host, client, _):
+        opened, sender, _ = _prepare(client)
+        updated = client.append_scenario_objective(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=opened["scenario_generation"],
+            scenario_state_revision=opened["state_revision"],
+            objective="Review the delivery evidence",
+            acceptance_criteria="The final report cites concrete delivery IDs.",
+        )["scenario"]
+
+        assert host.delivery is not None
+        context = host.delivery.participant_collaboration_context(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            participant_id=SENDER_ID,
+            participant_generation=sender["participant_generation"],
+        )
+        assert context["context_revision"] == updated["state_revision"]
+        assert context["scenario"]["objective"] == {
+            "revision": 1,
+            "objective": "Review the delivery evidence",
+            "acceptance_criteria": "The final report cites concrete delivery IDs.",
+        }
 
 
 def test_project_template_plan_apply_and_generation_drift_require_replan(

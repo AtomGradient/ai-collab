@@ -2897,6 +2897,11 @@ def test_vendor_session_hook_captures_and_reuses_exact_identity(
             "project_instance_id": "project-one",
             "scenario_id": "scenario-one",
             "scenario_generation": 1,
+            "objective": {
+                "revision": 2,
+                "objective": "Ship the collaboration overview",
+                "acceptance_criteria": "Both vendor sessions receive this context.",
+            },
         },
         "participant": {
             "participant_id": "analyst",
@@ -2974,6 +2979,24 @@ def test_vendor_session_hook_captures_and_reuses_exact_identity(
     assert str(private_root / "ai-ping") in collaboration_prompt
     assert "not provider-native agent discovery or messaging" in collaboration_prompt
     assert "A successful ai-ping Host result is authoritative" in collaboration_prompt
+    assert (
+        'scenario objective (revision 2): "Ship the collaboration overview"'
+        in collaboration_prompt
+    )
+    assert (
+        'acceptance criteria: "Both vendor sessions receive this context."'
+        in collaboration_prompt
+    )
+    oversized = copy.deepcopy(unsigned)
+    oversized["scenario"]["objective"] = {
+        "revision": 3,
+        "objective": "x" * participant_driver.COLLABORATION_CONTEXT_LIMIT,
+        "acceptance_criteria": "",
+    }
+    with pytest.raises(participant_driver.DriverError, match="collaboration.context-too-long"):
+        participant_driver._render_collaboration_context(  # noqa: SLF001
+            oversized, private_root / "ai-ping"
+        )
     session_id = expected_session_id or "11111111-1111-4111-8111-111111111111"
     initial_identity_digest = participant_driver._verify_vendor_session(  # noqa: SLF001
         private_root,

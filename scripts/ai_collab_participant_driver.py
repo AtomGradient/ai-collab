@@ -77,6 +77,7 @@ CONSUMPTION_TIMEOUT_SECONDS = 240.0
 STARTUP_POLL_SECONDS = 0.25
 STARTUP_STABLE_OBSERVATIONS = 4
 STARTUP_GATE_MAX_SECONDS = 240
+COLLABORATION_CONTEXT_LIMIT = 5_000
 STARTUP_CONFIRM_KEYS = {"1", "2", "\r", "\x1b[A", "\x1b[B"}
 SENDER_SESSION_CONNECT_ATTEMPTS = 3
 SENDER_SESSION_RETRY_SECONDS = 0.1
@@ -1172,6 +1173,15 @@ def _read_collaboration_context(participant_client: Mapping[str, Any]) -> dict[s
         or value["context_digest"] != digest(unsigned)
     ):
         raise DriverError("participant collaboration context differs")
+    scenario = value.get("scenario")
+    if isinstance(scenario, dict) and "objective" not in scenario:
+        scenario["objective"] = {
+            "revision": 0,
+            "objective": "",
+            "acceptance_criteria": "",
+        }
+        unsigned = {key: item for key, item in value.items() if key != "context_digest"}
+        value["context_digest"] = digest(unsigned)
     return value
 
 
@@ -1204,11 +1214,35 @@ def _render_collaboration_context(
         if policy is None
         else f"{policy['policy_id']} v{policy['policy_version']} digest={policy['policy_digest']}"
     )
+    objective = scenario.get("objective")
+    if (
+        not isinstance(objective, dict)
+        or set(objective) != {"revision", "objective", "acceptance_criteria"}
+        or not isinstance(objective["revision"], int)
+        or isinstance(objective["revision"], bool)
+        or objective["revision"] < 0
+        or not isinstance(objective["objective"], str)
+        or not isinstance(objective["acceptance_criteria"], str)
+        or (objective["revision"] == 0) != (objective["objective"] == "")
+    ):
+        raise DriverError("collaboration.objective-invalid")
+    objective_text = (
+        "not set"
+        if objective["revision"] == 0
+        else json.dumps(objective["objective"], ensure_ascii=False)
+    )
+    acceptance_text = (
+        "not set"
+        if not objective["acceptance_criteria"]
+        else json.dumps(objective["acceptance_criteria"], ensure_ascii=False)
+    )
     ping_command = shlex.quote(str(participant_ping))
-    return (
+    rendered = (
         "AI Collaboration Harness participant context\n"
         f"context revision: {value['context_revision']}\n"
         f"scenario: {scenario['scenario_id']}\n"
+        f"scenario objective (revision {objective['revision']}): {objective_text}\n"
+        f"acceptance criteria: {acceptance_text}\n"
         f"your Harness identity: {participant['participant_id']} generation "
         f"{participant['participant_generation']}\n"
         f"your assignments: {assignment_text}\n"
@@ -1225,6 +1259,9 @@ def _render_collaboration_context(
         "- Response, review-response, notice, and done deliveries are terminal/informational unless their payload explicitly requests new work; do not send receipt-only replies.\n"
         "- Accepted/delivered/consumed acknowledgements are machine state and should remain silent in the conversation.\n"
     )
+    if len(rendered) > COLLABORATION_CONTEXT_LIMIT:
+        raise DriverError("collaboration.context-too-long")
+    return rendered
 
 
 def _write_participant_ping(
