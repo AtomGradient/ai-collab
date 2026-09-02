@@ -166,6 +166,16 @@ enum S {
             t("Acceptance criteria (optional)", "验收标准（可选）")
         }
         static var addRevision: String { t("Add revision", "追加修订") }
+        static var issued: String { t("Issued", "已下发") }
+        static var pendingIssuance: String {
+            t("Pending issuance", "待下发")
+        }
+        static var pendingIssuanceHelp: String {
+            t(
+                "This revision takes effect at the next startup, resume, or compact.",
+                "这一修订将在下次启动、恢复或上下文压缩时生效。"
+            )
+        }
     }
 
     // MARK: Task room detail actions

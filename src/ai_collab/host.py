@@ -487,6 +487,7 @@ class HarnessHost:
                         "participant_generation"
                     ],
                     participant_state_revision=participant["state_revision"],
+                    mark_objective_issued=False,
                 )
             except (
                 DeliveryError,
@@ -532,6 +533,7 @@ class HarnessHost:
         participant_id: str,
         participant_generation: int,
         participant_state_revision: int,
+        mark_objective_issued: bool = True,
     ) -> dict[str, str]:
         if self.delivery is None:
             scenario, participants = self.store.delivery_snapshot(
@@ -611,7 +613,33 @@ class HarnessHost:
             participant_generation=participant_generation,
             participant_state_revision=participant_state_revision,
             collaboration_context=collaboration_context,
+            issued_objective_revision=(
+                collaboration_context["scenario"]["objective"]["revision"]
+                if mark_objective_issued
+                else None
+            ),
         )
+
+    def _project_participant_objective_issuance(
+        self,
+        *,
+        project_instance_id: str,
+        scenario_id: str,
+        participant: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        projected = dict(participant)
+        try:
+            projected["issued_objective_revision"] = (
+                self.participant_auth.issued_objective_revision(
+                    project_instance_id=project_instance_id,
+                    scenario_id=scenario_id,
+                    participant_id=participant["participant_id"],
+                    participant_generation=participant["participant_generation"],
+                )
+            )
+        except (ParticipantAuthError, OSError):
+            projected["issued_objective_revision"] = 0
+        return projected
 
     def _reconcile_scenario_resumes(self) -> None:
         for pending in self.store.pending_scenario_resume_requests():
@@ -1788,6 +1816,9 @@ class HarnessHost:
                 objective=payload["objective"],
                 acceptance_criteria=payload["acceptance_criteria"],
             )
+            self._refresh_participant_collaboration_contexts(
+                target["project_instance_id"], target["scenario_id"]
+            )
         elif operation == "scenario.diagnostic":
             result = self.store.scenario_diagnostic(
                 target["project_instance_id"], target["scenario_id"]
@@ -2902,6 +2933,14 @@ class HarnessHost:
             result = self.store.list_participants(
                 target["project_instance_id"], target["scenario_id"]
             )
+            result["participants"] = [
+                self._project_participant_objective_issuance(
+                    project_instance_id=target["project_instance_id"],
+                    scenario_id=target["scenario_id"],
+                    participant=participant,
+                )
+                for participant in result["participants"]
+            ]
             operation_id = f"read-{request['request_id']}"
         elif operation == "participant.template.list":
             if self.participants is None:

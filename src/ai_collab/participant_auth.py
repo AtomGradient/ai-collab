@@ -45,6 +45,7 @@ class ParticipantAuthStore:
         self.socket_path = Path(socket_path).resolve()
         self.root = self.state_root / "participant-contexts"
         self.collaboration_root = self.state_root / "participant-collaboration"
+        self.issuance_root = self.state_root / "participant-objective-issuance"
         self._ensure_root()
 
     @staticmethod
@@ -93,6 +94,23 @@ class ParticipantAuthStore:
             f"participant-{canonical_json_sha256(identity)}.json"
         )
 
+    def _issuance_path(
+        self,
+        project_instance_id: str,
+        scenario_id: str,
+        participant_id: str,
+        participant_generation: int,
+    ) -> Path:
+        identity = self._identity(
+            project_instance_id,
+            scenario_id,
+            participant_id,
+            participant_generation,
+        )
+        return self.issuance_root / (
+            f"participant-{canonical_json_sha256(identity)}.json"
+        )
+
     def ensure(
         self,
         *,
@@ -102,6 +120,7 @@ class ParticipantAuthStore:
         participant_generation: int,
         participant_state_revision: int,
         collaboration_context: Mapping[str, Any] | None = None,
+        issued_objective_revision: int | None = None,
     ) -> dict[str, str]:
         """Return stable launch material, creating it atomically when absent."""
 
@@ -111,6 +130,15 @@ class ParticipantAuthStore:
             or participant_state_revision < 1
         ):
             raise ParticipantAuthError("participant state revision is invalid")
+        if (
+            issued_objective_revision is not None
+            and (
+                not isinstance(issued_objective_revision, int)
+                or isinstance(issued_objective_revision, bool)
+                or issued_objective_revision < 0
+            )
+        ):
+            raise ParticipantAuthError("issued objective revision is invalid")
         identity = self._identity(
             project_instance_id,
             scenario_id,
@@ -157,12 +185,9 @@ class ParticipantAuthStore:
         )
         if path.exists() or path.is_symlink():
             value = self.read(identity)
-            if value["participant_state_revision"] == participant_state_revision:
-                self._write_collaboration(
-                    collaboration_path, identity, collaboration_context
-                )
-                return self._launch_material(path, collaboration_path)
-            value["participant_state_revision"] = participant_state_revision
+            if value["participant_state_revision"] != participant_state_revision:
+                value["participant_state_revision"] = participant_state_revision
+                self._write(path, value)
         else:
             value = {
                 "schema_version": CONTEXT_SCHEMA_VERSION,
@@ -172,8 +197,10 @@ class ParticipantAuthStore:
                 "host_socket_path": str(self.socket_path),
                 "participant_capability": secrets.token_hex(32),
             }
-        self._write(path, value)
+            self._write(path, value)
         self._write_collaboration(collaboration_path, identity, collaboration_context)
+        if issued_objective_revision is not None:
+            self._write_issuance(identity, issued_objective_revision)
         return self._launch_material(path, collaboration_path)
 
     def _launch_material(
@@ -384,6 +411,56 @@ class ParticipantAuthStore:
             raise ParticipantAuthError("participant context binding differs")
         return value
 
+    def issued_objective_revision(
+        self,
+        *,
+        project_instance_id: str,
+        scenario_id: str,
+        participant_id: str,
+        participant_generation: int,
+    ) -> int:
+        identity = self._identity(
+            project_instance_id,
+            scenario_id,
+            participant_id,
+            participant_generation,
+        )
+        path = self._issuance_path(**identity)
+        if path.is_symlink() or not path.is_file():
+            raise ParticipantAuthError("participant objective issuance is unavailable")
+        details = path.stat()
+        if details.st_uid != os.getuid() or stat.S_IMODE(details.st_mode) != 0o600:
+            raise ParticipantAuthError("participant objective issuance permissions differ")
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ParticipantAuthError(
+                "participant objective issuance is invalid"
+            ) from exc
+        if (
+            not isinstance(value, dict)
+            or set(value) != {"schema_version", *identity, "issued_objective_revision"}
+            or value["schema_version"] != 1
+            or any(value[key] != item for key, item in identity.items())
+            or not isinstance(value["issued_objective_revision"], int)
+            or isinstance(value["issued_objective_revision"], bool)
+            or value["issued_objective_revision"] < 0
+        ):
+            raise ParticipantAuthError("participant objective issuance differs")
+        return value["issued_objective_revision"]
+
+    def _write_issuance(
+        self, identity: Mapping[str, Any], issued_objective_revision: int
+    ) -> None:
+        self._write(
+            self._issuance_path(**identity),
+            {
+                "schema_version": 1,
+                **identity,
+                "issued_objective_revision": issued_objective_revision,
+            },
+        )
+
     def revoke(
         self,
         *,
@@ -410,6 +487,15 @@ class ParticipantAuthStore:
         if collaboration_path.is_symlink():
             raise ParticipantAuthError("participant collaboration path is unsafe")
         collaboration_path.unlink(missing_ok=True)
+        issuance_path = self._issuance_path(
+            project_instance_id,
+            scenario_id,
+            participant_id,
+            participant_generation,
+        )
+        if issuance_path.is_symlink():
+            raise ParticipantAuthError("participant objective issuance path is unsafe")
+        issuance_path.unlink(missing_ok=True)
         self._fsync_root()
 
     def revoke_scenario(self, project_instance_id: str, scenario_id: str) -> None:
@@ -443,12 +529,29 @@ class ParticipantAuthStore:
                 and value.get("participant", {}).get("participant_id")
             ):
                 path.unlink()
+        for path in self.issuance_root.glob("participant-*.json"):
+            if path.is_symlink() or not path.is_file():
+                raise ParticipantAuthError(
+                    "participant objective issuance path is unsafe"
+                )
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise ParticipantAuthError(
+                    "participant objective issuance is invalid"
+                ) from exc
+            if (
+                value.get("project_instance_id") == project_instance_id
+                and value.get("scenario_id") == scenario_id
+            ):
+                path.unlink()
         self._fsync_root()
 
     def _ensure_root(self) -> None:
         self.root.mkdir(parents=True, mode=0o700, exist_ok=True)
         self.collaboration_root.mkdir(parents=True, mode=0o700, exist_ok=True)
-        for root in (self.root, self.collaboration_root):
+        self.issuance_root.mkdir(parents=True, mode=0o700, exist_ok=True)
+        for root in (self.root, self.collaboration_root, self.issuance_root):
             details = root.stat()
             if (
                 root.is_symlink()
@@ -458,7 +561,7 @@ class ParticipantAuthStore:
                 raise ParticipantAuthError("participant context root differs")
 
     def _fsync_root(self) -> None:
-        for root in (self.root, self.collaboration_root):
+        for root in (self.root, self.collaboration_root, self.issuance_root):
             descriptor = os.open(root, os.O_RDONLY)
             try:
                 os.fsync(descriptor)

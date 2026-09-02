@@ -405,6 +405,7 @@ final class HarnessContractTests: XCTestCase {
             "observed_state": "degraded",
             "runtime_binding_id": "runtime-binding-3",
             "presentation_binding_id": NSNull(),
+            "issued_objective_revision": 4,
             "degraded": [
                 "reason": "cleanup_pending",
                 "cleanup_pending": true,
@@ -414,6 +415,7 @@ final class HarnessContractTests: XCTestCase {
         XCTAssertTrue(participant.canRecover)
         XCTAssertTrue(participant.canForceStop)
         XCTAssertTrue(participant.cleanupPending)
+        XCTAssertEqual(participant.issuedObjectiveRevision, 4)
 
         let resource = try XCTUnwrap(ResourceLeaseRecord([
             "lease_id": "lease-stale-one",

@@ -672,6 +672,15 @@ struct ContentView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+                if let scenario = model.selectedScenario,
+                   scenario.objectiveRevision > 0 {
+                    let issued = participant.issuedObjectiveRevision
+                        >= scenario.objectiveRevision
+                    Text(issued ? S.Objective.issued : S.Objective.pendingIssuance)
+                        .font(.caption)
+                        .foregroundStyle(issued ? Color.secondary : Color.orange)
+                        .help(issued ? "" : S.Objective.pendingIssuanceHelp)
+                }
                 if participant.cleanupPending {
                     Text(
                         participant.degradedReason.map(

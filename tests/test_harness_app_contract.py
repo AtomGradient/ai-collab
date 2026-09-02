@@ -506,3 +506,21 @@ def test_guide_is_a_dismissable_centered_card_deck() -> None:
     presentation = view_model.split("func guidePresentation", 1)[1].split("private var completedMilestoneIndex", 1)[0]
     assert "case .attend, .working, .inconsistent:" in presentation
     assert "(completedMilestoneIndex, nil)" in presentation
+
+
+def test_objective_workbench_and_issuance_status_use_authoritative_revisions() -> None:
+    content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
+    models = (APP_ROOT / "HarnessModels.swift").read_text(encoding="utf-8")
+    view_model = (APP_ROOT / "HarnessViewModel.swift").read_text(encoding="utf-8")
+    strings = (APP_ROOT / "Strings.swift").read_text(encoding="utf-8")
+
+    assert 'operation: "scenario.objective.append"' in view_model
+    assert '"objective": objective' in view_model
+    assert "scenario.objectiveRevision" in content
+    assert re.search(
+        r"participant\.issuedObjectiveRevision\s*>=\s*scenario\.objectiveRevision",
+        content,
+    )
+    assert 'value["issued_objective_revision"] as? Int ?? 0' in models
+    assert 't("Issued", "已下发")' in strings
+    assert 't("Pending issuance", "待下发")' in strings

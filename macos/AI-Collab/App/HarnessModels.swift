@@ -164,6 +164,7 @@ struct ParticipantRecord: Identifiable, Equatable {
     /// "tui" or "headless", as projected by the Host record. Only a TUI
     /// colleague has a window an employee can focus and assign work in.
     let interactionMode: String?
+    let issuedObjectiveRevision: Int
 
     var isInteractive: Bool { interactionMode == "tui" }
 
@@ -212,6 +213,7 @@ struct ParticipantRecord: Identifiable, Equatable {
         self.observedState = observedState
         self.runtimeBindingID = value["runtime_binding_id"] as? String
         self.interactionMode = value["interaction_mode"] as? String
+        self.issuedObjectiveRevision = value["issued_objective_revision"] as? Int ?? 0
         self.presentationBindingID = value["presentation_binding_id"] as? String
         let degraded = value["degraded"] as? [String: Any]
         self.degradedReason = degraded?["reason"] as? String

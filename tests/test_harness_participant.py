@@ -925,7 +925,7 @@ def test_real_ipc_participant_add_start_status_stop(tmp_path: Path) -> None:
         assert client.list_participants(
             project_instance_id=PROJECT_ID, scenario_id=SCENARIO_ID
         ) == {
-            "participants": [added],
+            "participants": [{**added, "issued_objective_revision": 0}],
             "participant_configurations": [
                 {
                     "participant_id": PARTICIPANT_ID,
@@ -1105,6 +1105,85 @@ def test_real_ipc_participant_add_start_status_stop(tmp_path: Path) -> None:
         assert operations["participant.add"]["state"] == "desired_committed"
         assert operations["participant.start"]["state"] == "succeeded"
         assert operations["participant.stop"]["state"] == "succeeded"
+
+
+def test_objective_issuance_stays_pending_until_participant_restart(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    with running_host(state_root) as (_, client, _):
+        created = client.create_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            project_binding_digest=PROJECT_DIGEST,
+            objective="Ship the first objective",
+            request_id="objective-issuance-create",
+        )["scenario"]
+        added = _add_test_participant(
+            client,
+            scenario=created,
+            participant_id=PARTICIPANT_ID,
+            request_prefix="objective-issuance",
+        )
+        opened = client.open_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=created["scenario_generation"],
+            scenario_state_revision=created["state_revision"],
+            request_id="objective-issuance-open",
+        )["scenario"]
+        ready = _start_test_participant(
+            client,
+            scenario=opened,
+            participant=added,
+            participant_id=PARTICIPANT_ID,
+            request_prefix="objective-issuance",
+        )
+        listed = client.list_participants(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+        )["participants"][0]
+        assert listed["issued_objective_revision"] == 1
+
+        revised = client.append_scenario_objective(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=opened["scenario_generation"],
+            scenario_state_revision=opened["state_revision"],
+            objective="Ship the revised objective",
+            acceptance_criteria="The participant receives revision two",
+            request_id="objective-issuance-revise",
+        )["scenario"]
+        listed = client.list_participants(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+        )["participants"][0]
+        assert len(revised["objective_history"]) == 2
+        assert listed["issued_objective_revision"] == 1
+
+        stopped = client.stop_participant(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            participant_id=PARTICIPANT_ID,
+            scenario_generation=revised["scenario_generation"],
+            scenario_state_revision=revised["state_revision"],
+            participant_generation=ready["participant_generation"],
+            participant_state_revision=ready["state_revision"],
+            request_id="objective-issuance-stop",
+        )["participant"]
+        restarted = _start_test_participant(
+            client,
+            scenario=revised,
+            participant=stopped,
+            participant_id=PARTICIPANT_ID,
+            request_prefix="objective-issuance-restart",
+        )
+        assert restarted["observed_state"] == "ready"
+        listed = client.list_participants(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+        )["participants"][0]
+        assert listed["issued_objective_revision"] == 2
 
 
 def test_participant_list_projects_current_nonsecret_model_binding(tmp_path: Path) -> None:
