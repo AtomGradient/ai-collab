@@ -76,6 +76,12 @@
             "prompt_pattern": "(?s)Accessing\\s+workspace:.*Quick\\s+safety\\s+check:.*\\n[ \\t]*❯[ \\t]+No,\\s+exit[ \\t]*\\n[ \\t]+Yes,\\s+I\\s+trust\\s+this\\s+folder[ \\t]*\\n\\s*Enter\\s+to\\s+confirm",
             "confirm_sequence": ["\u001b[B", "\r"],
             "requires_workspace_path": true
+          },
+          {
+            "rule_id": "startup.claude-long-session-summary",
+            "prompt_pattern": "(?s)This\\s+session\\s+is\\s+\\d+h\\s+\\d+m\\s+old\\s+and\\s+\\d+(?:\\.\\d+)?[kKmM]?\\s+tokens\\..*Resuming\\s+the\\s+full\\s+session\\s+will\\s+consume\\s+a\\s+substantial\\s+portion\\s+of\\s+your\\s+usage\\s+limits\\.\\s+We\\s+recommend\\s+resuming\\s+from\\s+a\\s+summary\\..*\\n[ \\t]*❯[ \\t]+1\\.\\s+Resume\\s+from\\s+summary\\s+\\(recommended\\)[ \\t]*\\n[ \\t]+2\\.\\s+Resume\\s+full\\s+session\\s+as-is[ \\t]*\\n[ \\t]+3\\.\\s+Don't\\s+ask\\s+me\\s+again[ \\t]*\\n\\s*Enter\\s+to\\s+confirm\\s+·\\s+Esc\\s+to\\s+cancel",
+            "confirm_sequence": ["\r"],
+            "requires_workspace_path": true
           }
         ],
         "ready_pattern": "(?m)^\\s*❯\\s*$",

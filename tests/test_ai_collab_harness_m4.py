@@ -2320,6 +2320,118 @@ def test_claude_trust_prompt_pattern_requires_current_menu_shape() -> None:
     ) is None
 
 
+def test_claude_long_session_prompt_accepts_recommended_summary(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    workspace = tmp_path / "trusted"
+    workspace.mkdir()
+    profile = participant_driver._runtime_profiles()[  # noqa: SLF001
+        "runtime-profile.claude"
+    ]
+    prompt = (
+        "This session is 9h 57m old and 450.1k tokens.\n\n"
+        "Resuming the full session will consume a substantial portion of your usage\n"
+        "limits. We recommend resuming from a summary.\n\n"
+        "❯ 1. Resume from summary (recommended)\n"
+        "  2. Resume full session as-is\n"
+        "  3. Don't ask me again\n\n"
+        "Enter to confirm · Esc to cancel"
+    )
+    ready = "Claude Code v2.1.258\n❯"
+    session = _StartupSession([prompt, prompt, ready, ready, ready, ready])
+    monkeypatch.setattr(participant_driver, "STARTUP_POLL_SECONDS", 0)
+    monkeypatch.setattr(participant_driver, "_process_cwd", lambda pid: workspace)
+
+    evidence = asyncio.run(
+        participant_driver._wait_startup_ready(  # noqa: SLF001
+            session, profile, workspace, 1234
+        )
+    )
+
+    assert session.sent == [("\r", True)]
+    assert evidence["outcome"] == "accepted"
+
+
+def test_claude_long_session_prompt_requires_recommended_menu_shape() -> None:
+    gate = participant_driver._runtime_profiles()[  # noqa: SLF001
+        "runtime-profile.claude"
+    ]["startup_gate"]
+    rule = next(
+        rule
+        for rule in gate["prompt_rules"]
+        if rule["rule_id"] == "startup.claude-long-session-summary"
+    )
+    pattern = rule["prompt_pattern"]
+    screen = (
+        "This session is 9h 57m old and 450.1k tokens.\n\n"
+        "Resuming the full session will consume a substantial portion of your usage\n"
+        "limits. We recommend resuming from a summary.\n\n"
+        "❯ 1. Resume from summary (recommended)\n"
+        "  2. Resume full session as-is\n"
+        "  3. Don't ask me again\n\n"
+        "Enter to confirm · Esc to cancel"
+    )
+
+    assert re.search(pattern, screen) is not None
+    assert re.search(pattern, screen.replace("❯ 1.", "  1.")) is None
+    assert re.search(
+        pattern,
+        screen.replace("❯ 1. Resume", "  1. Resume").replace(
+            "  2. Resume", "❯ 2. Resume"
+        ),
+    ) is None
+    assert re.search(pattern, screen.replace("  3. Don't ask me again\n", "")) is None
+
+
+def test_claude_startup_handles_trust_then_long_session_with_residual_text(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    workspace = tmp_path / "trusted"
+    workspace.mkdir()
+    profile = participant_driver._runtime_profiles()[  # noqa: SLF001
+        "runtime-profile.claude"
+    ]
+    trust_prompt = (
+        "Accessing workspace:\n\n"
+        f"{workspace}\n\n"
+        "Quick safety check: Is this a project you created or one you trust?\n\n"
+        "❯ No, exit\n"
+        "  Yes, I trust this folder\n\n"
+        "Enter to confirm · Esc to cancel"
+    )
+    long_session_prompt = (
+        "This session is 9h 57m old and 450.1k tokens.\n\n"
+        "Resuming the full session will consume a substantial portion of your usage\n"
+        "limits. We recommend resuming from a summary.\n\n"
+        "❯ 1. Resume from summary (recommended)\n"
+        "  2. Resume full session as-is\n"
+        "  3. Don't ask me again\n\n"
+        "Enter to confirm · Esc to cancel"
+    )
+    ready = "Claude Code v2.1.258\n❯"
+    session = _StartupSession(
+        [
+            trust_prompt,
+            f"{trust_prompt}\n\n{long_session_prompt}",
+            ready,
+            ready,
+            ready,
+            ready,
+        ]
+    )
+    monkeypatch.setattr(participant_driver, "STARTUP_POLL_SECONDS", 0)
+    monkeypatch.setattr(participant_driver, "_process_cwd", lambda pid: workspace)
+
+    evidence = asyncio.run(
+        participant_driver._wait_startup_ready(  # noqa: SLF001
+            session, profile, workspace, 1234
+        )
+    )
+
+    assert session.sent == [("\x1b[B", True), ("\r", True), ("\r", True)]
+    assert evidence["outcome"] == "accepted"
+
+
 def test_startup_trust_gate_fails_closed_on_workspace_mismatch(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
