@@ -867,6 +867,18 @@ struct DeliveryKindCount: Identifiable, Equatable {
     let count: Int
 }
 
+enum DeliveryFinalStateCategory: Equatable {
+    case consumptionAcknowledged
+    case repliedWithoutConsumptionAck
+    case noConsumptionAckOrReply
+    case recipientDeleted
+}
+
+struct DeliveryFinalStateCount: Equatable {
+    let category: DeliveryFinalStateCategory
+    let count: Int
+}
+
 struct DeliveryDistributionRecord: Equatable {
     static let preferredKinds = [
         "collaboration.review-request",
@@ -882,18 +894,45 @@ struct DeliveryDistributionRecord: Equatable {
     let consumptionAcknowledged: Int
     let repliedWithoutConsumptionAck: Int
     let noConsumptionAckOrReply: Int
+    let recipientDeleted: Int
     let settledTotal: Int
     let kinds: [DeliveryKindCount]
 
+    var finalStates: [DeliveryFinalStateCount] {
+        var values = [
+            DeliveryFinalStateCount(
+                category: .consumptionAcknowledged,
+                count: consumptionAcknowledged
+            ),
+            DeliveryFinalStateCount(
+                category: .repliedWithoutConsumptionAck,
+                count: repliedWithoutConsumptionAck
+            ),
+            DeliveryFinalStateCount(
+                category: .noConsumptionAckOrReply,
+                count: noConsumptionAckOrReply
+            ),
+        ]
+        if recipientDeleted > 0 {
+            values.append(
+                DeliveryFinalStateCount(
+                    category: .recipientDeleted,
+                    count: recipientDeleted
+                )
+            )
+        }
+        return values
+    }
+
     init(summary: DeliverySummaryRecord) {
         let consumed = summary.states["consumed"] ?? 0
-        let settled = consumed
-            + (summary.states["delivered"] ?? 0)
-            + (summary.states["recipient_deleted"] ?? 0)
+        let delivered = summary.states["delivered"] ?? 0
+        let deleted = summary.states["recipient_deleted"] ?? 0
         consumptionAcknowledged = consumed
         repliedWithoutConsumptionAck = summary.deliveredWithReply
-        noConsumptionAckOrReply = settled - consumed - summary.deliveredWithReply
-        settledTotal = settled
+        noConsumptionAckOrReply = delivered - summary.deliveredWithReply
+        recipientDeleted = deleted
+        settledTotal = consumed + delivered + deleted
         let preferred = Self.preferredKinds.filter { (summary.kinds[$0] ?? 0) > 0 }
         let preferredSet = Set(preferred)
         let additional = summary.kinds.keys.filter {

@@ -1686,23 +1686,18 @@ private struct DeliveryStateDistributionPanel: View {
     let distribution: DeliveryDistributionRecord
 
     private var segments: [(title: String, count: Int, color: Color)] {
-        [
-            (
-                S.DeliveryDistribution.consumptionAcknowledged,
-                distribution.consumptionAcknowledged,
-                .teal
-            ),
-            (
-                S.DeliveryDistribution.repliedWithoutConsumptionAck,
-                distribution.repliedWithoutConsumptionAck,
-                .green
-            ),
-            (
-                S.DeliveryDistribution.noConsumptionAckOrReply,
-                distribution.noConsumptionAckOrReply,
-                .orange
-            ),
-        ]
+        distribution.finalStates.map { value in
+            switch value.category {
+            case .consumptionAcknowledged:
+                (S.DeliveryDistribution.consumptionAcknowledged, value.count, .teal)
+            case .repliedWithoutConsumptionAck:
+                (S.DeliveryDistribution.repliedWithoutConsumptionAck, value.count, .green)
+            case .noConsumptionAckOrReply:
+                (S.DeliveryDistribution.noConsumptionAckOrReply, value.count, .orange)
+            case .recipientDeleted:
+                (S.DeliveryDistribution.recipientDeleted, value.count, .gray)
+            }
+        }
     }
 
     var body: some View {

@@ -535,6 +535,7 @@ enum S {
         static var noConsumptionAckOrReply: String {
             t("Ack not stored and no reply", "ack 未落库，且无回复")
         }
+        static var recipientDeleted: String { t("Recipient deleted", "收件人已删除") }
         static func kind(_ value: String) -> String {
             switch value {
             case "collaboration.review-request": return "review-request"

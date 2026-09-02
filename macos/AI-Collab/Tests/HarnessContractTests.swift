@@ -300,7 +300,9 @@ final class HarnessContractTests: XCTestCase {
         XCTAssertEqual(distribution.consumptionAcknowledged, 50)
         XCTAssertEqual(distribution.repliedWithoutConsumptionAck, 11)
         XCTAssertEqual(distribution.noConsumptionAckOrReply, 8)
+        XCTAssertEqual(distribution.recipientDeleted, 0)
         XCTAssertEqual(distribution.settledTotal, 69)
+        XCTAssertEqual(distribution.finalStates.map(\.count), [50, 11, 8])
         XCTAssertEqual(
             distribution.kinds.map(\.id),
             [
@@ -316,6 +318,31 @@ final class HarnessContractTests: XCTestCase {
         XCTAssertEqual(distribution.kinds.map(\.count), [23, 23, 12, 5, 5, 1, 0])
         XCTAssertEqual(distribution.kinds.last?.id, "collaboration.message")
         XCTAssertEqual(distribution.kinds.last?.count, 0)
+
+        var withDeletedRecipient = m2DeliverySummaryFixture
+        withDeletedRecipient["total"] = 72
+        withDeletedRecipient["states"] = [
+            "consumed": 50,
+            "delivered": 19,
+            "recipient_deleted": 3,
+        ]
+        withDeletedRecipient["kinds"] = [
+            "collaboration.message": 0,
+            "collaboration.notice": 15,
+            "collaboration.pushback": 5,
+            "collaboration.question": 1,
+            "collaboration.response": 5,
+            "collaboration.review-request": 23,
+            "collaboration.review-response": 23,
+        ]
+        withDeletedRecipient["degraded_total"] = 3
+        let deletedSummary = try XCTUnwrap(
+            DeliverySummaryRecord(withDeletedRecipient)
+        )
+        let deletedDistribution = DeliveryDistributionRecord(summary: deletedSummary)
+        XCTAssertEqual(deletedDistribution.noConsumptionAckOrReply, 8)
+        XCTAssertEqual(deletedDistribution.recipientDeleted, 3)
+        XCTAssertEqual(deletedDistribution.finalStates.map(\.count), [50, 11, 8, 3])
     }
 
     func testDegradedParticipantAndStaleResourceModelsExposeExactRepairActions() throws {
