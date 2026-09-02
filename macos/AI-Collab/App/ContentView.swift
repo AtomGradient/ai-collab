@@ -2,7 +2,64 @@
 // Copyright © 2026 AtomGradient
 // 版权所有 © 2026 质子梯度（北京）科技有限公司
 
+import AppKit
 import SwiftUI
+
+/// Instrument palette for *categorical* chart series only.  Semantic colours
+/// (good / warning / unobserved) stay system colours so they keep their
+/// conventional meaning and accessibility behaviour.
+extension Color {
+    fileprivate static func instrument(
+        light: (Double, Double, Double),
+        dark: (Double, Double, Double)
+    ) -> Color {
+        Color(
+            nsColor: NSColor(name: nil) { appearance in
+                let channels = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+                    ? dark
+                    : light
+                return NSColor(
+                    srgbRed: channels.0,
+                    green: channels.1,
+                    blue: channels.2,
+                    alpha: 1
+                )
+            }
+        )
+    }
+
+    /// Deep petrol: the strongest evidence tier.
+    fileprivate static let evidenceStrong = instrument(
+        light: (0.165, 0.365, 0.384),
+        dark: (0.435, 0.702, 0.714)
+    )
+    /// Muted petrol: evidence present but weaker.
+    fileprivate static let evidenceSoft = instrument(
+        light: (0.498, 0.690, 0.702),
+        dark: (0.239, 0.420, 0.427)
+    )
+    /// Ochre: settled without evidence.
+    fileprivate static let evidenceAbsent = instrument(
+        light: (0.647, 0.439, 0.110),
+        dark: (0.827, 0.643, 0.361)
+    )
+
+    /// Foreground for a label drawn on top of the matching series colour.
+    /// Picked per series because the palette deliberately mixes light and
+    /// dark tiers, so one shared "white" would fail contrast on half of them.
+    fileprivate static let onEvidenceStrong = instrument(
+        light: (1, 1, 1),
+        dark: (0.055, 0.086, 0.098)
+    )
+    fileprivate static let onEvidenceSoft = instrument(
+        light: (0.055, 0.145, 0.153),
+        dark: (0.906, 0.941, 0.945)
+    )
+    fileprivate static let onEvidenceAbsent = instrument(
+        light: (1, 1, 1),
+        dark: (0.129, 0.098, 0.043)
+    )
+}
 
 private enum HighRiskIntent: Identifiable {
     case repairScenario
@@ -490,7 +547,9 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
             } else {
                 Text(scenario.objective)
-                    .font(.body)
+                    .font(.title3)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
                 if !scenario.acceptanceCriteria.isEmpty {
                     Text(S.Objective.acceptanceCriteria)
                         .font(.caption.bold())
@@ -502,18 +561,23 @@ struct ContentView: View {
             }
             HStack {
                 TextField(S.Objective.objectivePlaceholder, text: $model.objectiveDraft)
+                    .controlSize(.small)
                 TextField(
                     S.Objective.acceptancePlaceholder,
                     text: $model.acceptanceCriteriaDraft
                 )
+                .controlSize(.small)
                 Button(S.Objective.addRevision, systemImage: "plus") {
                     Task { await model.appendScenarioObjective() }
                 }
+                .controlSize(.small)
                 .disabled(model.isBusy)
             }
+            .font(.callout)
             validationBanner(for: .objective)
         }
-        .padding(.vertical, 2)
+        .padding(10)
+        .background(.secondary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
     }
 
     // MARK: - Scenario header
@@ -1179,6 +1243,8 @@ struct ContentView: View {
                 }
             }
         }
+        .padding(10)
+        .background(.secondary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
     }
 
     private var collaborationHealthSection: some View {
@@ -1188,7 +1254,7 @@ struct ContentView: View {
             if let health = model.collaborationHealth {
                 LazyVGrid(
                     columns: [
-                        GridItem(.adaptive(minimum: 140, maximum: 220), spacing: 10)
+                        GridItem(.adaptive(minimum: 128, maximum: 240), spacing: 10)
                     ],
                     alignment: .leading,
                     spacing: 10
@@ -1232,6 +1298,8 @@ struct ContentView: View {
                     .padding(.vertical, 12)
             }
         }
+        .padding(10)
+        .background(.secondary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
     }
 
     private func healthColor(for ratio: CollaborationHealthRatio) -> Color {
@@ -1766,17 +1834,26 @@ struct DiagnosticsView: View {
 private struct DeliveryStateDistributionPanel: View {
     let distribution: DeliveryDistributionRecord
 
-    private var segments: [(title: String, count: Int, color: Color)] {
+    private var segments: [(title: String, count: Int, color: Color, onColor: Color)] {
         distribution.finalStates.map { value in
             switch value.category {
             case .consumptionAcknowledged:
-                (S.DeliveryDistribution.consumptionAcknowledged, value.count, .teal)
+                (
+                    S.DeliveryDistribution.consumptionAcknowledged,
+                    value.count, .evidenceStrong, .onEvidenceStrong
+                )
             case .repliedWithoutConsumptionAck:
-                (S.DeliveryDistribution.repliedWithoutConsumptionAck, value.count, .green)
+                (
+                    S.DeliveryDistribution.repliedWithoutConsumptionAck,
+                    value.count, .evidenceSoft, .onEvidenceSoft
+                )
             case .noConsumptionAckOrReply:
-                (S.DeliveryDistribution.noConsumptionAckOrReply, value.count, .orange)
+                (
+                    S.DeliveryDistribution.noConsumptionAckOrReply,
+                    value.count, .evidenceAbsent, .onEvidenceAbsent
+                )
             case .recipientDeleted:
-                (S.DeliveryDistribution.recipientDeleted, value.count, .gray)
+                (S.DeliveryDistribution.recipientDeleted, value.count, .gray, .white)
             }
         }
     }
@@ -1805,7 +1882,7 @@ private struct DeliveryStateDistributionPanel: View {
                                     Text(String(segment.count))
                                         .font(.caption.weight(.semibold))
                                         .monospacedDigit()
-                                        .foregroundStyle(.white)
+                                        .foregroundStyle(segment.onColor)
                                 }
                             }
                             .frame(width: width)
@@ -1866,7 +1943,7 @@ private struct DeliveryKindDistributionPanel: View {
                             RoundedRectangle(cornerRadius: 3)
                                 .fill(.quaternary)
                             RoundedRectangle(cornerRadius: 3)
-                                .fill(generic ? Color.green : Color.teal)
+                                .fill(generic ? Color.green : Color.evidenceStrong)
                                 .frame(width: proxy.size.width * fraction)
                         }
                     }
@@ -1902,29 +1979,33 @@ private struct CollaborationHealthMetricTile: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(color)
-                    .frame(width: 7, height: 7)
-                Text(title)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-            }
-            HStack(alignment: .firstTextBaseline, spacing: 3) {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(alignment: .firstTextBaseline, spacing: 2) {
                 Text(String(value))
-                    .font(.title3.weight(.semibold))
+                    .font(.system(size: 26, weight: .semibold))
                     .monospacedDigit()
+                    .foregroundStyle(color)
                 if let total {
-                    Text("/ \(total)")
-                        .font(.callout)
+                    Text("/\(total)")
+                        .font(.system(size: 15, weight: .regular))
                         .monospacedDigit()
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.tertiary)
                 }
             }
+            HStack(spacing: 5) {
+                Circle()
+                    .fill(color)
+                    .frame(width: 6, height: 6)
+                Text(title)
+                    .font(.system(size: 10, weight: .medium))
+                    .textCase(.uppercase)
+                    .tracking(0.7)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
-        .frame(maxWidth: .infinity, minHeight: 58, alignment: .leading)
+        .frame(maxWidth: .infinity, minHeight: 66, alignment: .leading)
         .padding(10)
         .background(.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
         .overlay {
