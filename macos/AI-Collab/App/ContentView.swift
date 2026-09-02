@@ -1153,8 +1153,11 @@ struct ContentView: View {
     }
 
     private func healthColor(for ratio: CollaborationHealthRatio) -> Color {
-        guard ratio.total > 0 else { return .secondary }
-        return ratio.value == ratio.total ? .green : .orange
+        switch ratio.state {
+        case .unobserved: .secondary
+        case .complete: .green
+        case .incomplete: .orange
+        }
     }
 
     private var inspectorSection: some View {

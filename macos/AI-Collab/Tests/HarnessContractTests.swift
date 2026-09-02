@@ -250,6 +250,39 @@ final class HarnessContractTests: XCTestCase {
             ["2/2", "29/29", "61/69", "69/69", "1"]
         )
 
+        var withQueued = fixture
+        withQueued["total"] = 70
+        withQueued["states"] = ["consumed": 50, "delivered": 19, "queued": 1]
+        withQueued["kinds"] = [
+            "collaboration.message": 0,
+            "collaboration.notice": 13,
+            "collaboration.pushback": 5,
+            "collaboration.question": 1,
+            "collaboration.response": 5,
+            "collaboration.review-request": 23,
+            "collaboration.review-response": 23,
+        ]
+        XCTAssertEqual(try values(withQueued), ["2/2", "29/29", "61/69", "69/69", "0"])
+
+        let queuedOnly = try XCTUnwrap(DeliverySummaryRecord([
+            "total": 1,
+            "states": ["queued": 1],
+            "kinds": ["collaboration.message": 0, "collaboration.notice": 1],
+            "reply_expected_total": 0,
+            "reply_expected_closed": 0,
+            "delivered_with_reply": 0,
+            "attempted_total": 0,
+            "first_attempt_total": 0,
+            "degraded_total": 0,
+        ]))
+        let queuedHealth = CollaborationHealthRecord(
+            summary: queuedOnly,
+            readyParticipants: 0,
+            totalParticipants: 0
+        )
+        XCTAssertEqual(queuedHealth.endToEndEvidence.displayValue, "0/0")
+        XCTAssertEqual(queuedHealth.endToEndEvidence.state, .unobserved)
+
         let summary = try XCTUnwrap(DeliverySummaryRecord(fixture))
         XCTAssertEqual(summary.states["consumed", default: 0] + 19, 69)
         XCTAssertEqual(summary.deliveredWithReply + 8, 19)

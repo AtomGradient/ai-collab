@@ -814,6 +814,17 @@ struct CollaborationHealthRatio: Equatable {
     let total: Int
 
     var displayValue: String { "\(value)/\(total)" }
+
+    var state: CollaborationHealthRatioState {
+        guard total > 0 else { return .unobserved }
+        return value == total ? .complete : .incomplete
+    }
+}
+
+enum CollaborationHealthRatioState: Equatable {
+    case unobserved
+    case complete
+    case incomplete
 }
 
 struct CollaborationHealthRecord: Equatable {
@@ -828,6 +839,9 @@ struct CollaborationHealthRecord: Equatable {
         readyParticipants: Int,
         totalParticipants: Int
     ) {
+        let settledDeliveries = (summary.states["consumed"] ?? 0)
+            + (summary.states["delivered"] ?? 0)
+            + (summary.states["recipient_deleted"] ?? 0)
         teamReady = CollaborationHealthRatio(
             value: readyParticipants,
             total: totalParticipants
@@ -838,7 +852,7 @@ struct CollaborationHealthRecord: Equatable {
         )
         endToEndEvidence = CollaborationHealthRatio(
             value: (summary.states["consumed"] ?? 0) + summary.deliveredWithReply,
-            total: summary.total
+            total: settledDeliveries
         )
         firstAttemptDelivery = CollaborationHealthRatio(
             value: summary.firstAttemptTotal,
