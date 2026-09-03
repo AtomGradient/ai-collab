@@ -3416,6 +3416,10 @@ def test_vendor_session_hook_captures_and_reuses_exact_identity(
     if provider == "codex":
         assert unproven_session_id is None
         assert "resume" not in unproven_argv
+        assert any(
+            value.startswith("hooks.UserPromptSubmit=")
+            for value in unproven_argv
+        )
     else:
         assert unproven_session_id is not None
         assert unproven_argv[-2:] == ("--session-id", unproven_session_id)
@@ -3571,6 +3575,173 @@ def test_claude_adopts_a_prompt_proven_session_selected_inside_the_owned_tui(
     )
     assert binding is not None
     assert binding["vendor_session_id"] == selected_session_id
+
+
+def test_codex_adopts_a_prompt_proven_session_selected_after_recreate(
+    tmp_path: Path,
+) -> None:
+    private_root = tmp_path / "participant"
+    private_root.mkdir()
+    launch_spec = {
+        "continuity_binding_ref": "vendor-session-slot:primary",
+    }
+    previous_session_id = "11111111-1111-4111-8111-111111111111"
+    selected_session_id = "22222222-2222-4222-8222-222222222222"
+    participant_driver._record_vendor_session_binding(  # noqa: SLF001
+        private_root, launch_spec, "codex", previous_session_id
+    )
+    participant_driver._write_private(  # noqa: SLF001
+        participant_driver._vendor_proof_path(private_root),  # noqa: SLF001
+        {
+            "schema_version": 1,
+            "provider": "codex",
+            "session_id": selected_session_id,
+            "source": "resume",
+        },
+    )
+    participant_driver._write_private(  # noqa: SLF001
+        participant_driver._vendor_activity_path(private_root),  # noqa: SLF001
+        {
+            "schema_version": 1,
+            "provider": "codex",
+            "session_id": selected_session_id,
+            "source": "UserPromptSubmit",
+        },
+    )
+    state = {
+        "vendor_provider": "codex",
+        "expected_vendor_session_id": None,
+        "vendor_resume_requested": False,
+        "vendor_session_identity_sha256": None,
+    }
+
+    identity = participant_driver._refresh_vendor_session_binding(  # noqa: SLF001
+        private_root, launch_spec, state
+    )
+
+    assert identity == hashlib.sha256(selected_session_id.encode()).hexdigest()
+    assert state["expected_vendor_session_id"] == selected_session_id
+    assert state["vendor_resume_requested"] is True
+    binding = participant_driver._stored_vendor_binding(  # noqa: SLF001
+        private_root, launch_spec, "codex"
+    )
+    assert binding is not None
+    assert binding["vendor_session_id"] == selected_session_id
+
+
+def test_codex_refuses_an_unprompted_session_selected_after_recreate(
+    tmp_path: Path,
+) -> None:
+    private_root = tmp_path / "participant"
+    private_root.mkdir()
+    launch_spec = {
+        "continuity_binding_ref": "vendor-session-slot:primary",
+    }
+    previous_session_id = "11111111-1111-4111-8111-111111111111"
+    selected_session_id = "22222222-2222-4222-8222-222222222222"
+    participant_driver._record_vendor_session_binding(  # noqa: SLF001
+        private_root, launch_spec, "codex", previous_session_id
+    )
+    participant_driver._write_private(  # noqa: SLF001
+        participant_driver._vendor_proof_path(private_root),  # noqa: SLF001
+        {
+            "schema_version": 1,
+            "provider": "codex",
+            "session_id": selected_session_id,
+            "source": "resume",
+        },
+    )
+    state = {
+        "vendor_provider": "codex",
+        "expected_vendor_session_id": None,
+        "vendor_resume_requested": False,
+        "vendor_session_identity_sha256": None,
+    }
+
+    with pytest.raises(
+        participant_driver.DriverError,
+        match="vendor session lifecycle proof differs",
+    ):
+        participant_driver._refresh_vendor_session_binding(  # noqa: SLF001
+            private_root, launch_spec, state
+        )
+
+    binding = participant_driver._stored_vendor_binding(  # noqa: SLF001
+        private_root, launch_spec, "codex"
+    )
+    assert binding is not None
+    assert binding["vendor_session_id"] == previous_session_id
+
+
+@pytest.mark.parametrize(
+    ("resume_requested", "record_activity", "accepted"),
+    [(False, True, True), (False, False, False), (True, True, False)],
+)
+def test_vendor_adopts_startup_rebind_only_after_explicit_recreate(
+    tmp_path: Path,
+    resume_requested: bool,
+    record_activity: bool,
+    accepted: bool,
+) -> None:
+    private_root = tmp_path / "participant"
+    private_root.mkdir()
+    launch_spec = {
+        "continuity_binding_ref": "vendor-session-slot:primary",
+    }
+    previous_session_id = "11111111-1111-4111-8111-111111111111"
+    fallback_session_id = "22222222-2222-4222-8222-222222222222"
+    participant_driver._record_vendor_session_binding(  # noqa: SLF001
+        private_root, launch_spec, "codex", previous_session_id
+    )
+    participant_driver._write_private(  # noqa: SLF001
+        participant_driver._vendor_proof_path(private_root),  # noqa: SLF001
+        {
+            "schema_version": 1,
+            "provider": "codex",
+            "session_id": fallback_session_id,
+            "source": "startup",
+        },
+    )
+    if record_activity:
+        participant_driver._write_private(  # noqa: SLF001
+            participant_driver._vendor_activity_path(private_root),  # noqa: SLF001
+            {
+                "schema_version": 1,
+                "provider": "codex",
+                "session_id": fallback_session_id,
+                "source": "UserPromptSubmit",
+            },
+        )
+    state = {
+        "vendor_provider": "codex",
+        "expected_vendor_session_id": (
+            previous_session_id if resume_requested else None
+        ),
+        "vendor_resume_requested": resume_requested,
+        "vendor_session_identity_sha256": None,
+    }
+
+    if not accepted:
+        with pytest.raises(
+            participant_driver.DriverError,
+            match="vendor session lifecycle proof differs",
+        ):
+            participant_driver._refresh_vendor_session_binding(  # noqa: SLF001
+                private_root, launch_spec, state
+            )
+        expected_binding = previous_session_id
+    else:
+        identity = participant_driver._refresh_vendor_session_binding(  # noqa: SLF001
+            private_root, launch_spec, state
+        )
+        assert identity == hashlib.sha256(fallback_session_id.encode()).hexdigest()
+        expected_binding = fallback_session_id
+
+    binding = participant_driver._stored_vendor_binding(  # noqa: SLF001
+        private_root, launch_spec, "codex"
+    )
+    assert binding is not None
+    assert binding["vendor_session_id"] == expected_binding
 
 
 @pytest.mark.parametrize(

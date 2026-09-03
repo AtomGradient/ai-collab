@@ -3,7 +3,12 @@
 # Copyright (c) 2026 AtomGradient
 # 版权所有 (c) 2026 质子梯度（北京）科技有限公司
 
-"""AI Collab generic process runtime + official iTerm presentation driver."""
+"""AI Collab generic process runtime + official iTerm presentation driver.
+
+A continuity binding names the vendor conversation most recently proved active
+inside the Harness-owned TUI. A prompt-proven in-TUI selection may replace that
+binding; an unproven vendor fallback may not.
+"""
 
 from __future__ import annotations
 
@@ -1463,7 +1468,9 @@ def _prepare_runtime_launch(
     os.chmod(prompt_path, 0o600)
     hook_path = _write_vendor_hook(private_root)
     proof_path = _vendor_proof_path(private_root)
+    activity_path = _vendor_activity_path(private_root)
     proof_path.unlink(missing_ok=True)
+    activity_path.unlink(missing_ok=True)
 
     binding = None
     if launch_spec.get("continuity_mode") == "exact_resume":
@@ -1475,17 +1482,24 @@ def _prepare_runtime_launch(
 
     if provider == "codex":
         hook_command = f"/usr/bin/python3 {shlex.quote(str(hook_path))}"
-        inline_hooks = (
+        session_start_hooks = (
             '[{matcher="startup|resume|compact",hooks=['
             "{type=\"command\",command="
             + json.dumps(hook_command)
             + ",timeout=10,additionalContextLimit=5000}]}]"
         )
+        prompt_submit_hooks = (
+            "[{hooks=[{type=\"command\",command="
+            + json.dumps(hook_command)
+            + ",timeout=10}]}]"
+        )
         argv.extend(
             (
                 "--dangerously-bypass-hook-trust",
                 "-c",
-                f"hooks.SessionStart={inline_hooks}",
+                f"hooks.SessionStart={session_start_hooks}",
+                "-c",
+                f"hooks.UserPromptSubmit={prompt_submit_hooks}",
             )
         )
         if expected_session_id is not None:
@@ -1563,6 +1577,12 @@ def _verify_vendor_session(
             ).hexdigest()
         return None
     proof = _read_private(proof_path)
+    if (
+        set(proof) != {"schema_version", "provider", "session_id", "source"}
+        or proof["schema_version"] != STATE_SCHEMA_VERSION
+        or proof["provider"] != provider
+    ):
+        raise DriverError("vendor session lifecycle proof differs")
     session_id = proof.get("session_id")
     try:
         normalized_session_id = str(uuid.UUID(session_id))
@@ -1571,32 +1591,44 @@ def _verify_vendor_session(
     expected_sources = (
         {"resume", "compact"} if resume_requested else {"startup", "compact"}
     )
-    expected_identity_differs = False
+    normalized_expected_session_id = None
     if expected_session_id is not None:
         try:
-            expected_identity_differs = (
-                normalized_session_id != str(uuid.UUID(expected_session_id))
-            )
+            normalized_expected_session_id = str(uuid.UUID(expected_session_id))
         except (TypeError, ValueError, AttributeError) as exc:
             raise DriverError("expected vendor session identity is invalid") from exc
-    proven_in_tui_rebind = (
-        expected_identity_differs
-        and proof.get("source") in {"resume", "compact"}
-        and _vendor_session_activity_matches(
-            private_root, provider, normalized_session_id
-        )
+    stored_binding = None
+    if isinstance(launch_spec.get("continuity_binding_ref"), str):
+        stored_binding = _stored_vendor_binding(private_root, launch_spec, provider)
+    normalized_stored_session_id = (
+        None if stored_binding is None else stored_binding["vendor_session_id"]
+    )
+    expected_identity_differs = (
+        normalized_expected_session_id is not None
+        and normalized_session_id != normalized_expected_session_id
+    )
+    stored_identity_differs = (
+        normalized_stored_session_id is not None
+        and normalized_session_id != normalized_stored_session_id
+    )
+    identity_differs = expected_identity_differs or stored_identity_differs
+    activity_matches = _vendor_session_activity_matches(
+        private_root, provider, normalized_session_id
+    )
+    proven_in_tui_rebind = identity_differs and activity_matches
+    source_matches_launch = proof["source"] in expected_sources
+    prompt_proven_fresh_resume = (
+        not resume_requested
+        and proof["source"] == "resume"
+        and activity_matches
     )
     if (
-        set(proof) != {"schema_version", "provider", "session_id", "source"}
-        or proof["provider"] != provider
-        or proof["source"] not in expected_sources
-        or (expected_identity_differs and not proven_in_tui_rebind)
+        not (source_matches_launch or prompt_proven_fresh_resume)
+        or (identity_differs and not proven_in_tui_rebind)
     ):
         raise DriverError("vendor session lifecycle proof differs")
     source = proof["source"]
-    materialized = source in {"resume", "compact"} or _vendor_session_activity_matches(
-        private_root, provider, normalized_session_id
-    )
+    materialized = source in {"resume", "compact"} or activity_matches
     if provider == "codex" and source == "startup":
         # Codex currently emits SessionStart only after the first real prompt,
         # unlike Claude which emits it at TUI startup before a transcript exists.
