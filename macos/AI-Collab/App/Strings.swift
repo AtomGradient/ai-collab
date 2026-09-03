@@ -142,6 +142,11 @@ enum S {
             t("Force Delete Task Room…", "强制删除任务房间…")
         }
         static var selectTitle: String { t("Select a Task Room", "选择一个任务房间") }
+        /// Group header for the room board's active/transitioning bucket.
+        /// "Needs Attention" and "Closed" reuse existing labels
+        /// (`S.NeedsAttention.sectionTitle`, `S.Status.label("closed")`); this
+        /// is the one bucket with no existing equivalent string.
+        static var activeGroupLabel: String { t("In Progress", "进行中") }
         static func memberCount(_ count: Int) -> String {
             t("\(count) colleague\(count == 1 ? "" : "s")", "\(count) 位同事")
         }
@@ -1568,7 +1573,13 @@ enum S {
         static var activity: String { t("Activity", "最近活动") }
         static var health: String { t("Health", "健康") }
         static var resources: String { t("Resources", "资源") }
-        static var technical: String { t("Technical Details", "技术详情") }
+        /// Phase 1 redesign: the collapsed drawer holding Preflight, Window
+        /// Topology, Collaboration Policy, Deliveries, Resources, Inspector
+        /// and high-risk actions — everything that used to be separate
+        /// top-level disclosures. See review 20260903-175908-nyr2wy.
+        static var evidenceAndDiagnostics: String {
+            t("Evidence & Diagnostics", "证据与诊断")
+        }
         static var noResources: String { t("Nothing is held.", "无占用。") }
         static func healthNeedsRepair(_ stateLabel: String) -> String {
             t(

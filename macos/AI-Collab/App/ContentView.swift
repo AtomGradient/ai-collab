@@ -584,21 +584,56 @@ struct ContentView: View {
                 get: { model.selectedScenarioID },
                 set: { id in Task { await model.selectScenario(id) } }
             )) {
-                ForEach(model.scenarios) { scenario in
-                    ScenarioRoomCard(scenario: scenario)
-                        .tag(scenario.id)
-                        .listRowInsets(EdgeInsets(top: 3, leading: 6, bottom: 3, trailing: 6))
-                        .listRowSeparator(.hidden)
-                        .contextMenu {
-                            Button(S.Rooms.forceDelete, role: .destructive) {
-                                highRiskIntent = .forceDestroyScenario(scenario)
-                            }
+                ForEach(scenarioGroups, id: \.label) { group in
+                    Section(group.label) {
+                        ForEach(group.scenarios) { scenario in
+                            ScenarioRoomCard(scenario: scenario)
+                                .tag(scenario.id)
+                                .listRowInsets(EdgeInsets(top: 3, leading: 6, bottom: 3, trailing: 6))
+                                .listRowSeparator(.hidden)
+                                .contextMenu {
+                                    Button(S.Rooms.forceDelete, role: .destructive) {
+                                        highRiskIntent = .forceDestroyScenario(scenario)
+                                    }
+                                }
                         }
+                    }
                 }
             }
             .listStyle(.plain)
         }
         .navigationTitle(S.Rooms.listTitle)
+    }
+
+    /// Needs Attention (attention ∪ failed) → In Progress (working, including
+    /// every transitional sub-state) → Closed (inactive) — three stable
+    /// groups, review 20260903-181141-6gjonu point 6. Order within a group is
+    /// exactly the Host's own `model.scenarios` order: the Store is
+    /// clock-free, so there is no timestamp to re-sort by, and pretending
+    /// otherwise would be the same kind of invented data the review's point 1
+    /// already ruled out. An unrecognized `presentationClass` (there is none
+    /// today — `.working`/`.attention` are the only two `default:` targets in
+    /// the entity mapping) still falls into Needs Attention, never silently
+    /// into Closed.
+    private var scenarioGroups: [(label: String, scenarios: [ScenarioRecord])] {
+        var attention: [ScenarioRecord] = []
+        var active: [ScenarioRecord] = []
+        var closed: [ScenarioRecord] = []
+        for scenario in model.scenarios {
+            switch scenario.presentationClass {
+            case .attention, .failed:
+                attention.append(scenario)
+            case .inactive:
+                closed.append(scenario)
+            default:
+                active.append(scenario)
+            }
+        }
+        var groups: [(String, [ScenarioRecord])] = []
+        if !attention.isEmpty { groups.append((S.NeedsAttention.sectionTitle, attention)) }
+        if !active.isEmpty { groups.append((S.Rooms.activeGroupLabel, active)) }
+        if !closed.isEmpty { groups.append((S.Status.label("closed"), closed)) }
+        return groups
     }
 
     // MARK: - Detail: Scenario
@@ -608,23 +643,19 @@ struct ContentView: View {
             if let scenario = model.selectedScenario {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
-                        // Employee order: who is here, what happened, is it
-                        // healthy, how we collaborate, what is held — and the
-                        // machine view folded at the end, nothing removed.
-                        scenarioHeader(scenario)
-                        validationBanner(for: .scenarioLifecycle)
-                        scenarioFlowSection
-                        objectiveSection(scenario)
+                        // Phase 1 IA (review 20260903-175908-nyr2wy): mission
+                        // (who/why/next) → health → team → evidence, folded.
+                        // Nothing removed from the pre-redesign order below —
+                        // deliveries/preflight/topology/policy/resources moved
+                        // inside `technicalSection`, now the collapsed
+                        // Evidence & Diagnostics drawer, with their own
+                        // internals untouched.
+                        missionBar(scenario)
                         healthCard(scenario)
                         collaborationHealthSection
                         needsAttentionSection
                         deliveryDistributionSection
                         participantsSection
-                        deliveriesSection
-                        preflightSection
-                        topologySection
-                        policySection
-                        resourcesSection
                         technicalSection(scenario)
                     }
                     .padding(20)
@@ -639,6 +670,21 @@ struct ContentView: View {
                     description: Text(S.Rooms.selectDescription)
                 )
             }
+        }
+    }
+
+    /// The mission bar: who/why this room exists and what to do next, in one
+    /// visual group. Every piece below is the pre-redesign view, unmodified —
+    /// this only changes what groups with what. Deliberately not a card of
+    /// its own (no extra background/border): `objectiveSection` already owns
+    /// one, and stacking a second around it is exactly the "cards inside
+    /// cards" the review flagged elsewhere.
+    private func missionBar(_ scenario: ScenarioRecord) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            scenarioHeader(scenario)
+            validationBanner(for: .scenarioLifecycle)
+            scenarioFlowSection
+            objectiveSection(scenario)
         }
     }
 
@@ -726,7 +772,10 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 8) {
                         Text(scenario.id).font(.title2.bold())
-                        StateBadge(state: scenario.observedState)
+                        PresentationBadge(
+                            cls: scenario.presentationClass,
+                            label: HarnessViewModel.humanState(scenario.observedState)
+                        )
                     }
                     Text(model.scenarioHeadline)
                         .font(.callout)
@@ -738,6 +787,22 @@ struct ContentView: View {
                         Task { await model.refreshSelectedScenario() }
                     }
                     .labelStyle(.iconOnly)
+                    // Repair is gated on the exact Host precondition
+                    // (`scenario.repair` accepts only provision_failed or
+                    // degraded) — the same test `highRiskSection` already
+                    // used, now the single canonical place this control
+                    // appears (removed from `healthCard` and
+                    // `highRiskSection`, both now redundant with this one).
+                    // It is deliberately its own button, not the guidance
+                    // action below: `model.guidance` offers no action at all
+                    // for .attend/.working/.inconsistent, and this must not
+                    // pretend otherwise.
+                    if ["provision_failed", "degraded"].contains(scenario.observedState) {
+                        Button(S.Risk.repairScenario) {
+                            highRiskIntent = .repairScenario
+                        }
+                        .tint(.orange)
+                    }
                     // Prepare / Resume / Start All now live in the
                     // persistent flow section, which offers exactly the one
                     // step whose Host precondition currently holds. Keeping
@@ -854,7 +919,10 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
                     Text(participant.id).font(.headline)
-                    StateBadge(state: participant.observedState)
+                    PresentationBadge(
+                        cls: participant.presentationClass,
+                        label: HarnessViewModel.humanState(participant.observedState)
+                    )
                 }
                 if let runtimeProfileRef = participant.runtimeProfileRef {
                     Text(runtimeProfileRef)
@@ -1081,8 +1149,6 @@ struct ContentView: View {
                 }
             }
         }
-        .padding(10)
-        .background(.secondary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
     }
 
     private var topologySection: some View {
@@ -1140,8 +1206,6 @@ struct ContentView: View {
             Label(S.Topology.sectionTitle, systemImage: "macwindow.on.rectangle")
                 .font(.headline)
         }
-        .padding(10)
-        .background(.secondary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
     }
 
     private var policySection: some View {
@@ -1280,8 +1344,6 @@ struct ContentView: View {
                 }
             }
         }
-        .padding(10)
-        .background(.secondary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
     }
 
     private var deliveriesSection: some View {
@@ -1343,8 +1405,6 @@ struct ContentView: View {
                 }
             }
         }
-        .padding(10)
-        .background(.secondary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
     }
 
     private var needsAttentionSection: some View {
@@ -1508,8 +1568,6 @@ struct ContentView: View {
             Label(S.Inspector.sectionTitle, systemImage: "terminal")
                 .font(.headline)
         }
-        .padding(10)
-        .background(.secondary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
     }
 
     private func highRiskSection(_ scenario: ScenarioRecord) -> some View {
@@ -1519,12 +1577,9 @@ struct ContentView: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
                 HStack {
-                    if ["provision_failed", "degraded"].contains(scenario.observedState) {
-                        Button(S.Risk.repairScenario) {
-                            highRiskIntent = .repairScenario
-                        }
-                        .controlSize(.small)
-                    }
+                    // Repair moved to the mission bar header (one canonical
+                    // place); this section keeps only the actions that are
+                    // actually high-risk/destructive.
                     Button(S.Risk.loadDestroyPreview) {
                         Task { await model.loadDestroyPreview() }
                     }
@@ -1576,8 +1631,6 @@ struct ContentView: View {
                 .font(.headline)
                 .foregroundStyle(.red)
         }
-        .padding(10)
-        .background(.secondary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
     }
 
     // MARK: - Workspace preparation rows
@@ -1639,12 +1692,11 @@ struct ContentView: View {
                             )
                         )
                         .font(.callout)
+                        // Repair itself now lives once, in the mission bar's
+                        // header row — this card keeps the reassurance
+                        // sentence plus the one action that isn't a
+                        // duplicate of it.
                         HStack {
-                            Button(S.Risk.repairScenario) {
-                                highRiskIntent = .repairScenario
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.small)
                             Button(S.Preflight.runButton) {
                                 Task { await model.runPreflight() }
                             }
@@ -1704,20 +1756,67 @@ struct ContentView: View {
 
     @State private var showTechnical = false
 
+    /// The "Evidence & Diagnostics" drawer (review 20260903-175908-nyr2wy):
+    /// deliveries, Preflight, window topology, collaboration policy,
+    /// resources, the raw inspector and high-risk actions used to each be
+    /// separate top-level disclosures with equal visual weight — now they are
+    /// one collapsed-by-default group. Every section's own body is untouched;
+    /// only where it is called from changed. Collapsing this never happens
+    /// automatically on a fault — see `needsAttentionSection`'s links, which
+    /// are the only things that open it (review 20260903-181141-6gjonu
+    /// point 7).
     private func technicalSection(_ scenario: ScenarioRecord) -> some View {
         DisclosureGroup(isExpanded: $showTechnical) {
             VStack(alignment: .leading, spacing: 16) {
+                deliveriesSection
+                preflightSection
+                topologySection
+                policySection
+                resourcesSection
                 inspectorSection
                 highRiskSection(scenario)
             }
             .padding(.top, 8)
         } label: {
-            Label(S.Sections.technical, systemImage: "terminal")
-                .font(.headline)
-                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Label(S.Sections.evidenceAndDiagnostics, systemImage: "terminal")
+                    .font(.headline)
+                    .foregroundStyle(.secondary)
+                if !showTechnical, !evidenceSummaryLine.isEmpty {
+                    Text(evidenceSummaryLine)
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+            }
         }
         .padding(10)
         .background(.secondary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    /// One line, shown only while the drawer is collapsed, composed from
+    /// fragments its own sections already localize (same " · " idiom
+    /// `scenarioHeader` and `highRiskSection` already use) — not a new
+    /// hardcoded sentence.
+    private var evidenceSummaryLine: String {
+        var parts: [String] = []
+        if let preflight = model.preflight {
+            parts.append(
+                "\(S.Preflight.sectionTitle) \(HarnessViewModel.humanState(preflight.status))"
+            )
+        }
+        if let policy = model.policyStatus {
+            parts.append(
+                "\(S.Policy.sectionTitle) "
+                    + S.Status.label(policy.requiresReplan ? "re-plan required" : "current")
+            )
+        }
+        if let total = model.deliverySummary?.total, total > 0 {
+            parts.append("\(S.Deliveries.rawActivity) \(total)")
+        }
+        if !model.visibleResources.isEmpty {
+            parts.append("\(S.Sections.resources) \(model.visibleResources.count)")
+        }
+        return parts.joined(separator: " · ")
     }
 
     // MARK: - Overlays
@@ -2220,38 +2319,52 @@ private struct StateBadge: View {
     }
 }
 
+/// The entity-aware replacement for `StateBadge` on Scenario and Participant
+/// rows (room board, mission bar, team roster). Unlike `StateBadge`'s single
+/// global string table, the six-class `PresentationClass` is computed per
+/// entity (`ScenarioRecord.presentationClass` / `ParticipantRecord.
+/// presentationClass`) — the same raw token can land in a different class on
+/// a different entity, e.g. Participant `ready` is `working`, never
+/// `success`. The label text is still always the entity's own existing
+/// `humanState`/`S.Status` word; only colour and icon come from the class.
+private struct PresentationBadge: View {
+    let cls: PresentationClass
+    let label: String
+
+    var body: some View {
+        Label {
+            Text(label)
+        } icon: {
+            Image(systemName: cls.symbolName)
+        }
+        .font(.caption.bold())
+        .labelStyle(.titleAndIcon)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3)
+        .foregroundStyle(cls.color)
+        .background(cls.color.opacity(0.12), in: Capsule())
+    }
+}
+
 // MARK: - ScenarioRoomCard
 
 private struct ScenarioRoomCard: View {
     let scenario: ScenarioRecord
 
-    private var stateColor: Color {
-        switch scenario.observedState {
-        case "ready", "running":
-            .green
-        case "degraded", "blocked":
-            .orange
-        case "provision_failed", "failed":
-            .red
-        case "repairing", "destroying":
-            .blue
-        default:
-            .gray
-        }
-    }
-
+    /// Entity-aware (`ScenarioRecord.presentationClass`), not a local re-guess
+    /// of the same five-way split `StateBadge` already does globally.
     private var isLive: Bool {
-        ["ready", "running"].contains(scenario.observedState)
+        scenario.presentationClass == .working
     }
 
     private var needsAttention: Bool {
-        ["degraded", "provision_failed", "failed", "blocked"].contains(scenario.observedState)
+        [.attention, .failed].contains(scenario.presentationClass)
     }
 
     private var statusSummary: String {
         let count = scenario.participantIDs.count
         switch scenario.observedState {
-        case "ready", "running":
+        case "running":
             return S.Rooms.memberCount(count)
         case "closed":
             return S.Rooms.closedSummary(count)
@@ -2267,7 +2380,7 @@ private struct ScenarioRoomCard: View {
     var body: some View {
         HStack(spacing: 0) {
             RoundedRectangle(cornerRadius: 2)
-                .fill(stateColor)
+                .fill(scenario.presentationClass.color)
                 .frame(width: 4)
                 .padding(.vertical, 2)
                 .opacity(needsAttention ? 1.0 : 1.0)
@@ -2278,7 +2391,10 @@ private struct ScenarioRoomCard: View {
                         .font(.system(.body, weight: .semibold))
                         .lineLimit(1)
                     Spacer()
-                    StateBadge(state: scenario.observedState)
+                    PresentationBadge(
+                        cls: scenario.presentationClass,
+                        label: HarnessViewModel.humanState(scenario.observedState)
+                    )
                 }
                 HStack(spacing: 8) {
                     HStack(spacing: -4) {
