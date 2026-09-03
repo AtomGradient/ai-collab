@@ -2675,6 +2675,44 @@ class ScenarioStore:
                 ):
                     target["continuity_mode"] = "explicit_recreate"
                     target.pop("vendor_session_identity_sha256", None)
+            # Recovery deliberately rotates a broken generation and leaves the
+            # replacement stopped. Its old close target remains valid history,
+            # but is no longer a request to restart the replacement. Require
+            # durable recovery evidence so an unexplained generation change is
+            # still reported as restore-target drift.
+            def superseded_by_recovery(target: dict[str, Any]) -> bool:
+                participant = participants.get(target["participant_id"])
+                artifact = artifacts.get(target["participant_id"], {})
+                history = artifact.get("history", [])
+                if (
+                    not isinstance(participant, dict)
+                    or participant.get("participant_generation")
+                    != target["participant_generation"] + 1
+                    or participant.get("desired_state") != "stopped"
+                    or participant.get("observed_state") != "stopped"
+                    or participant.get("runtime_binding_id") is not None
+                    or participant.get("presentation_binding_id") is not None
+                    or participant.get("degraded") is not None
+                    or not isinstance(history, list)
+                ):
+                    return False
+                return any(
+                    isinstance(entry, dict)
+                    and entry.get("participant_generation")
+                    == target["participant_generation"]
+                    and isinstance(entry.get("recovery"), dict)
+                    and entry["recovery"].get("recovered") is True
+                    and entry["recovery"].get("previous_participant_generation")
+                    == target["participant_generation"]
+                    and entry["recovery"].get("next_participant_generation")
+                    == participant["participant_generation"]
+                    and entry["recovery"].get("external_resources_absent") is True
+                    for entry in history
+                )
+
+            normalized = [
+                target for target in normalized if not superseded_by_recovery(target)
+            ]
             return sorted(normalized, key=lambda value: value["participant_id"])
 
     def pending_scenario_resume_requests(self) -> list[dict[str, Any]]:
