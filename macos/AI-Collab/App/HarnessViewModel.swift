@@ -111,7 +111,18 @@ final class HarnessViewModel: ObservableObject {
     @Published var newParticipantID = "analyst"
     /// Set only while a mutation is in flight. Read-only refreshes deliberately
     /// leave it false so browsing never disables the window.
-    @Published var isBusy = false
+    @Published var isBusy = false {
+        didSet {
+            // Every mutation boundary — entry and exit — advances the epoch,
+            // so a live read that began before a mutation and returns after
+            // it finished (busy already false again) is still recognised as
+            // stale (codex review 20260904-032455-3mzo76 P1).
+            if isBusy != oldValue { mutationEpoch &+= 1 }
+        }
+    }
+    /// Monotonic count of `isBusy` transitions. Live-loop reads capture it
+    /// before their await and may write only if it is unchanged.
+    private(set) var mutationEpoch = 0
     @Published private var activityBuilder: (() -> String)?
     var activityText: String? { activityBuilder?() }
     @Published var activeOperationID: String?
@@ -1569,16 +1580,16 @@ final class HarnessViewModel: ObservableObject {
                 let project = selectedProject,
                 let scenario = selectedScenario
             else { return }
+            // Captured before the await; compared again right before each
+            // write. Any mutation boundary in between makes this read stale.
+            let readEpoch = mutationEpoch
             do {
                 let page = try await fetchDeliveries(
                     project: project,
                     scenario: scenario
                 )
                 guard selectedScenarioID == scenarioID else { return }
-                // Re-checked after the await, right before the write: a
-                // mutation that began while this read was in flight owns
-                // the next write (its own post-mutation reload).
-                if liveLoopMayWrite(scenarioID) {
+                if liveLoopMayWrite(scenarioID, readEpoch: readEpoch) {
                     deliveries = page.deliveries
                     deliverySummary = page.summary
                     let shown = page.deliveries.count
@@ -1591,11 +1602,16 @@ final class HarnessViewModel: ObservableObject {
                 return
             } catch {
                 guard selectedScenarioID == scenarioID else { return }
-                presentDeliveryFailure(error, live: true)
+                // The failure note is a live-loop write like any other.
+                if liveLoopMayWrite(scenarioID, readEpoch: readEpoch) {
+                    presentDeliveryFailure(error, live: true)
+                }
             }
             if !isBusy {
                 do {
-                    try await observeRoom(project: project, scenarioID: scenarioID)
+                    try await observeRoom(
+                        project: project, scenarioID: scenarioID, readEpoch: mutationEpoch
+                    )
                 } catch is CancellationError {
                     return
                 } catch {
@@ -1612,14 +1628,16 @@ final class HarnessViewModel: ObservableObject {
     }
 
     /// The live loop may write only while the room it was started for is
-    /// still selected and no mutation is in flight. Evaluated synchronously
-    /// on the main actor immediately before each write, with no `await`
-    /// in between, so a mutation cannot begin between the check and the
-    /// write; a mutation that began during the preceding read simply wins
-    /// (its own post-mutation reload is the fresher data). Monitor path
-    /// only — the explicit refresh path is never gated by this.
-    private func liveLoopMayWrite(_ scenarioID: String) -> Bool {
-        selectedScenarioID == scenarioID && !isBusy
+    /// still selected, no mutation is in flight, and no mutation boundary
+    /// has passed since the read was issued (`readEpoch`). Evaluated
+    /// synchronously on the main actor immediately before each write, with
+    /// no `await` in between, so a mutation cannot begin between the check
+    /// and the write; a mutation that began — or began and finished — while
+    /// the read was in flight wins, its own post-mutation reload being the
+    /// fresher data. Monitor path only — the explicit refresh path is never
+    /// gated by this.
+    private func liveLoopMayWrite(_ scenarioID: String, readEpoch: Int) -> Bool {
+        selectedScenarioID == scenarioID && !isBusy && mutationEpoch == readEpoch
     }
 
     /// One read of `scenario.status` + `participant.list`, written back only
@@ -1628,12 +1646,14 @@ final class HarnessViewModel: ObservableObject {
     /// is deliberately not called here — that stays with the explicit
     /// refresh path). Every write re-checks `liveLoopMayWrite` after the
     /// await that preceded it (codex review 20260904-030617-82zm9p P1).
-    private func observeRoom(project: ProjectRecord, scenarioID: String) async throws {
+    private func observeRoom(
+        project: ProjectRecord, scenarioID: String, readEpoch: Int
+    ) async throws {
         let target = scenarioTarget(projectID: project.id, scenarioID: scenarioID)
         let status = try await client.call(
             HarnessCall(operation: "scenario.status", target: target)
         )
-        guard liveLoopMayWrite(scenarioID) else { return }
+        guard liveLoopMayWrite(scenarioID, readEpoch: readEpoch) else { return }
         if let raw = status["scenario"] as? [String: Any],
            let current = ScenarioRecord(raw),
            let index = scenarios.firstIndex(where: { $0.id == current.id }),
@@ -1643,7 +1663,7 @@ final class HarnessViewModel: ObservableObject {
         }
         guard let scenario = selectedScenario else { return }
         let parsed = try await fetchParticipants(project: project, scenario: scenario)
-        guard liveLoopMayWrite(scenarioID) else { return }
+        guard liveLoopMayWrite(scenarioID, readEpoch: readEpoch) else { return }
         if participants != parsed {
             participants = parsed
         }

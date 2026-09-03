@@ -145,7 +145,8 @@ def test_app_live_refreshes_selected_scenario_deliveries_without_full_page_polli
     # The participant/room read is skipped while a mutation is in flight so
     # it cannot race the post-mutation refresh.
     assert "if !isBusy {" in monitor
-    assert "observeRoom(project: project, scenarioID: scenarioID)" in monitor
+    assert "observeRoom(" in monitor
+    assert "readEpoch: mutationEpoch" in monitor
 
 
 
@@ -1248,13 +1249,26 @@ def test_live_loop_observes_participants_read_only() -> None:
     # scenario.status, once after participant.list — and the deliveries write
     # in the loop body is guarded the same way. Ordering itself is proven by
     # LiveLoopRaceTests (fake client), not by this substring check.
-    assert observe.count("guard liveLoopMayWrite(scenarioID) else { return }") == 2
+    assert observe.count("guard liveLoopMayWrite(scenarioID, readEpoch: readEpoch) else { return }") == 2
     guard_fn = view_model.split("private func liveLoopMayWrite", 1)[1].split("\n    }\n", 1)[0]
-    assert "selectedScenarioID == scenarioID && !isBusy" in guard_fn
+    # codex review 20260904-032455-3mzo76 P1: `!isBusy` alone cannot see a
+    # mutation that began and finished while the read was in flight. The
+    # epoch advances on both isBusy boundaries and the read's epoch must be
+    # unchanged at write time.
+    assert "selectedScenarioID == scenarioID && !isBusy && mutationEpoch == readEpoch" in guard_fn
+    busy = view_model.split("@Published var isBusy = false {", 1)[1].split("\n    }\n", 1)[0]
+    assert "if isBusy != oldValue { mutationEpoch &+= 1 }" in busy
     monitor = view_model.split("func monitorRoom(for scenarioID: String) async", 1)[1].split(
         "private func liveLoopMayWrite", 1
     )[0]
-    assert monitor.index("if liveLoopMayWrite(scenarioID) {") < monitor.index("deliveries = page.deliveries")
+    assert monitor.index("let readEpoch = mutationEpoch") < monitor.index("fetchDeliveries(")
+    assert monitor.index("if liveLoopMayWrite(scenarioID, readEpoch: readEpoch) {") < monitor.index(
+        "deliveries = page.deliveries"
+    )
+    # The failure note in the catch path is a live-loop write too.
+    failure = monitor.split("presentDeliveryFailure(error, live: true)", 1)[0][-200:]
+    assert "if liveLoopMayWrite(scenarioID, readEpoch: readEpoch) {" in failure
+    assert "readEpoch: mutationEpoch" in monitor, "observeRoom is issued under the epoch read on the main actor"
     reload = view_model.split("private func reloadParticipants", 1)[1].split(
         "\n    /// Pure read", 1
     )[0]
