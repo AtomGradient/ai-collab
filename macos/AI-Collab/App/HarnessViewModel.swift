@@ -1371,19 +1371,22 @@ final class HarnessViewModel: ObservableObject {
         }
     }
 
-    func destroyScenario() async {
+    @discardableResult
+    func destroyScenario() async -> Bool {
         guard let project = selectedProject, let scenario = selectedScenario else {
-            return refuse(.scenarioLifecycle, S.Msg.selectRoomFirst)
+            refuse(.scenarioLifecycle, S.Msg.selectRoomFirst)
+            return false
         }
         guard destroyPreviewEligible else {
-            return refuse(
+            refuse(
                 .scenarioLifecycle,
                 self.destroyPreviewLoaded
                     ? S.Msg.destroyPreviewBlocked(self.destroyPreviewBlockers)
                     : S.Msg.loadPreviewFirst
             )
+            return false
         }
-        await performMutation(
+        return await performMutation(
             activity: S.Msg.deletingRoom(scenario.id),
             scope: .scenarioLifecycle,
             success: S.Msg.deletedRoom(scenario.id)
@@ -1406,11 +1409,13 @@ final class HarnessViewModel: ObservableObject {
         }
     }
 
-    func forceDestroyScenario(_ scenario: ScenarioRecord) async {
+    @discardableResult
+    func forceDestroyScenario(_ scenario: ScenarioRecord) async -> Bool {
         guard let project = selectedProject else {
-            return refuse(.scenarioLifecycle, S.Msg.selectProjectFirst)
+            refuse(.scenarioLifecycle, S.Msg.selectProjectFirst)
+            return false
         }
-        await performMutation(
+        return await performMutation(
             activity: S.Msg.forceDeletingRoom(scenario.id),
             scope: .scenarioLifecycle,
             success: S.Msg.forceDeletedRoom(scenario.id)
@@ -2090,15 +2095,16 @@ final class HarnessViewModel: ObservableObject {
     /// mutation is structurally guaranteed to put something on screen while it
     /// runs — the long ones included. A second mutation is refused with a visible
     /// reason instead of being swallowed.
+    @discardableResult
     private func performMutation(
         activity: @autoclosure @escaping () -> String,
         scope: ValidationScope,
         success: @autoclosure @escaping () -> String? = nil,
         _ work: @escaping @MainActor () async throws -> Void
-    ) async {
+    ) async -> Bool {
         guard !isBusy else {
             refuse(scope, S.Msg.busy(self.activityText))
-            return
+            return false
         }
         isBusy = true
         activityBuilder = activity
@@ -2116,8 +2122,10 @@ final class HarnessViewModel: ObservableObject {
             try await work()
             if hostStatus != "stale-bundle" { hostStatus = "ready" }
             if success() != nil { noteSuccess(success() ?? "") }
+            return true
         } catch {
             reportMutationFailure(error, scope: scope)
+            return false
         }
     }
 

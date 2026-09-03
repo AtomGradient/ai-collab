@@ -614,10 +614,10 @@ def test_destroy_flow_has_one_panel_entry_point_not_a_direct_force_delete() -> N
         "private var scenarioGroups", 1
     )[0]
     assert "forceDestroyScenario" not in scenarios_list
-    assert "destroyPanelTarget = DestroyPanelTarget(scenario: scenario)" in scenarios_list
+    assert "destroyPanelTarget = DestroyPanelTarget(" in scenarios_list
     # At least three independent entry points open the same panel: the room
     # board row menu, the mission bar's "…" menu, and Evidence & Diagnostics.
-    assert content.count("DestroyPanelTarget(scenario: scenario)") >= 3
+    assert content.count("DestroyPanelTarget(") >= 3
     # The panel itself explicitly (re)selects its target before loading a
     # preview, rather than trusting whatever scenario happened to already be
     # selected — the row a user right-clicks is not necessarily the one open
@@ -703,7 +703,9 @@ def test_destroy_panel_only_dismisses_after_a_confirmed_success() -> None:
     panel = content.split("private struct DestroyPanel", 1)[1].split(
         "// MARK: - ContentView", 1
     )[0]
-    assert "DestroyFlowDecision.shouldDismissAfterAction(errorMessage: model.errorMessage)" in panel
+    assert "DestroyFlowDecision.shouldDismissAfterAction(succeeded: succeeded)" in panel
+    assert "let succeeded = await model.destroyScenario()" in panel
+    assert "let succeeded = await model.forceDestroyScenario(current)" in panel
     # dismiss() must not appear unconditionally right after either destroy
     # call — both are gated by the shouldDismissAfterAction check above,
     # never a bare `await model.destroyScenario(); dismiss()`.

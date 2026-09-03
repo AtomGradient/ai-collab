@@ -110,14 +110,15 @@ private enum HighRiskIntent: Identifiable {
 
 // MARK: - Destroy panel (the one entry point into the delete flow)
 
-/// `.sheet(item:)` payload. Identity includes generation, not just id — a
+/// `.sheet(item:)` payload. Identity includes project and generation — a
 /// same-named Scenario that was destroyed and recreated is a different
 /// incarnation, and SwiftUI must treat re-opening the panel for it as a
 /// genuinely new target rather than reusing a stale sheet already showing
 /// the old incarnation's preview (review 20260903-191042-y57u0q P1).
 private struct DestroyPanelTarget: Identifiable {
+    let projectID: String
     let scenario: ScenarioRecord
-    var id: String { "\(scenario.id)#\(scenario.generation)" }
+    var id: String { "\(projectID)#\(scenario.id)#\(scenario.generation)" }
 }
 
 /// The single UI component behind every "delete a task room" entry point —
@@ -133,10 +134,11 @@ private struct DestroyPanelTarget: Identifiable {
 ///
 /// The room a user right-clicks is not necessarily `model.selectedScenario`,
 /// so this panel explicitly selects its own target before loading a preview
-/// — and re-checks identity (id *and* generation) both before and after
+/// — and re-checks identity (project, id, and generation) before and after
 /// every load, and again before either destructive action, rather than
 /// trusting a snapshot captured whenever the sheet happened to open.
 private struct DestroyPanel: View {
+    let projectID: String
     let scenario: ScenarioRecord
 
     @EnvironmentObject private var model: HarnessViewModel
@@ -146,13 +148,21 @@ private struct DestroyPanel: View {
     @State private var actionFailure: String?
 
     private var target: DestroyFlowTarget {
-        DestroyFlowTarget(scenarioID: scenario.id, generation: scenario.generation)
+        DestroyFlowTarget(
+            projectID: projectID,
+            scenarioID: scenario.id,
+            generation: scenario.generation
+        )
     }
 
     private var currentSelection: DestroyFlowTarget? {
-        model.selectedScenario.map {
-            DestroyFlowTarget(scenarioID: $0.id, generation: $0.generation)
-        }
+        guard let selectedProjectID = model.selectedProjectID,
+              let selectedScenario = model.selectedScenario else { return nil }
+        return DestroyFlowTarget(
+            projectID: selectedProjectID,
+            scenarioID: selectedScenario.id,
+            generation: selectedScenario.generation
+        )
     }
 
     var body: some View {
@@ -258,6 +268,10 @@ private struct DestroyPanel: View {
     private func load() async {
         phase = .loading
         actionFailure = nil
+        guard model.selectedProjectID == projectID else {
+            phase = .stale
+            return
+        }
         if model.selectedScenarioID != scenario.id {
             await model.selectScenario(scenario.id)
         }
@@ -285,11 +299,12 @@ private struct DestroyPanel: View {
             return
         }
         model.dismissError()
-        await model.destroyScenario()
-        if DestroyFlowDecision.shouldDismissAfterAction(errorMessage: model.errorMessage) {
+        let succeeded = await model.destroyScenario()
+        if DestroyFlowDecision.shouldDismissAfterAction(succeeded: succeeded) {
             dismiss()
         } else {
             actionFailure = model.errorMessage
+                ?? model.validationMessage(for: .scenarioLifecycle)
         }
     }
 
@@ -304,11 +319,12 @@ private struct DestroyPanel: View {
             return
         }
         model.dismissError()
-        await model.forceDestroyScenario(current)
-        if DestroyFlowDecision.shouldDismissAfterAction(errorMessage: model.errorMessage) {
+        let succeeded = await model.forceDestroyScenario(current)
+        if DestroyFlowDecision.shouldDismissAfterAction(succeeded: succeeded) {
             dismiss()
         } else {
             actionFailure = model.errorMessage
+                ?? model.validationMessage(for: .scenarioLifecycle)
         }
     }
 }
@@ -391,7 +407,7 @@ struct ContentView: View {
             }
         }
         .sheet(item: $destroyPanelTarget) { target in
-            DestroyPanel(scenario: target.scenario)
+            DestroyPanel(projectID: target.projectID, scenario: target.scenario)
                 .environmentObject(model)
         }
         .overlay(alignment: .top) { errorBanner }
@@ -788,7 +804,11 @@ struct ContentView: View {
                                 .listRowSeparator(.hidden)
                                 .contextMenu {
                                     Button(S.Rooms.deleteMenu, role: .destructive) {
-                                        destroyPanelTarget = DestroyPanelTarget(scenario: scenario)
+                                        guard let projectID = model.selectedProjectID else { return }
+                                        destroyPanelTarget = DestroyPanelTarget(
+                                            projectID: projectID,
+                                            scenario: scenario
+                                        )
                                     }
                                 }
                         }
@@ -1022,7 +1042,11 @@ struct ContentView: View {
                     // loading a real preview (review 20260903-185641-e6nznb).
                     Menu {
                         Button(S.Rooms.deleteMenu) {
-                            destroyPanelTarget = DestroyPanelTarget(scenario: scenario)
+                            guard let projectID = model.selectedProjectID else { return }
+                            destroyPanelTarget = DestroyPanelTarget(
+                                projectID: projectID,
+                                scenario: scenario
+                            )
                         }
                     } label: {
                         Image(systemName: "ellipsis.circle")
@@ -1759,7 +1783,11 @@ struct ContentView: View {
                 // bar's "…" menu open; it loads its own preview rather than
                 // this section keeping a second, possibly-stale copy.
                 Button(S.Rooms.deleteMenu, role: .destructive) {
-                    destroyPanelTarget = DestroyPanelTarget(scenario: scenario)
+                    guard let projectID = model.selectedProjectID else { return }
+                    destroyPanelTarget = DestroyPanelTarget(
+                        projectID: projectID,
+                        scenario: scenario
+                    )
                 }
                 .controlSize(.small)
                 ForEach(model.resources.filter(\.canBreak)) { resource in

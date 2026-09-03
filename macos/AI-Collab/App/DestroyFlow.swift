@@ -20,12 +20,13 @@ enum DestroyPreviewPhase: Equatable {
     case stale
 }
 
-/// Identity for freshness checks: id alone is not enough because a same-
-/// named Scenario that was destroyed and recreated is a different
+/// Identity for freshness checks: id alone is not enough because Scenario
+/// names are project-scoped, and a destroyed/recreated Scenario is a different
 /// incarnation with a different fence (review 20260903-191042-y57u0q P1 —
 /// the same class of bug this project's own scenario_generation fix,
 /// ae5cbbe, exists for).
 struct DestroyFlowTarget: Equatable {
+    let projectID: String
     let scenarioID: String
     let generation: Int
 }
@@ -71,7 +72,7 @@ enum DestroyFlowDecision {
     /// is confirmed to have actually gone through — an error leaves the
     /// panel open, with its preview/blocker context intact, rather than
     /// vanishing and leaving the failure to a background banner.
-    static func shouldDismissAfterAction(errorMessage: String?) -> Bool {
-        errorMessage == nil
+    static func shouldDismissAfterAction(succeeded: Bool) -> Bool {
+        succeeded
     }
 }

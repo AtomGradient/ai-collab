@@ -11,7 +11,9 @@ import XCTest
 /// read as the Host having reported the target blocked.
 final class DestroyFlowTests: XCTestCase {
 
-    private let target = DestroyFlowTarget(scenarioID: "room-1", generation: 2)
+    private let target = DestroyFlowTarget(
+        projectID: "project-1", scenarioID: "room-1", generation: 2
+    )
 
     // MARK: 1. A failed preview read
 
@@ -71,7 +73,11 @@ final class DestroyFlowTests: XCTestCase {
     // MARK: 3. target generation changed mid-flow
 
     func testDriftedGenerationIsStaleRegardlessOfWhatTheReadReported() {
-        let recreated = DestroyFlowTarget(scenarioID: target.scenarioID, generation: 3)
+        let recreated = DestroyFlowTarget(
+            projectID: target.projectID,
+            scenarioID: target.scenarioID,
+            generation: 3
+        )
         // Even an eligible-looking answer must not be trusted once the
         // selection has moved to a different incarnation of the same name.
         let phase = DestroyFlowDecision.phaseAfterLoad(
@@ -89,15 +95,25 @@ final class DestroyFlowTests: XCTestCase {
         XCTAssertEqual(phase, .stale)
     }
 
+    func testSameScenarioIdentityInAnotherProjectIsStale() {
+        let otherProject = DestroyFlowTarget(
+            projectID: "project-2",
+            scenarioID: target.scenarioID,
+            generation: target.generation
+        )
+        let phase = DestroyFlowDecision.phaseAfterLoad(
+            target: target, currentSelection: otherProject, errorMessage: nil, eligible: true
+        )
+        XCTAssertEqual(phase, .stale)
+    }
+
     // MARK: 4. an action failure must not be read as success
 
     func testActionFailureDoesNotDismiss() {
-        XCTAssertFalse(
-            DestroyFlowDecision.shouldDismissAfterAction(errorMessage: "rejected: stale fence")
-        )
+        XCTAssertFalse(DestroyFlowDecision.shouldDismissAfterAction(succeeded: false))
     }
 
     func testActionSuccessDoesDismiss() {
-        XCTAssertTrue(DestroyFlowDecision.shouldDismissAfterAction(errorMessage: nil))
+        XCTAssertTrue(DestroyFlowDecision.shouldDismissAfterAction(succeeded: true))
     }
 }
