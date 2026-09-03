@@ -2117,8 +2117,21 @@ final class HarnessViewModel: ObservableObject {
             if hostStatus != "stale-bundle" { hostStatus = "ready" }
             if success() != nil { noteSuccess(success() ?? "") }
         } catch {
-            report(error)
+            reportMutationFailure(error, scope: scope)
         }
+    }
+
+    /// A refused mutation has to say so where the control is.
+    ///
+    /// `report` alone paints `errorBanner`, which is a top overlay
+    /// (`ContentView:198`). When the control is a participant row that overlay
+    /// is off-screen, so a Host refusal read as the button doing nothing — the
+    /// m2 `/exit` report. The top banner still carries the repair action; this
+    /// adds the same reason under the control that was clicked.
+    func reportMutationFailure(_ error: Error, scope: ValidationScope) {
+        report(error)
+        let actionable = ActionableErrorRecord(error)
+        validation = ValidationNotice(scope: scope) { actionable.message }
     }
 
     private func report(_ error: Error) {

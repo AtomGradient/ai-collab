@@ -285,6 +285,38 @@ final class HarnessViewModelRefusalTests: XCTestCase {
 
     // MARK: - A refusal is scoped to the control that refused
 
+    /// A Host refusal used to reach only `errorBanner`, a top overlay. The
+    /// Recover button sits on a participant row below the fold, so on m2 the
+    /// refusal was painted where nobody was looking and the click read as
+    /// doing nothing at all.
+    func testAHostRefusalAppearsUnderTheControlThatWasClicked() {
+        let model = modelWithScenario()
+        let rejection = HarnessIPCError.hostRejected(
+            code: "operation.precondition-failed",
+            category: "operation",
+            message: "participant recovery requires a resumable degraded Scenario",
+            retryable: false,
+            mutationState: "not_started",
+            repairAction: "scenario.refresh"
+        )
+
+        model.reportMutationFailure(rejection, scope: .participantAction)
+
+        XCTAssertEqual(
+            model.validationMessage(for: .participantAction),
+            "participant recovery requires a resumable degraded Scenario",
+            "the reason must be readable next to the control"
+        )
+        XCTAssertNotNil(
+            model.actionableError,
+            "the top banner still carries the repair action"
+        )
+        XCTAssertNil(
+            model.validationMessage(for: .scenarioLifecycle),
+            "and it must not leak under an unrelated control"
+        )
+    }
+
     func testARefusalDoesNotSurfaceUnderAnUnrelatedControl() async {
         let model = HarnessViewModel()
         await model.addParticipant()
