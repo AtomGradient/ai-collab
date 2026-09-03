@@ -158,14 +158,14 @@ final class HarnessViewModel: ObservableObject {
     var destroyPreviewLoaded: Bool { !destroyPreviewText.isEmpty }
     var destroyPreviewBlocked: Bool { destroyPreviewLoaded && !destroyPreviewEligible }
 
-    let client: HarnessIPCClient
+    let client: any HarnessCalling
     private let serviceController: HarnessServiceController?
     /// Internal so progress-session behavior tests can stage a live session.
     var activeProgressSessionID: UUID?
     private var successToken: UUID?
 
     init(
-        client: HarnessIPCClient = HarnessIPCClient(),
+        client: any HarnessCalling = HarnessIPCClient(),
         serviceController: HarnessServiceController? = nil,
         readyMomentDefaults: UserDefaults = .standard
     ) {
@@ -1575,12 +1575,17 @@ final class HarnessViewModel: ObservableObject {
                     scenario: scenario
                 )
                 guard selectedScenarioID == scenarioID else { return }
-                deliveries = page.deliveries
-                deliverySummary = page.summary
-                let shown = page.deliveries.count
-                let total = page.summary.total
-                deliveryNote = {
-                    total == 0 ? S.DeliveryNote.none : S.DeliveryNote.showing(shown, total)
+                // Re-checked after the await, right before the write: a
+                // mutation that began while this read was in flight owns
+                // the next write (its own post-mutation reload).
+                if liveLoopMayWrite(scenarioID) {
+                    deliveries = page.deliveries
+                    deliverySummary = page.summary
+                    let shown = page.deliveries.count
+                    let total = page.summary.total
+                    deliveryNote = {
+                        total == 0 ? S.DeliveryNote.none : S.DeliveryNote.showing(shown, total)
+                    }
                 }
             } catch is CancellationError {
                 return
@@ -1606,17 +1611,29 @@ final class HarnessViewModel: ObservableObject {
         }
     }
 
+    /// The live loop may write only while the room it was started for is
+    /// still selected and no mutation is in flight. Evaluated synchronously
+    /// on the main actor immediately before each write, with no `await`
+    /// in between, so a mutation cannot begin between the check and the
+    /// write; a mutation that began during the preceding read simply wins
+    /// (its own post-mutation reload is the fresher data). Monitor path
+    /// only — the explicit refresh path is never gated by this.
+    private func liveLoopMayWrite(_ scenarioID: String) -> Bool {
+        selectedScenarioID == scenarioID && !isBusy
+    }
+
     /// One read of `scenario.status` + `participant.list`, written back only
     /// when something actually changed so the 2-second tick does not re-render
     /// an unchanged roster or disturb objective editing (`syncObjectiveDraft`
     /// is deliberately not called here — that stays with the explicit
-    /// refresh path).
+    /// refresh path). Every write re-checks `liveLoopMayWrite` after the
+    /// await that preceded it (codex review 20260904-030617-82zm9p P1).
     private func observeRoom(project: ProjectRecord, scenarioID: String) async throws {
         let target = scenarioTarget(projectID: project.id, scenarioID: scenarioID)
         let status = try await client.call(
             HarnessCall(operation: "scenario.status", target: target)
         )
-        guard selectedScenarioID == scenarioID else { return }
+        guard liveLoopMayWrite(scenarioID) else { return }
         if let raw = status["scenario"] as? [String: Any],
            let current = ScenarioRecord(raw),
            let index = scenarios.firstIndex(where: { $0.id == current.id }),
@@ -1625,7 +1642,11 @@ final class HarnessViewModel: ObservableObject {
             scenarios[index] = current
         }
         guard let scenario = selectedScenario else { return }
-        try await reloadParticipants(project: project, scenario: scenario)
+        let parsed = try await fetchParticipants(project: project, scenario: scenario)
+        guard liveLoopMayWrite(scenarioID) else { return }
+        if participants != parsed {
+            participants = parsed
+        }
     }
 
     func retryDelivery(_ delivery: DeliveryRecord) async {
@@ -2021,7 +2042,21 @@ final class HarnessViewModel: ObservableObject {
         destroyPreviewBlockers = []
     }
 
+    /// Explicit-refresh path: reads and assigns unconditionally (apart from
+    /// the equality gate). The live loop uses `fetchParticipants` directly so
+    /// it can apply its own write guard after the await.
     private func reloadParticipants(project: ProjectRecord, scenario: ScenarioRecord) async throws {
+        let parsed = try await fetchParticipants(project: project, scenario: scenario)
+        // Equality-gated: an unchanged roster must not re-render.
+        if participants != parsed {
+            participants = parsed
+        }
+    }
+
+    /// Pure read of `participant.list` — no writes to published state.
+    private func fetchParticipants(
+        project: ProjectRecord, scenario: ScenarioRecord
+    ) async throws -> [ParticipantRecord] {
         let result = try await client.call(
             HarnessCall(
                 operation: "participant.list",
@@ -2061,10 +2096,7 @@ final class HarnessViewModel: ObservableObject {
         guard parsed.count == rawParticipants.count else {
             throw HarnessIPCError.invalidReply
         }
-        // Equality-gated: the live loop calls this every 2 seconds.
-        if participants != parsed {
-            participants = parsed
-        }
+        return parsed
     }
 
     func applyProgress(

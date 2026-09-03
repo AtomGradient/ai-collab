@@ -86,6 +86,28 @@ private struct HarnessReply: @unchecked Sendable {
     let value: [String: Any]
 }
 
+/// The Host call surface the view model depends on — a protocol rather than
+/// the concrete socket client so the live loop's ordering against a mutation
+/// can be driven by a controlled fake in tests (codex review 20260904-030617-
+/// 82zm9p: source-text assertions cannot prove ordering). `HarnessIPCClient`
+/// is the only production conformer.
+protocol HarnessCalling: AnyObject, Sendable {
+    func grantProjectDirectoryAccess(_ url: URL) throws
+    func call(
+        _ call: HarnessCall,
+        progress: (@Sendable (HarnessProgress) -> Void)?
+    ) async throws -> [String: Any]
+    func cancelOperation(_ operationID: String) async throws -> [String: Any]
+}
+
+extension HarnessCalling {
+    func call(_ call: HarnessCall) async throws -> [String: Any] {
+        try await self.call(call, progress: nil)
+    }
+}
+
+extension HarnessIPCClient: HarnessCalling {}
+
 final class HarnessIPCClient: @unchecked Sendable {
     let stateRoot: URL
     let socketPath: String

@@ -443,7 +443,16 @@ struct ContentView: View {
         .overlay { activityOverlay }
         .onChange(of: model.selectedScenarioID) { _, _ in endObjectiveEditing() }
         .task { await model.bootstrap() }
-        .frame(minWidth: 1100, minHeight: 720)
+        // The floor grows while the inspector is open: at 1100 the three
+        // columns plus a 300pt inspector left ≈250pt for the room List and
+        // every row wrapped character-by-character on a real render (codex
+        // review 20260904-030617-82zm9p P1). 1280 keeps ≥ ~440pt for the
+        // List at the columns' ideal widths.
+        .frame(
+            minWidth: showTechnical
+                ? Self.minimumWindowWidthWithInspector : Self.minimumWindowWidth,
+            minHeight: 720
+        )
     }
 
     // MARK: - Getting-started guide (centered card deck)
@@ -882,6 +891,8 @@ struct ContentView: View {
     /// r9tf2j); the progress column is its own ScrollView for the same
     /// reason.
     private static let twoColumnMinimumWidth: CGFloat = 760
+    private static let minimumWindowWidth: CGFloat = 1100
+    private static let minimumWindowWidthWithInspector: CGFloat = 1280
 
     private var scenarioDetail: some View {
         Group {
@@ -905,7 +916,7 @@ struct ContentView: View {
                 .toolbar { detailToolbar(scenario) }
                 .inspector(isPresented: $showTechnical) {
                     evidenceInspector(scenario)
-                        .inspectorColumnWidth(min: 300, ideal: 360, max: 560)
+                        .inspectorColumnWidth(min: 300, ideal: 340, max: 480)
                 }
                 .task(id: scenario.id) {
                     await model.monitorRoom(for: scenario.id)
@@ -2108,15 +2119,22 @@ struct ContentView: View {
     private func stageTimeline(_ scenario: ScenarioRecord) -> some View {
         let stage = currentStage(scenario)
         let attention = [.attention, .failed].contains(scenario.presentationClass)
+        // The current stage carries the room's own class: attention when
+        // the room needs a person, inactive (grey) for a closed room — a
+        // blue "working" dot on "Closed" read as if closing were in
+        // progress on the real render — and working otherwise.
+        let currentClass: PresentationClass = attention
+            ? .attention
+            : (scenario.presentationClass == .inactive ? .inactive : .working)
         return VStack(alignment: .leading, spacing: 4) {
-            stageRow(.setup, current: stage, label: S.Stage.setup)
-            stageRow(.staffing, current: stage, label: S.Stage.staffing)
+            stageRow(.setup, current: stage, label: S.Stage.setup, currentClass: currentClass)
+            stageRow(.staffing, current: stage, label: S.Stage.staffing, currentClass: currentClass)
             stageRow(
                 .running, current: stage,
                 label: (attention && stage == .running) ? S.Stage.runningAttention : S.Stage.running,
-                attention: attention
+                currentClass: currentClass
             )
-            stageRow(.closed, current: stage, label: S.Stage.closed)
+            stageRow(.closed, current: stage, label: S.Stage.closed, currentClass: currentClass)
         }
     }
 
@@ -2127,19 +2145,22 @@ struct ContentView: View {
     /// upcoming → an empty circle in tertiary.
     private func stageRow(
         _ step: WorkbenchStage, current: WorkbenchStage, label: String,
-        attention: Bool = false
+        currentClass: PresentationClass
     ) -> some View {
         let done = step.rawValue < current.rawValue
         let isCurrent = step == current
-        let cls: PresentationClass? = done
-            ? .success
-            : (isCurrent ? (attention ? .attention : .working) : nil)
+        let cls: PresentationClass? = done ? .success : (isCurrent ? currentClass : nil)
+        // An inactive current stage still has to read as "you are here",
+        // so it gets a filled-inset circle rather than the class's hollow
+        // one (which is what an upcoming stage shows).
+        let symbol = (isCurrent && currentClass == .inactive)
+            ? "circle.inset.filled" : (cls?.symbolName ?? "circle")
         return Label {
             Text(label)
                 .font(.callout.weight(isCurrent ? .semibold : .regular))
                 .foregroundStyle(done || isCurrent ? Color.primary : Color.secondary)
         } icon: {
-            Image(systemName: cls?.symbolName ?? "circle")
+            Image(systemName: symbol)
                 .foregroundStyle(cls?.color ?? Color.secondary.opacity(0.5))
         }
         .padding(.vertical, 2)

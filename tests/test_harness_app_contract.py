@@ -739,7 +739,7 @@ def test_evidence_uses_primary_column_slack_with_a_pinned_bottom_disclosure() ->
     )[0]
     assert ".inspector(isPresented: $showTechnical)" in detail
     assert "evidenceInspector(scenario)" in detail
-    assert ".inspectorColumnWidth(min: 300, ideal: 360, max: 560)" in detail
+    assert ".inspectorColumnWidth(min: 300, ideal: 340, max: 480)" in detail
     # (the project rail's own bottom inset — "register project" — is a
     # different, unrelated inset; only the detail column is asserted here)
     assert ".safeAreaInset(edge: .bottom" not in detail
@@ -1219,7 +1219,13 @@ def test_window_opens_at_the_two_column_workbench_size() -> None:
     app = (APP_ROOT / "AICollabApp.swift").read_text(encoding="utf-8")
     content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
     assert ".defaultSize(width: 1440, height: 900)" in app
-    assert ".frame(minWidth: 1100, minHeight: 720)" in content
+    # codex review 20260904-030617-82zm9p P1: with the inspector open the
+    # 1100 floor left ≈250pt for the room List on a real render. The floor
+    # is 1280 while the inspector is open, 1100 otherwise.
+    assert "private static let minimumWindowWidth: CGFloat = 1100" in content
+    assert "private static let minimumWindowWidthWithInspector: CGFloat = 1280" in content
+    root = content.split("minHeight: 720", 1)[0][-400:]
+    assert "showTechnical" in root and "Self.minimumWindowWidthWithInspector : Self.minimumWindowWidth" in root
 
 
 def test_live_loop_observes_participants_read_only() -> None:
@@ -1233,11 +1239,24 @@ def test_live_loop_observes_participants_read_only() -> None:
         "\n    func retryDelivery", 1
     )[0]
     assert 'operation: "scenario.status"' in observe
-    assert "reloadParticipants(project: project, scenario: scenario)" in observe
+    assert "fetchParticipants(project: project, scenario: scenario)" in observe
     assert "scenarios[index] != current" in observe
-    for forbidden in ("performMutation", "syncObjectiveDraft", "reloadPreflight", "reloadTopology"):
+    for forbidden in ("performMutation", "syncObjectiveDraft", "reloadPreflight", "reloadTopology", "reloadParticipants("):
         assert forbidden not in observe, forbidden
+    # codex review 20260904-030617-82zm9p P1: the write guard is re-evaluated
+    # after each await, immediately before each write — once after
+    # scenario.status, once after participant.list — and the deliveries write
+    # in the loop body is guarded the same way. Ordering itself is proven by
+    # LiveLoopRaceTests (fake client), not by this substring check.
+    assert observe.count("guard liveLoopMayWrite(scenarioID) else { return }") == 2
+    guard_fn = view_model.split("private func liveLoopMayWrite", 1)[1].split("\n    }\n", 1)[0]
+    assert "selectedScenarioID == scenarioID && !isBusy" in guard_fn
+    monitor = view_model.split("func monitorRoom(for scenarioID: String) async", 1)[1].split(
+        "private func liveLoopMayWrite", 1
+    )[0]
+    assert monitor.index("if liveLoopMayWrite(scenarioID) {") < monitor.index("deliveries = page.deliveries")
     reload = view_model.split("private func reloadParticipants", 1)[1].split(
-        "\n    func applyProgress", 1
+        "\n    /// Pure read", 1
     )[0]
     assert "if participants != parsed {" in reload
+    assert "liveLoopMayWrite" not in reload, "the explicit refresh path is never gated by the live-loop guard"
