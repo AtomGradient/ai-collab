@@ -159,6 +159,27 @@ def test_harness_app_raw_activity_has_no_pagination_callpoints() -> None:
         assert removed not in view_model + models + content
 
 
+def test_app_offers_a_read_when_the_room_reads_as_inconsistent() -> None:
+    """The one blocked state whose copy names re-reading must render it.
+
+    `.inconsistent` used to produce no button while telling the user to
+    "use the repair guidance below" — a section that can be empty until
+    preflight is run. Refresh is a read, so it has no Host precondition to
+    violate and does not weaken the rule that every offered lifecycle
+    action is one the Host would accept.
+    """
+    content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
+    strings = (APP_ROOT / "Strings.swift").read_text(encoding="utf-8")
+
+    assert "case .inconsistent:" in content
+    assert "S.Guide.recheckAction" in content
+    assert "await model.refreshSelectedScenario()" in content
+    assert "case .attend, .working:" in content
+
+    for stale in ("repair guidance below", "\u4e0b\u65b9\u7684\u4fee\u590d\u6307\u5f15"):
+        assert stale not in strings
+
+
 def test_app_exposes_participant_replace_without_detach() -> None:
     content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
     view_model = (APP_ROOT / "HarnessViewModel.swift").read_text(encoding="utf-8")

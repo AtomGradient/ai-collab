@@ -322,7 +322,12 @@ struct ContentView: View {
             return (S.Guide.startAction, { Task { await model.startAllParticipants() } })
         case .focusAndAssign:
             return (S.Guide.focusAction, { Task { await model.focusScenario() } })
-        case .attend, .working, .inconsistent:
+        case .inconsistent:
+            // Refresh is a read, not a lifecycle mutation, so it cannot be an
+            // action the Host would refuse. This state named refreshing in its
+            // own copy while rendering no button at all.
+            return (S.Guide.recheckAction, { Task { await model.refreshSelectedScenario() } })
+        case .attend, .working:
             return nil
         }
     }

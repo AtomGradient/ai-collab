@@ -1386,8 +1386,8 @@ enum S {
         static var focusAction: String { t("Focus Colleague Window", "聚焦同事窗口") }
         static func attendSay(_ stateLabel: String) -> String {
             t(
-                "The room needs you: \(stateLabel). Use the repair guidance below.",
-                "房间需要处理：\(stateLabel)。请使用下方的修复指引。"
+                "The room needs you: \(stateLabel). Run the checks below for the repair.",
+                "房间需要处理：\(stateLabel)。请运行下方的检查以获得修复方式。"
             )
         }
         static func workingSay(_ stateLabel: String) -> String {
@@ -1400,10 +1400,15 @@ enum S {
 
         static var inconsistentSay: String {
             t(
-                "The room's state and its workspace evidence disagree — refresh, "
-                    + "or use the repair guidance below.",
-                "房间状态与工作区证据不一致——请刷新，或使用下方的修复指引。"
+                "The room's state and its workspace evidence disagree.",
+                "房间状态与工作区证据不一致。"
             )
+        }
+        /// A read, never a lifecycle mutation — it has no Host precondition to
+        /// violate, so the one blocked state that used to offer nothing can
+        /// still offer the step its own copy names.
+        static var recheckAction: String {
+            t("Re-read the Room", "重新读取房间")
         }
         static var readyMomentTitle: String { t("The room is ready", "房间已就绪") }
         static var readyMomentBody: String {
