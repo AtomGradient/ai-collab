@@ -47,6 +47,20 @@ enum GuidanceStep: Equatable {
     case inconsistent
 }
 
+/// Whether the Host's workspace receipt has actually been observed.
+///
+/// A Bool conflated "not read yet" with "read, and there is none". Selecting a
+/// running room sets the record before the diagnostic returns, so the boolean
+/// spent every bootstrap saying the workspace was missing — which the rail
+/// fail-closed into a NEEDS YOU banner on a healthy room. Mirrors
+/// `PolicyReadiness`: loading is transitional, unavailable is a failed read.
+enum WorkspaceEvidence: Equatable {
+    case loading
+    case present
+    case absent
+    case unavailable
+}
+
 enum PolicyReadiness: Equatable {
     case loading
     case missing
@@ -117,7 +131,7 @@ final class HarnessViewModel: ObservableObject {
 
     /// True once the selected room's isolated workspace has a publish receipt.
     /// Internal so state-machine tests can stage it directly.
-    @Published var workspaceReady = false
+    @Published var workspaceEvidence: WorkspaceEvidence = .loading
     /// One-time "the room is ready" moment, keyed per room generation.
     @Published private(set) var showReadyMoment = false
     /// The getting-started card's open step. Lives on the model so a language
@@ -257,15 +271,31 @@ final class HarnessViewModel: ObservableObject {
             return .working(Self.humanState(scenario.observedState))
         case "closed":
             // workspace.plan requires a closed Scenario, so Prepare is only
-            // ever offered here.
-            if !workspaceReady { return .prepareWorkspace }
+            // ever offered here — and only once the receipt has actually been
+            // read. Offering it while the diagnostic is still in flight would
+            // propose recreating a workspace that already exists.
+            switch workspaceEvidence {
+            case .loading: return .working(S.Guide.checkingWorkspace)
+            case .unavailable: return .inconsistent
+            case .absent: return .prepareWorkspace
+            case .present: break
+            }
             if interactive.isEmpty { return .addColleague }
             return .resumeRoom
         case "running":
-            if !workspaceReady {
-                // A running room without workspace evidence is inconsistent;
-                // never offer an action the Host must refuse.
+            switch workspaceEvidence {
+            case .loading:
+                // Not yet read is not a disagreement. Saying so was the whole
+                // bug: every bootstrap of a healthy running room rendered
+                // NEEDS YOU with no action until the user pressed Refresh.
+                return .working(S.Guide.checkingWorkspace)
+            case .absent, .unavailable:
+                // A running room whose workspace evidence is missing or
+                // unreadable is inconsistent; never offer an action the Host
+                // must refuse.
                 return .inconsistent
+            case .present:
+                break
             }
             if interactive.isEmpty { return .addColleague }
             switch policyReadiness {
@@ -333,7 +363,7 @@ final class HarnessViewModel: ObservableObject {
     private var completedMilestoneIndex: Int {
         guard selectedProject != nil else { return 0 }
         guard selectedScenario != nil else { return 1 }
-        if !workspaceReady { return 2 }
+        if workspaceEvidence != .present { return 2 }
         if participants.filter(\.isInteractive).isEmpty { return 3 }
         return 4
     }
@@ -546,7 +576,7 @@ final class HarnessViewModel: ObservableObject {
     }
 
     func selectScenario(_ id: String?) async {
-        workspaceReady = false
+        workspaceEvidence = .loading
         showReadyMoment = false
         selectedScenarioID = id
         clearDestroyPreview()
@@ -1729,8 +1759,19 @@ final class HarnessViewModel: ObservableObject {
             resources = []
             preflight = nil
             topology = nil
+            workspaceEvidence = .loading
             clearCollaborationValues()
             return
+        }
+        // A read that throws before the workspace diagnostic observed nothing.
+        // Resolve to unavailable rather than leaving a first load stuck on
+        // "checking" forever; an already-observed receipt is left alone so a
+        // routine refresh does not flicker back through the transitional state.
+        var observedWorkspace = false
+        defer {
+            if !observedWorkspace, workspaceEvidence == .loading {
+                workspaceEvidence = .unavailable
+            }
         }
         let target = scenarioTarget(projectID: project.id, scenarioID: scenarioID)
         let status = try await client.call(
@@ -1761,10 +1802,11 @@ final class HarnessViewModel: ObservableObject {
             let receipt = workspace["receipt"] as? [String: Any]
         {
             receiptOverride = prettyJSON(receipt)
-            workspaceReady = true
+            workspaceEvidence = .present
         } else {
-            workspaceReady = false
+            workspaceEvidence = .absent
         }
+        observedWorkspace = true
         let resourceResult = try await client.call(
             HarnessCall(operation: "resource.list", target: target)
         )

@@ -1394,6 +1394,10 @@ enum S {
             t("\(stateLabel)…", "\(stateLabel)…")
         }
 
+        static var checkingWorkspace: String {
+            t("Checking the workspace", "正在检查工作区")
+        }
+
         static var inconsistentSay: String {
             t(
                 "The room's state and its workspace evidence disagree — refresh, "

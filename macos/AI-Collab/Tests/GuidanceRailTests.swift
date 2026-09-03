@@ -57,6 +57,7 @@ final class GuidanceRailTests: XCTestCase {
         room observed: String? = nil,
         generation: Int = 3,
         workspaceReady: Bool = false,
+        evidence: WorkspaceEvidence? = nil,
         participants: [ParticipantRecord] = [],
         policyReadiness: PolicyReadiness = .current,
         defaults: UserDefaults = .standard
@@ -68,7 +69,7 @@ final class GuidanceRailTests: XCTestCase {
             model.scenarios = [scenario(observed, generation: generation)]
             model.selectedScenarioID = "room-1"
         }
-        model.workspaceReady = workspaceReady
+        model.workspaceEvidence = evidence ?? (workspaceReady ? .present : .absent)
         model.participants = participants
         model.policyReadiness = policyReadiness
         return model
@@ -114,6 +115,45 @@ final class GuidanceRailTests: XCTestCase {
             model(room: "running", workspaceReady: false).guidance,
             .inconsistent,
             "running without workspace evidence must never offer Prepare"
+        )
+    }
+
+    /// Selecting a room sets the record before the workspace diagnostic
+    /// answers. A boolean made that indistinguishable from "there is no
+    /// workspace", so every bootstrap of a healthy running room rendered
+    /// NEEDS YOU with no action, and every bootstrap of a closed room offered
+    /// to recreate a workspace it had not yet looked for.
+    func testUnreadWorkspaceEvidenceIsTransitionalNotADisagreement() {
+        XCTAssertEqual(
+            HarnessViewModel().workspaceEvidence,
+            .loading,
+            "a model that has read nothing must not start out claiming absence"
+        )
+        XCTAssertEqual(
+            model(room: "running", evidence: .loading, participants: [participant("ready")]).guidance,
+            .working(S.Guide.checkingWorkspace),
+            "an unread receipt must never fail closed into NEEDS YOU"
+        )
+        XCTAssertEqual(
+            model(room: "closed", evidence: .loading).guidance,
+            .working(S.Guide.checkingWorkspace),
+            "an unread receipt must never offer Prepare"
+        )
+    }
+
+    /// A read that never reached the diagnostic observed nothing. That is not
+    /// the same as observing an absent receipt: Prepare must stay unoffered.
+    func testUnreadableWorkspaceEvidenceFailsClosedWithoutOfferingPrepare() {
+        XCTAssertEqual(
+            model(room: "closed", evidence: .unavailable).guidance, .inconsistent
+        )
+        XCTAssertEqual(
+            model(room: "running", evidence: .unavailable).guidance, .inconsistent
+        )
+        XCTAssertEqual(
+            model(room: "closed", evidence: .absent).guidance,
+            .prepareWorkspace,
+            "an observed absent receipt still offers Prepare"
         )
     }
 
