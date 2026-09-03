@@ -351,13 +351,27 @@ struct ContentView: View {
     @State private var destroyPanelTarget: DestroyPanelTarget?
 
     var body: some View {
-        NavigationSplitView {
-            projectsSidebar
-        } content: {
-            scenariosList
-        } detail: {
-            scenarioDetail
+        Group {
+            if model.selectedProject != nil, model.scenarios.isEmpty {
+                NavigationSplitView {
+                    projectsSidebar
+                        .navigationSplitViewColumnWidth(min: 180, ideal: 200, max: 240)
+                } detail: {
+                    emptyDetailCanvas
+                }
+            } else {
+                NavigationSplitView {
+                    projectsSidebar
+                        .navigationSplitViewColumnWidth(min: 180, ideal: 200, max: 240)
+                } content: {
+                    scenariosList
+                        .navigationSplitViewColumnWidth(min: 270, ideal: 296, max: 340)
+                } detail: {
+                    scenarioDetail
+                }
+            }
         }
+        .navigationTitle(S.Chrome.appTitle)
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button(S.Chrome.registerProject, systemImage: "plus") {
@@ -454,24 +468,22 @@ struct ContentView: View {
     /// The live next step, rendered as the Scenario's own primary action
     /// rather than a dismissible card. `HarnessViewModel.guidance` stays the
     /// only source of flow truth; this view never re-derives it.
+    ///
+    /// review 20260903-201119-r9tf2j: the Artifact's compact mission header
+    /// carries no separate "next step" card at all for an operating room —
+    /// the badge and (when eligible) the header's own Repair button already
+    /// say what `.attend`/`.working`/`.inconsistent` would otherwise repeat.
+    /// The prominent card is reserved for guidance states that actually
+    /// have a real action to drive — the onboarding funnel this rail also
+    /// serves. Anything else, `.focusAndAssign` included, is one slim line.
     @ViewBuilder
     private var scenarioFlowSection: some View {
         if case .focusAndAssign = model.guidance {
-            // Operational: the flow collapses to one line so Collaboration
-            // Health and the team keep the first viewport.
-            HStack(spacing: 9) {
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-                Text(S.Flow.ready)
-                    .font(.callout.weight(.medium))
-                Spacer(minLength: 8)
-                if let action = liveGuideAction() {
-                    Button(action.label, action: action.perform)
-                        .controlSize(.small)
-                        .disabled(model.isBusy)
-                }
-            }
-        } else {
+            flowLine(
+                icon: "checkmark.circle.fill", tint: .green, text: S.Flow.ready,
+                action: liveGuideAction()
+            )
+        } else if let action = liveGuideAction() {
             VStack(alignment: .leading, spacing: 9) {
                 Text(flowEyebrow)
                     .font(.system(size: 10, weight: .semibold))
@@ -480,13 +492,35 @@ struct ContentView: View {
                 Text(liveGuideSay)
                     .font(.title3.weight(.medium))
                     .fixedSize(horizontal: false, vertical: true)
-                if let action = liveGuideAction() {
-                    Button(action.label, action: action.perform)
-                        .buttonStyle(.borderedProminent)
-                        .disabled(model.isBusy)
-                }
+                Button(action.label, action: action.perform)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(model.isBusy)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            flowLine(
+                icon: model.lifecycleActionsPreempted ? "exclamationmark.circle.fill" : "clock.fill",
+                tint: model.lifecycleActionsPreempted ? .orange : .secondary,
+                text: liveGuideSay
+            )
+        }
+    }
+
+    private func flowLine(
+        icon: String, tint: Color, text: String,
+        action: (label: String, perform: () -> Void)? = nil
+    ) -> some View {
+        HStack(spacing: 9) {
+            Image(systemName: icon)
+                .foregroundStyle(tint)
+            Text(text)
+                .font(.callout.weight(.medium))
+            Spacer(minLength: 8)
+            if let action {
+                Button(action.label, action: action.perform)
+                    .controlSize(.small)
+                    .disabled(model.isBusy)
+            }
         }
     }
 
@@ -678,42 +712,69 @@ struct ContentView: View {
     // MARK: - Sidebar: Projects
 
     private var projectsSidebar: some View {
-        List(selection: Binding(
-            get: { model.selectedProjectID },
-            set: { id in Task { await model.selectProject(id) } }
-        )) {
+        List {
             Section(S.Projects.sectionTitle) {
                 ForEach(model.projects) { project in
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(project.key)
-                        Text(S.Projects.contractVersion(project.productContractVersion))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        if let reconciliation = model.projectReconciliations[project.id],
-                           reconciliation.status == "attention" {
-                            Text(
-                                reconciliation.bindingChanged
-                                    ? S.Projects.updateAvailable
-                                    : reconciliation.changes.isEmpty
-                                        ? S.Projects.needsAttention
-                                        : S.Projects.repositoryChanges(
-                                            reconciliation.changes.count
+                    Button {
+                        Task { await model.selectProject(project.id) }
+                    } label: {
+                        HStack(spacing: 9) {
+                            Text(String(project.key.prefix(1)).uppercased())
+                                .font(.caption.bold())
+                                .frame(width: 26, height: 26)
+                                .foregroundStyle(
+                                    model.selectedProjectID == project.id
+                                        ? Color.brandAccent : Color.secondary
+                                )
+                                .background(
+                                    (model.selectedProjectID == project.id
+                                        ? Color.brandAccent : Color.secondary).opacity(0.16),
+                                    in: RoundedRectangle(cornerRadius: 6)
+                                )
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(project.key)
+                                    .font(.callout.weight(.semibold))
+                                    .lineLimit(1)
+                                Text(S.Projects.contractVersion(project.productContractVersion))
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                if let reconciliation = model.projectReconciliations[project.id],
+                                   reconciliation.status == "attention" {
+                                    Text(
+                                        reconciliation.bindingChanged
+                                            ? S.Projects.updateAvailable
+                                            : reconciliation.changes.isEmpty
+                                                ? S.Projects.needsAttention
+                                                : S.Projects.repositoryChanges(
+                                                    reconciliation.changes.count
+                                                )
                                         )
-                            )
-                            .font(.caption)
-                            .foregroundStyle(.orange)
-                            if reconciliation.bindingChanged {
-                                Button(S.Projects.applyUpdate) {
-                                    Task {
-                                        await model.acceptProjectReconciliation(project.id)
+                                    .font(.caption2)
+                                    .foregroundStyle(.orange)
+                                    if reconciliation.bindingChanged {
+                                        Button(S.Projects.applyUpdate) {
+                                            Task {
+                                                await model.acceptProjectReconciliation(project.id)
+                                            }
+                                        }
+                                        .buttonStyle(.link)
+                                        .font(.caption2)
                                     }
                                 }
-                                .buttonStyle(.link)
-                                .font(.caption)
                             }
                         }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 7)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(
+                            model.selectedProjectID == project.id
+                                ? Color.brandAccent.opacity(0.16) : Color.clear,
+                            in: RoundedRectangle(cornerRadius: 6)
+                        )
                     }
-                    .tag(project.id)
+                    .buttonStyle(.plain)
+                    .listRowInsets(EdgeInsets(top: 2, leading: 4, bottom: 2, trailing: 4))
+                    .listRowBackground(Color.clear)
                     .contextMenu {
                         Button(S.Projects.checkUpdates) {
                             Task { await model.reconcileProject(project.id, surfaceErrors: true) }
@@ -731,7 +792,7 @@ struct ContentView: View {
                 }
             }
         }
-        .navigationTitle(S.Chrome.appTitle)
+        .listStyle(.sidebar)
         .confirmationDialog(
             S.Register.confirmTitle,
             isPresented: Binding(
@@ -752,31 +813,34 @@ struct ContentView: View {
                 Text(S.Register.confirmMessage(url.lastPathComponent))
             }
         }
-        .safeAreaInset(edge: .bottom) {
-            HStack {
-                Circle()
-                    .fill(model.hostReady ? .green : .orange)
-                    .frame(width: 8, height: 8)
-                Text(S.Chrome.hostStatusLine(model.hostStatusDisplay))
-                    .font(.caption)
-                Spacer()
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            VStack(spacing: 8) {
                 if !model.hostReady {
-                    Button(S.Common.retry) { Task { await model.retryHostService() } }
-                        .controlSize(.small)
-                } else if let permission = model.presentationPermissionStatus,
-                          permission != "granted" {
-                    Button(S.Chrome.grantITermAccess) {
-                        Task { await model.requestPresentationPermission() }
+                    HStack(spacing: 6) {
+                        Circle().fill(.orange).frame(width: 7, height: 7)
+                        Text(S.Chrome.hostStatusLine(model.hostStatusDisplay))
+                            .font(.caption2)
+                            .lineLimit(2)
+                        Spacer()
+                        Button(S.Common.retry) { Task { await model.retryHostService() } }
+                            .controlSize(.mini)
                     }
-                    .controlSize(.small)
-                    .help(S.Chrome.grantITermHelp)
                 }
-                SettingsLink {
-                    Label(S.Settings.diagnosticsTab, systemImage: "stethoscope")
-                        .labelStyle(.iconOnly)
+                Button {
+                    Task { await model.chooseAndRegisterProject() }
+                } label: {
+                    Label(S.Chrome.registerProject, systemImage: "plus")
+                        .font(.callout)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .contentShape(Rectangle())
                 }
-                .controlSize(.small)
-                .help(S.Chrome.diagnosticsHelp)
+                .buttonStyle(.plain)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(.secondary.opacity(0.35), style: StrokeStyle(dash: [4, 3]))
+                }
             }
             .padding(10)
             .background(.bar)
@@ -787,33 +851,43 @@ struct ContentView: View {
 
     private var scenariosList: some View {
         VStack(spacing: 0) {
-            VStack(spacing: 8) {
-                TextField(S.Rooms.objectivePlaceholder, text: $model.newScenarioObjective)
-                TextField(S.Rooms.identityPlaceholder, text: $model.newScenarioID)
-                    .onSubmit {
-                        guard model.selectedProject != nil, !model.isBusy else { return }
-                        Task { await model.createScenario() }
+            // Once a project has no rooms, the first-use canvas owns this
+            // composer. Rendering the same bindings in both columns creates
+            // two mirrored forms and two competing primary actions.
+            if model.selectedProject == nil || !model.scenarios.isEmpty {
+                VStack(spacing: 8) {
+                    TextField(S.Rooms.objectivePlaceholder, text: $model.newScenarioObjective)
+                    HStack(spacing: 8) {
+                        TextField(S.Rooms.identityPlaceholder, text: $model.newScenarioID)
+                            .onSubmit {
+                                guard model.selectedProject != nil, !model.isBusy else { return }
+                                Task { await model.createScenario() }
+                            }
+                        Button(S.Rooms.createButton) { Task { await model.createScenario() } }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(model.selectedProject == nil || model.isBusy)
                     }
-                HStack {
-                    Spacer()
-                    Button(S.Rooms.createButton) { Task { await model.createScenario() } }
-                        .disabled(model.selectedProject == nil || model.isBusy)
                 }
+                .padding(12)
+                validationBanner(for: .scenarioCreate)
+                    .padding(.horizontal)
             }
-            .padding()
-            validationBanner(for: .scenarioCreate)
-                .padding(.horizontal)
-            List(selection: Binding(
-                get: { model.selectedScenarioID },
-                set: { id in Task { await model.selectScenario(id) } }
-            )) {
+            List {
                 ForEach(scenarioGroups, id: \.label) { group in
                     Section(group.label) {
                         ForEach(group.scenarios) { scenario in
-                            ScenarioRoomCard(scenario: scenario)
-                                .tag(scenario.id)
+                            Button {
+                                Task { await model.selectScenario(scenario.id) }
+                            } label: {
+                                ScenarioRoomCard(
+                                    scenario: scenario,
+                                    isSelected: model.selectedScenarioID == scenario.id
+                                )
+                            }
+                                .buttonStyle(.plain)
                                 .listRowInsets(EdgeInsets(top: 3, leading: 6, bottom: 3, trailing: 6))
                                 .listRowSeparator(.hidden)
+                                .listRowBackground(Color.clear)
                                 .contextMenu {
                                     Button(S.Rooms.deleteMenu, role: .destructive) {
                                         guard let projectID = model.selectedProjectID else { return }
@@ -829,7 +903,6 @@ struct ContentView: View {
             }
             .listStyle(.plain)
         }
-        .navigationTitle(S.Rooms.listTitle)
     }
 
     /// Needs Attention (attention ∪ failed) → In Progress (working, including
@@ -877,16 +950,27 @@ struct ContentView: View {
     private var scenarioDetail: some View {
         Group {
             if let scenario = model.selectedScenario {
-                VStack(alignment: .leading, spacing: 0) {
-                    missionBar(scenario)
-                    Divider()
-                    ScrollView {
-                        workbenchBody(scenario)
-                            .padding(20)
+                // `.safeAreaInset(edge: .top)`, not a plain VStack sibling
+                // above the ScrollView (review 20260903-201119-r9tf2j): a
+                // bare sibling does not participate in the same toolbar
+                // safe-area accounting a ScrollView gets automatically as
+                // NavigationSplitView detail content, so the mission bar and
+                // the ScrollView's own first content both rendered up under
+                // the unified title bar. `safeAreaInset` is the documented
+                // pattern for a pinned header that stays correctly below the
+                // title bar while the content beneath it scrolls.
+                ScrollView {
+                    workbenchBody(scenario)
+                        .padding(20)
+                }
+                .safeAreaInset(edge: .top, spacing: 0) {
+                    VStack(spacing: 0) {
+                        missionBar(scenario)
+                        Divider()
                     }
-                    .task(id: scenario.id) {
-                        await model.monitorDeliveries(for: scenario.id)
-                    }
+                }
+                .task(id: scenario.id) {
+                    await model.monitorDeliveries(for: scenario.id)
                 }
             } else {
                 emptyDetailCanvas
@@ -909,18 +993,14 @@ struct ContentView: View {
                         healthCard(scenario)
                         participantsSection
                     }
-                    .frame(minWidth: 440, maxWidth: .infinity, alignment: .leading)
-                    VStack(alignment: .leading, spacing: 16) {
-                        collaborationHealthSection
-                        needsAttentionSection
-                    }
-                    .frame(width: 300, alignment: .leading)
+                    .frame(minWidth: 340, maxWidth: .infinity, alignment: .leading)
+                    progressPanel(scenario)
+                        .frame(width: 280, alignment: .leading)
                 }
                 VStack(alignment: .leading, spacing: 16) {
                     healthCard(scenario)
                     participantsSection
-                    collaborationHealthSection
-                    needsAttentionSection
+                    progressPanel(scenario)
                 }
             }
             technicalSection(scenario)
@@ -937,36 +1017,195 @@ struct ContentView: View {
     @ViewBuilder
     private var emptyDetailCanvas: some View {
         if model.selectedProject != nil, model.scenarios.isEmpty {
-            VStack(alignment: .leading, spacing: 18) {
-                Label(S.Rooms.firstUseTitle, systemImage: "sparkles")
-                    .font(.title2.bold())
-                Text(S.Rooms.firstUseBody)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                VStack(alignment: .leading, spacing: 8) {
-                    TextField(S.Rooms.objectivePlaceholder, text: $model.newScenarioObjective)
-                    TextField(S.Rooms.identityPlaceholder, text: $model.newScenarioID)
-                        .onSubmit {
-                            guard !model.isBusy else { return }
-                            Task { await model.createScenario() }
+            HStack(alignment: .top, spacing: 40) {
+                VStack(alignment: .leading, spacing: 0) {
+                    onboardingStep(
+                        index: 1,
+                        state: .complete,
+                        title: S.Rooms.onboardingRegistered,
+                        detail: S.Rooms.onboardingRegisteredDetail(
+                            model.selectedProject?.key ?? ""
+                        )
+                    )
+                    onboardingStep(
+                        index: 2,
+                        state: .current,
+                        title: S.Rooms.firstUseTitle,
+                        detail: S.Rooms.firstUseBody
+                    ) {
+                        VStack(spacing: 8) {
+                            TextField(
+                                S.Rooms.identityPlaceholder,
+                                text: $model.newScenarioID
+                            )
+                            .onSubmit {
+                                guard !model.isBusy else { return }
+                                Task { await model.createScenario() }
+                            }
+                            TextField(
+                                S.Rooms.objectivePlaceholder,
+                                text: $model.newScenarioObjective
+                            )
+                            HStack {
+                                Button(S.Rooms.createButton) {
+                                    Task { await model.createScenario() }
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .disabled(model.isBusy)
+                                Spacer()
+                            }
+                            validationBanner(for: .scenarioCreate)
                         }
-                    Button(S.Rooms.createButton) { Task { await model.createScenario() } }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(model.isBusy)
-                    validationBanner(for: .scenarioCreate)
+                        .padding(.top, 8)
+                    }
+                    onboardingStep(
+                        index: 3,
+                        state: .upcoming,
+                        title: S.Rooms.onboardingAddColleagues,
+                        detail: S.Rooms.onboardingAddColleaguesDetail
+                    )
+                    onboardingStep(
+                        index: 4,
+                        state: .upcoming,
+                        title: S.Rooms.onboardingStart,
+                        detail: S.Rooms.onboardingStartDetail,
+                        drawsConnector: false
+                    )
                 }
-                .frame(maxWidth: 360, alignment: .leading)
+                .frame(width: 360, alignment: .leading)
+
+                firstUsePreview
+                    .frame(width: 340)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-            .multilineTextAlignment(.leading)
-            .padding(40)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .padding(.horizontal, 48)
+            .padding(.top, 44)
         } else {
             ContentUnavailableView(
                 S.Rooms.selectTitle,
                 systemImage: "square.stack.3d.up",
                 description: Text(S.Rooms.selectDescription)
             )
+        }
+    }
+
+    private enum OnboardingStepState {
+        case complete, current, upcoming
+    }
+
+    private func onboardingStep<Content: View>(
+        index: Int,
+        state: OnboardingStepState,
+        title: String,
+        detail: String,
+        drawsConnector: Bool = true,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            VStack(spacing: 0) {
+                ZStack {
+                    Circle()
+                        .fill(
+                            state == .upcoming
+                                ? Color.clear : Color.brandAccent.opacity(state == .complete ? 0.9 : 0.45)
+                        )
+                    Circle()
+                        .stroke(
+                            state == .upcoming ? Color.secondary.opacity(0.35) : Color.brandAccent,
+                            lineWidth: state == .current ? 3 : 1
+                        )
+                    if state == .complete {
+                        Image(systemName: "checkmark")
+                            .font(.caption.bold())
+                            .foregroundStyle(.white)
+                    } else {
+                        Text(String(index))
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(state == .upcoming ? .secondary : .primary)
+                    }
+                }
+                .frame(width: 30, height: 30)
+                if drawsConnector {
+                    Rectangle()
+                        .fill(Color.secondary.opacity(0.28))
+                        .frame(width: 1)
+                        .frame(minHeight: state == .current ? 142 : 56)
+                }
+            }
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.headline)
+                    .foregroundStyle(state == .upcoming ? .secondary : .primary)
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                content()
+            }
+            .padding(.top, 3)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func onboardingStep(
+        index: Int,
+        state: OnboardingStepState,
+        title: String,
+        detail: String,
+        drawsConnector: Bool = true
+    ) -> some View {
+        onboardingStep(
+            index: index,
+            state: state,
+            title: title,
+            detail: detail,
+            drawsConnector: drawsConnector
+        ) { EmptyView() }
+    }
+
+    private var firstUsePreview: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(S.Rooms.onboardingPreviewTitle)
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text(
+                        model.newScenarioID.isEmpty
+                            ? S.Rooms.identityPlaceholder : model.newScenarioID
+                    )
+                    .font(.headline)
+                    .lineLimit(1)
+                    Spacer()
+                    Label(S.Guide.readyTag, systemImage: "circle")
+                        .font(.caption.bold())
+                        .foregroundStyle(.yellow)
+                }
+                Text(
+                    model.newScenarioObjective.isEmpty
+                        ? S.Rooms.objectivePlaceholder : model.newScenarioObjective
+                )
+                .font(.callout)
+                .foregroundStyle(model.newScenarioObjective.isEmpty ? .tertiary : .primary)
+                .lineLimit(3)
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 6))
+
+            Label(S.Rooms.onboardingNoColleagues, systemImage: "person.2")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+            Divider()
+            Label(S.Rooms.onboardingNextStep, systemImage: "square.stack.3d.up")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+        }
+        .padding(16)
+        .background(.secondary.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(.secondary.opacity(0.25), lineWidth: 1)
         }
     }
 
@@ -984,15 +1223,14 @@ struct ContentView: View {
     /// bottom status row already uses; the `Divider()` `scenarioDetail` draws
     /// right below this is what actually separates it from the scroll area.
     private func missionBar(_ scenario: ScenarioRecord) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 8) {
             scenarioHeader(scenario)
             validationBanner(for: .scenarioLifecycle)
-            Divider()
             scenarioFlowSection
-            Divider()
             objectiveSection(scenario)
         }
-        .padding(16)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
         .background(.bar)
     }
 
@@ -1144,31 +1382,7 @@ struct ContentView: View {
                     .fixedSize()
                 }
             }
-            HStack(spacing: 16) {
-                Label(
-                    S.Colleagues.runningCount(model.runningParticipantCount),
-                    systemImage: "person.2.fill"
-                )
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                Label(
-                    S.Colleagues.deliveryCount(model.deliverySummary?.total ?? 0),
-                    systemImage: "envelope.fill"
-                )
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                if let states = model.deliverySummary?.states, !states.isEmpty {
-                    Text(
-                        states.keys.sorted().map {
-                            "\(S.Delivery.stateLabel($0)) \(states[$0] ?? 0)"
-                        }.joined(separator: " · ")
-                    )
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-                }
-            }
         }
-        .padding(.bottom, 4)
     }
 
     // MARK: - Validation helpers
@@ -1233,8 +1447,25 @@ struct ContentView: View {
             }
             .padding(6)
         } label: {
-            Label(S.Colleagues.sectionTitle, systemImage: "person.3.fill")
-                .font(.headline)
+            HStack {
+                Label(S.Colleagues.sectionTitle, systemImage: "person.3.fill")
+                    .font(.headline)
+                Spacer()
+                // The header's own former "N running / N messages" summary
+                // row moved here — it belongs with the team, not floating
+                // separately above it (review 20260903-201119-r9tf2j: the
+                // Artifact's compact mission header carries no counts row at
+                // all; this is where that count actually lives now).
+                if !model.participants.isEmpty {
+                    Text(S.Colleagues.runningCount(model.runningParticipantCount))
+                        .font(.caption)
+                        .foregroundStyle(
+                            model.participants.contains { $0.presentationClass == .attention }
+                                ? Color.orange
+                                : Color.secondary
+                        )
+                }
+            }
         }
     }
 
@@ -1295,17 +1526,18 @@ struct ContentView: View {
     /// guarantees `model.deliveries`' own ordering.
     private func recentActivityLine(for participant: ParticipantRecord) -> String? {
         let related = model.deliveries.filter {
-            $0.sender.participantID == participant.id
-                || $0.receiver.participantID == participant.id
+            ($0.sender.participantID == participant.id
+                && $0.sender.generation == participant.generation)
+                || ($0.receiver.participantID == participant.id
+                    && $0.receiver.generation == participant.generation)
         }
         guard let latest = related.max(by: { $0.enqueueSequence < $1.enqueueSequence })
         else { return nil }
+        let state = S.Delivery.stateLabel(latest.state)
         if latest.sender.participantID == participant.id {
-            return S.Colleagues.recentActivitySent(latest.receiver.participantID)
+            return S.Colleagues.recentActivitySent(latest.receiver.participantID, state)
         }
-        return S.Colleagues.recentActivityReceived(
-            latest.sender.participantID, S.Delivery.stateLabel(latest.state)
-        )
+        return S.Colleagues.recentActivityReceived(latest.sender.participantID, state)
     }
 
     @ViewBuilder
@@ -1731,6 +1963,102 @@ struct ContentView: View {
     /// with the words right under it. Clear now renders as one compact,
     /// neutral line; the alert-styled headline only appears once there is
     /// something to actually flag.
+    /// The Artifact's actual secondary column: a lifecycle timeline leading
+    /// a compact metrics grid, with the attention list folded into the same
+    /// card — not three unrelated blocks (review 20260903-201119-r9tf2j).
+    /// One shared surface for all three; `collaborationHealthSection` and
+    /// `needsAttentionSection` keep their existing names and content
+    /// unchanged (still independently referenced by the app-contract
+    /// tests), just called from here instead of standing on their own.
+    private func progressPanel(_ scenario: ScenarioRecord) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            stageTimeline(scenario)
+            Divider()
+            collaborationHealthSection
+            Divider()
+            needsAttentionSection
+        }
+        .padding(14)
+        .background(.secondary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private enum WorkbenchStage: Int {
+        case setup, staffing, running, closed
+    }
+
+    /// A deliberately approximate read of "how far along is this room" —
+    /// good enough for an at-a-glance timeline, not a new source of truth:
+    /// every action in the app still gates on the real `observedState`/
+    /// `presentationClass` this derives from, never on this stage.
+    private func currentStage(_ scenario: ScenarioRecord) -> WorkbenchStage {
+        switch scenario.observedState {
+        case "closed", "closing":
+            return .closed
+        case "provisioning", "opening", "provision_failed":
+            return .setup
+        default:
+            return model.participants.isEmpty ? .staffing : .running
+        }
+    }
+
+    private func stageTimeline(_ scenario: ScenarioRecord) -> some View {
+        let stage = currentStage(scenario)
+        let attention = [.attention, .failed].contains(scenario.presentationClass)
+        return VStack(alignment: .leading, spacing: 0) {
+            stageRow(.setup, current: stage, label: S.Stage.setup)
+            stageRow(.staffing, current: stage, label: S.Stage.staffing)
+            stageRow(
+                .running, current: stage,
+                label: (attention && stage == .running) ? S.Stage.runningAttention : S.Stage.running,
+                attention: attention
+            )
+            stageRow(.closed, current: stage, label: S.Stage.closed, isLast: true)
+        }
+    }
+
+    private func stageRow(
+        _ step: WorkbenchStage, current: WorkbenchStage, label: String,
+        attention: Bool = false, isLast: Bool = false
+    ) -> some View {
+        let done = step.rawValue < current.rawValue
+        let isCurrent = step == current
+        let tint: Color = isCurrent && attention ? .orange : .brandAccent
+        return HStack(alignment: .top, spacing: 10) {
+            VStack(spacing: 0) {
+                ZStack {
+                    Circle()
+                        .fill(done ? Color.green : (isCurrent ? tint : Color.clear))
+                        .overlay(
+                            Circle().stroke(
+                                done || isCurrent ? Color.clear : Color.secondary.opacity(0.35),
+                                lineWidth: 1.3
+                            )
+                        )
+                    if done {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(.white)
+                    } else if isCurrent {
+                        Circle().fill(.white).frame(width: 6, height: 6)
+                    }
+                }
+                .frame(width: 18, height: 18)
+                if !isLast {
+                    Rectangle()
+                        .fill(Color.secondary.opacity(0.25))
+                        .frame(width: 1.3)
+                        .frame(minHeight: 16)
+                }
+            }
+            Text(label)
+                .font(.callout.weight(isCurrent ? .semibold : .regular))
+                .foregroundStyle(done || isCurrent ? Color.primary : Color.secondary)
+                .padding(.top, 1)
+            Spacer(minLength: 0)
+        }
+        .padding(.bottom, isLast ? 0 : 10)
+    }
+
     private var needsAttentionSection: some View {
         let isClear = model.deliveryAttentionTotals?.isClear ?? false
         return VStack(alignment: .leading, spacing: 8) {
@@ -1804,10 +2132,12 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
             }
         }
-        .padding(10)
-        .background(.secondary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
     }
 
+    /// Two fixed columns, not an adaptive grid that happened to read as
+    /// compact only because a 300pt secondary column left room for two —
+    /// review 20260903-201119-r9tf2j wants the Artifact's deliberate 2×2,
+    /// not an accident of whatever width this panel ends up with.
     private var collaborationHealthSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             Label(S.CollaborationHealth.sectionTitle, systemImage: "waveform.path.ecg")
@@ -1815,7 +2145,7 @@ struct ContentView: View {
             if let health = model.collaborationHealth {
                 LazyVGrid(
                     columns: [
-                        GridItem(.adaptive(minimum: 128, maximum: 240), spacing: 10)
+                        GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10),
                     ],
                     alignment: .leading,
                     spacing: 10
@@ -2703,6 +3033,7 @@ private struct PresentationBadge: View {
 
 private struct ScenarioRoomCard: View {
     let scenario: ScenarioRecord
+    let isSelected: Bool
 
     /// Entity-aware (`ScenarioRecord.presentationClass`), not a local re-guess
     /// of the same five-way split `StateBadge` already does globally.
@@ -2755,6 +3086,12 @@ private struct ScenarioRoomCard: View {
                         label: HarnessViewModel.humanState(scenario.observedState)
                     )
                 }
+                if !scenario.objective.isEmpty {
+                    Text(scenario.objective)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
                 HStack(spacing: 8) {
                     HStack(spacing: -4) {
                         ForEach(
@@ -2789,7 +3126,16 @@ private struct ScenarioRoomCard: View {
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
         }
-        .background(.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+        .background(
+            isSelected ? Color.brandAccent.opacity(0.16) : Color.clear,
+            in: RoundedRectangle(cornerRadius: 6)
+        )
+        .overlay {
+            if isSelected {
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(Color.brandAccent.opacity(0.32), lineWidth: 1)
+            }
+        }
     }
 }
 

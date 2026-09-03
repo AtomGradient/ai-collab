@@ -183,6 +183,48 @@ enum S {
                 "给它起个名字，如果已经想好目标也可以先填——目标随时可以之后补充或修订。"
             )
         }
+        static var onboardingRegistered: String {
+            t("Project registered", "注册项目")
+        }
+        static func onboardingRegisteredDetail(_ project: String) -> String {
+            // The `project` parameter must actually be interpolated — a
+            // literal "(project)" placeholder shipped once already and
+            // would show on every room regardless of its real project name.
+            t(
+                "\(project) is registered. Your selected checkout stays untouched.",
+                "\(project) 已注册，未写入你选择的 checkout。"
+            )
+        }
+        static var onboardingAddColleagues: String {
+            t("Add AI colleagues", "添加 AI 同事")
+        }
+        static var onboardingAddColleaguesDetail: String {
+            // The App stays vendor-neutral (test_app_is_vendor_neutral_and_
+            // does_not_shell_out) — templates are a Host/config concern, not
+            // a hardcoded name here.
+            t(
+                "Ready-made templates open each colleague in its own CLI window.",
+                "内置模板开箱即用，每位同事都在自己的 CLI 窗口打开。"
+            )
+        }
+        static var onboardingStart: String {
+            t("Start working together", "全部启动，开始协作")
+        }
+        static var onboardingStartDetail: String {
+            t(
+                "Focus any colleague window to assign work; they can message one another afterward.",
+                "聚焦任一窗口布置任务，之后同事之间即可互发消息。"
+            )
+        }
+        static var onboardingPreviewTitle: String {
+            t("After creation, the room board will look like this", "创建后，房间板会是这样")
+        }
+        static var onboardingNoColleagues: String {
+            t("No colleagues yet", "还没有同事")
+        }
+        static var onboardingNextStep: String {
+            t("Next: prepare the workspace", "下一步会是「准备工作区」")
+        }
     }
 
     enum Objective {
@@ -419,20 +461,20 @@ enum S {
         /// Honest recent-activity line (review 20260903-194506-9xgiml P1):
         /// only sender/receiver/state from a real delivery, never message
         /// content the client does not have.
-        static func recentActivitySent(_ receiverID: String) -> String {
-            t("Recently: sent \(receiverID) a message", "最近活动：向 \(receiverID) 发送了消息")
+        static func recentActivitySent(_ receiverID: String, _ stateLabel: String) -> String {
+            t(
+                "Recently: Message to \(receiverID) · \(stateLabel)",
+                "最近活动：发往 \(receiverID) 的消息 · \(stateLabel)"
+            )
         }
         static func recentActivityReceived(_ senderID: String, _ stateLabel: String) -> String {
             t(
-                "Recently: \(stateLabel.lowercased()) a message from \(senderID)",
-                "最近活动：收到 \(senderID) 的消息（\(stateLabel)）"
+                "Recently: Message from \(senderID) · \(stateLabel)",
+                "最近活动：来自 \(senderID) 的消息 · \(stateLabel)"
             )
         }
         static func runningCount(_ count: Int) -> String {
             t("\(count) running", "\(count) 位工作中")
-        }
-        static func deliveryCount(_ count: Int) -> String {
-            t("\(count) messages", "\(count) 条消息")
         }
 
         // Deletion (R1). Primary sentence is the user-approved copy; the
@@ -626,6 +668,20 @@ enum S {
                 )
             }
         }
+    }
+
+    /// Labels for the right-column stage timeline (review 20260903-201119-
+    /// r9tf2j: the Artifact's progress panel leads with a lifecycle
+    /// timeline, not a bare tile grid). Four stages derived from
+    /// `observedState` + whether any colleague is running yet — a rendering
+    /// of state already on the Scenario/Participant records, not a new
+    /// concept the Host tracks.
+    enum Stage {
+        static var setup: String { t("Create · Prepare Workspace", "创建 · 准备工作区") }
+        static var staffing: String { t("Colleagues Ready", "同事就位") }
+        static var running: String { t("Running", "运行中") }
+        static var runningAttention: String { t("Running · Needs Attention", "运行中 · 需要关注") }
+        static var closed: String { t("Closed", "休会") }
     }
 
     enum CollaborationHealth {

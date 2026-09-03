@@ -621,36 +621,71 @@ def test_workbench_is_two_column_team_primary_with_narrow_fallback() -> None:
     assert "ViewThatFits(in: .horizontal)" in workbench
     assert "GeometryReader" not in workbench
     # Two occurrences of each: once in the two-column arrangement, once in
-    # the narrow stacked fallback — both must lead with Team.
+    # the narrow stacked fallback — both must lead with Team. The secondary
+    # column merged into one `progressPanel` (review 20260903-201119-r9tf2j:
+    # a lifecycle timeline leading a compact grid, with the attention list
+    # folded into the same card, not three unrelated blocks) — see
+    # test_progress_panel_merges_timeline_metrics_and_attention.
     assert workbench.count("healthCard(scenario)") == 2
     assert workbench.count("participantsSection") == 2
-    assert workbench.count("collaborationHealthSection") == 2
-    assert workbench.count("needsAttentionSection") == 2
-    two_col, narrow = workbench.split("participantsSection", 2)[1:]
-    assert "collaborationHealthSection" not in two_col.split("VStack", 1)[0]
-    # In the narrow fallback, participantsSection precedes the analytics
-    # tiles — Team stays first even when stacked.
-    assert "collaborationHealthSection" in narrow
+    assert workbench.count("progressPanel(scenario)") == 2
+    # Team textually precedes the progress panel both times — once in the
+    # two-column arrangement (so it is the left/primary column) and once
+    # more in the narrow stacked fallback (so it stays first there too).
+    team_positions = [i for i in range(len(workbench)) if workbench.startswith("participantsSection", i)]
+    panel_positions = [i for i in range(len(workbench)) if workbench.startswith("progressPanel(scenario)", i)]
+    assert len(team_positions) == len(panel_positions) == 2
+    assert team_positions[0] < panel_positions[0]
+    assert team_positions[1] < panel_positions[1]
+
+
+def test_progress_panel_merges_timeline_metrics_and_attention() -> None:
+    """codex review 20260903-201119-r9tf2j: the Artifact's secondary column
+    is one card — a lifecycle timeline, then the metrics grid, then the
+    attention list — not `collaborationHealthSection` and
+    `needsAttentionSection` standing as separate top-level blocks the way
+    they did before this review. Both keep their own names/content
+    (still independently useful, still what the app-contract tests below
+    pin), just called from inside `progressPanel` now."""
+    content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
+    panel = content.split("private func progressPanel", 1)[1].split(
+        "private enum WorkbenchStage", 1
+    )[0]
+    assert "stageTimeline(scenario)" in panel
+    assert "collaborationHealthSection" in panel
+    assert "needsAttentionSection" in panel
+    # One shared surface for the whole merged card.
+    assert ".background(.secondary.opacity(0.04)" in panel
+    stage = content.split("private func stageTimeline", 1)[1].split(
+        "private func stageRow", 1
+    )[0]
+    for label in ("S.Stage.setup", "S.Stage.staffing", "S.Stage.running", "S.Stage.closed"):
+        assert label in stage
 
 
 def test_mission_bar_is_sticky_outside_the_scroll_view() -> None:
-    """codex review 20260903-194506-9xgiml P1: MissionBar was still the
-    ScrollView's first child, so it scrolled away with everything else
-    instead of staying put. It must be a sibling above the ScrollView, not
-    inside it, and must not be styled as another rounded card now that it is
-    a persistent fixed region."""
+    """codex review 20260903-194506-9xgiml P1, refined by 20260903-201119-
+    r9tf2j: MissionBar as a plain VStack sibling above the ScrollView did
+    keep it from scrolling away, but a bare sibling does not get the same
+    toolbar safe-area accounting a ScrollView gets automatically as
+    NavigationSplitView detail content — content rendered up under the
+    unified title bar on a real build. `.safeAreaInset(edge: .top)` on the
+    ScrollView is the documented pattern for a pinned header that
+    participates correctly in that layout; a `.layoutPriority(1)`
+    workaround was tried and explicitly rejected (see review
+    20260903-201119-r9tf2j's own note not to keep it) because it did not
+    address the actual cause."""
     content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
     detail = content.split("private var scenarioDetail", 1)[1].split(
         "private func workbenchBody", 1
     )[0]
-    mission_bar_index = detail.index("missionBar(scenario)")
-    scroll_view_index = detail.index("ScrollView")
-    assert mission_bar_index < scroll_view_index, (
-        "missionBar must appear before the ScrollView, not inside it"
-    )
+    assert ".safeAreaInset(edge: .top" in detail
+    assert "missionBar(scenario)" in detail
+    assert ".layoutPriority(1)" not in detail
     bar = content.split("private func missionBar", 1)[1].split("private func", 1)[0]
     assert "RoundedRectangle" not in bar
     assert ".background(.bar)" in bar
+    assert ".layoutPriority" not in bar
 
 
 def test_empty_project_shows_first_use_canvas_not_the_generic_placeholder() -> None:
@@ -669,6 +704,22 @@ def test_empty_project_shows_first_use_canvas_not_the_generic_placeholder() -> N
     assert "$model.newScenarioID" in canvas
     assert "await model.createScenario()" in canvas
     assert "ContentUnavailableView(" in canvas, "the generic placeholder stays for the other case"
+
+
+def test_onboarding_registered_detail_actually_interpolates_the_project_name() -> None:
+    """A `\\(project)` string-interpolation typo shipped as the literal text
+    "(project) is registered…" once already — the parameter was accepted
+    and never used, so every project's first-use canvas would have shown
+    the same placeholder-looking sentence regardless of its real name."""
+    strings = (APP_ROOT / "Strings.swift").read_text(encoding="utf-8")
+    fn = strings.split("static func onboardingRegisteredDetail", 1)[1].split(
+        "\n        static ", 1
+    )[0]
+    # Both language literals must actually interpolate — not just mention
+    # the fixed bug in a comment, which is why this checks the `t(...)`
+    # call's own two string arguments rather than the whole function text.
+    call = fn.split("t(", 1)[1].split(")\n        }", 1)[0]
+    assert call.count("\\(project)") == 2
 
 
 def test_brand_accent_is_applied_at_the_window_root_not_system_blue() -> None:
@@ -730,7 +781,9 @@ def test_participant_activity_line_is_derived_only_from_delivery_metadata() -> N
     assert "model.deliveries.filter" in fn
     assert ".sender.participantID" in fn
     assert ".receiver.participantID" in fn
+    assert fn.count(".generation == participant.generation") == 2
     assert "enqueueSequence" in fn
+    assert "S.Delivery.stateLabel(latest.state)" in fn
     for forbidden in ("payload", "content", "message_body", "text"):
         assert forbidden not in fn.lower()
     delivery_record = models.split("struct DeliveryRecord", 1)[1].split(
@@ -741,6 +794,16 @@ def test_participant_activity_line_is_derived_only_from_delivery_metadata() -> N
     assert "recentActivityLine(for: participant)" in content.split(
         "private func participantRow", 1
     )[1].split("private func", 1)[0]
+
+
+def test_first_use_canvas_is_the_only_visible_room_composer_for_an_empty_project() -> None:
+    """The first-use canvas and room-list composer share the same bindings;
+    showing both at once creates mirrored fields and competing primary actions."""
+    content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
+    scenarios_list = content.split("private var scenariosList", 1)[1].split(
+        "private var scenarioGroups", 1
+    )[0]
+    assert "if model.selectedProject == nil || !model.scenarios.isEmpty" in scenarios_list
 
 
 def test_destroy_flow_has_one_panel_entry_point_not_a_direct_force_delete() -> None:
@@ -861,9 +924,14 @@ def test_guide_is_a_dismissable_centered_card_deck() -> None:
     steps through and can always close — never a persistent overlay bar."""
 
     content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
-    assert ".safeAreaInset(edge: .top" not in content, "no top overlay bar layouts"
     assert "guidanceRail" not in content, "the rail is gone"
     deck = content.split("private var guideCard", 1)[1].split("// MARK: ", 1)[0]
+    # Scoped to the guide deck itself, not banned file-wide: review
+    # 20260903-201119-r9tf2j legitimately uses `.safeAreaInset(edge: .top)`
+    # elsewhere for the (unrelated) sticky mission bar — a real, documented
+    # SwiftUI pattern, not the persistent-overlay-bar anti-pattern this test
+    # actually guards against.
+    assert ".safeAreaInset(edge: .top" not in deck, "no top overlay bar layouts"
     assert "Button(S.Guide.next)" in deck
     assert "Button(S.Guide.previous)" in deck
     assert "Button(S.Guide.done)" in deck
