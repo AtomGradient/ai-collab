@@ -2632,6 +2632,12 @@ class _CloseWindow:
         self.close_calls.append(force)
 
 
+class _CloseWindowWithLostReply(_CloseWindow):
+    async def async_close(self, *, force: bool) -> None:
+        self.close_calls.append(force)
+        raise OSError("iTerm close reply was lost")
+
+
 def test_requested_tui_close_does_not_interpret_screen_content(
     monkeypatch: Any,
 ) -> None:
@@ -2749,7 +2755,7 @@ def test_requested_tui_close_requires_foreground_process_absence(
     assert 5678 in observed
 
 
-def test_requested_tui_close_reports_timeout_when_exact_window_remains(
+def test_requested_tui_close_ignores_the_stale_app_window_snapshot(
     monkeypatch: Any,
 ) -> None:
     window = _CloseWindow()
@@ -2767,15 +2773,93 @@ def test_requested_tui_close_reports_timeout_when_exact_window_remains(
         pass
 
     monkeypatch.setattr(participant_driver, "_exact_session", exact_session)
-    classification, drain_requested, progress_count, closed = asyncio.run(
+    monkeypatch.setattr(
+        participant_driver,
+        "_wait_process_absent_bounded",
+        lambda pid, timeout: True,
+    )
+    result = asyncio.run(
         participant_driver._safe_tui_close_async(  # noqa: SLF001
             _Module(), {"pid": 1234, "window_id": "owned"}, 1
         )
     )
-    assert classification == "timeout"
-    assert drain_requested is False
-    assert progress_count == 0
-    assert closed is False
+    assert result == ("requested", False, 0, True)
+    assert window.close_calls == [True]
+
+
+def test_requested_tui_close_accepts_process_absence_after_a_lost_rpc_reply(
+    monkeypatch: Any,
+) -> None:
+    window = _CloseWindowWithLostReply()
+
+    async def exact_session(
+        module: Any, state: dict[str, Any]
+    ) -> tuple[Any, Any, Any, int]:
+        return _PresentApp(), window, object(), 5678
+
+    class _PresentApp:
+        connection = None
+
+        def get_window_by_id(self, window_id: str) -> object:
+            return object()
+
+    class _Module:
+        pass
+
+    monkeypatch.setattr(participant_driver, "_exact_session", exact_session)
+    monkeypatch.setattr(
+        participant_driver,
+        "_wait_process_absent_bounded",
+        lambda pid, timeout: True,
+    )
+
+    result = asyncio.run(
+        participant_driver._safe_tui_close_async(  # noqa: SLF001
+            _Module(), {"pid": 1234, "window_id": "owned"}, 150
+        )
+    )
+
+    assert result == ("requested", False, 0, True)
+    assert window.close_calls == [True]
+
+
+def test_requested_tui_close_accepts_absence_after_close_and_reconnect_failures(
+    monkeypatch: Any,
+) -> None:
+    window = _CloseWindowWithLostReply()
+    attempts = 0
+    absence_checks = iter((False, True, True))
+
+    async def exact_session(
+        module: Any, state: dict[str, Any]
+    ) -> tuple[Any, Any, Any, int]:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return _PresentApp(), window, object(), 5678
+        raise OSError("iTerm reconnect failed")
+
+    class _PresentApp:
+        connection = None
+
+    class _Module:
+        pass
+
+    monkeypatch.setattr(participant_driver, "_exact_session", exact_session)
+    monkeypatch.setattr(
+        participant_driver,
+        "_wait_processes_absent_bounded",
+        lambda pids, timeout: next(absence_checks),
+    )
+
+    result = asyncio.run(
+        participant_driver._safe_tui_close_async(  # noqa: SLF001
+            _Module(), {"pid": 1234, "window_id": "owned"}, 150
+        )
+    )
+
+    assert result == ("requested", False, 0, True)
+    assert attempts == 2
     assert window.close_calls == [True]
 
 

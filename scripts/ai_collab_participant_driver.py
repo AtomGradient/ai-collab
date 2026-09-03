@@ -3650,11 +3650,10 @@ async def _iterm_close_connected(
         raise DriverError("owned iTerm job identity is invalid") from exc
     _validate_owned_foreground_job(job_pid, state)
     await _bounded(window.async_close(force=True))
-    deadline = asyncio.get_running_loop().time() + PROCESS_WAIT_SECONDS
-    while app.get_window_by_id(state["window_id"]) is not None:
-        if asyncio.get_running_loop().time() >= deadline:
-            raise DriverError("owned iTerm window remained after close")
-        await asyncio.sleep(0.05)
+    # The App object is a topology snapshot. Depending on iTerm notification
+    # timing it can retain the just-closed window for several seconds, even
+    # though async_close accepted the exact request. The caller proves the
+    # owned foreground/root processes are absent before publishing cleanup.
     return job_pid
 
 
@@ -3703,7 +3702,9 @@ async def _safe_tui_close_async(
             await _bounded(window.async_close(force=True))
             break
         except Exception:
-            if app is not None and app.get_window_by_id(state["window_id"]) is None:
+            if len(accepted_process_pids) > 1 and await asyncio.to_thread(
+                _wait_processes_absent_bounded, accepted_process_pids, 0.25
+            ):
                 break
             await _close_iterm_connection(
                 getattr(app, "connection", None)
@@ -3712,11 +3713,8 @@ async def _safe_tui_close_async(
             if attempt == 1:
                 raise
             await asyncio.sleep(0.1)
-    if app is None:  # pragma: no cover - the retry loop raises first
-        raise DriverError("iTerm application is unavailable before exact close")
     try:
         return await _safe_tui_close_connected(
-            app,
             state,
             accepted_process_pids,
             drain_timeout_ms,
@@ -3726,18 +3724,10 @@ async def _safe_tui_close_async(
 
 
 async def _safe_tui_close_connected(
-    app: Any,
     state: Mapping[str, Any],
     accepted_process_pids: list[int],
     drain_timeout_ms: int,
 ) -> tuple[str, bool, int, bool]:
-    deadline = asyncio.get_running_loop().time() + drain_timeout_ms / 1000
-    while True:
-        if app.get_window_by_id(state["window_id"]) is None:
-            break
-        if asyncio.get_running_loop().time() >= deadline:
-            return "timeout", False, 0, False
-        await asyncio.sleep(0.05)
     processes_absent = await asyncio.to_thread(
         _wait_processes_absent_bounded, accepted_process_pids, 1.0
     )
@@ -3916,7 +3906,6 @@ def stop(payload: Mapping[str, Any]) -> dict[str, Any]:
             "runtime_binding_id": state["runtime_binding_id"],
             "presentation_instance_id": state["presentation_instance_id"],
             "process_absent": True,
-            "presentation_absent": True,
         }
     )
     state["status"] = "stopped"
@@ -4003,7 +3992,6 @@ def force_stop(payload: Mapping[str, Any]) -> dict[str, Any]:
             "runtime_binding_id": state["runtime_binding_id"],
             "presentation_instance_id": state["presentation_instance_id"],
             "process_absent": True,
-            "presentation_absent": True,
             "termination_mode": "force-stop",
         }
     )
