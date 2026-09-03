@@ -66,7 +66,6 @@ private enum HighRiskIntent: Identifiable {
     case forceStop(ParticipantRecord)
     case recreateParticipantWithHandoff(ParticipantRecord)
     case breakResource(ResourceLeaseRecord)
-    case forceDestroyScenario(ScenarioRecord)
     case unregisterProject(ProjectRecord)
 
     var id: String {
@@ -76,8 +75,6 @@ private enum HighRiskIntent: Identifiable {
         case let .recreateParticipantWithHandoff(participant):
             "participant.recreate-with-handoff:\(participant.id)"
         case let .breakResource(resource): "resource.break:\(resource.id)"
-        case let .forceDestroyScenario(scenario):
-            "scenario.force-destroy:\(scenario.id)"
         case let .unregisterProject(project):
             "project.unregister:\(project.id)"
         }
@@ -89,7 +86,6 @@ private enum HighRiskIntent: Identifiable {
         case .forceStop: S.HighRisk.forceStopTitle
         case .recreateParticipantWithHandoff: S.HighRisk.recreateTitle
         case .breakResource: S.HighRisk.breakResourceTitle
-        case .forceDestroyScenario: S.HighRisk.forceDestroyTitle
         case .unregisterProject: S.HighRisk.unregisterTitle
         }
     }
@@ -106,8 +102,6 @@ private enum HighRiskIntent: Identifiable {
             S.HighRisk.breakResourceMessage(
                 resource.resourceClass, String(resource.id.prefix(12))
             )
-        case let .forceDestroyScenario(scenario):
-            S.HighRisk.forceDestroyMessage(scenario.id)
         case let .unregisterProject(project):
             S.HighRisk.unregisterMessage(project.key)
         }
@@ -116,34 +110,50 @@ private enum HighRiskIntent: Identifiable {
 
 // MARK: - Destroy panel (the one entry point into the delete flow)
 
-/// `.sheet(item:)` payload — identity is the Scenario's own id, so retargeting
-/// the sheet at a different room (another row's "Delete…") is a normal state
-/// change, not a reuse of stale identity.
+/// `.sheet(item:)` payload. Identity includes generation, not just id — a
+/// same-named Scenario that was destroyed and recreated is a different
+/// incarnation, and SwiftUI must treat re-opening the panel for it as a
+/// genuinely new target rather than reusing a stale sheet already showing
+/// the old incarnation's preview (review 20260903-191042-y57u0q P1).
 private struct DestroyPanelTarget: Identifiable {
     let scenario: ScenarioRecord
-    var id: String { scenario.id }
+    var id: String { "\(scenario.id)#\(scenario.generation)" }
 }
 
 /// The single UI component behind every "delete a task room" entry point —
 /// the room board's row menu, the mission bar's "…" menu, and Evidence &
 /// Diagnostics' high-risk tab all open this same sheet instead of each
-/// rolling their own preview/blockers/confirm mechanics.
+/// rolling their own preview/blockers/confirm mechanics. Fully self-
+/// contained: Force Delete's confirmation is its own `.confirmationDialog`
+/// here, not a hand-off to a second, separately-presented modal on the
+/// parent view — review 20260903-191042-y57u0q found that a `dismiss()`
+/// paired with the parent setting `highRiskIntent` in the same action risked
+/// losing the second presentation to a real SwiftUI sheet/dialog handoff
+/// race.
 ///
-/// Review 20260903-185641-e6nznb: the room a user right-clicks is not
-/// necessarily `model.selectedScenario` — `loadDestroyPreview()` reads
-/// whichever Scenario is selected, so this panel explicitly selects its own
-/// target first and only then loads the preview, rather than trusting
-/// whatever happened to be open already.
+/// The room a user right-clicks is not necessarily `model.selectedScenario`,
+/// so this panel explicitly selects its own target before loading a preview
+/// — and re-checks identity (id *and* generation) both before and after
+/// every load, and again before either destructive action, rather than
+/// trusting a snapshot captured whenever the sheet happened to open.
 private struct DestroyPanel: View {
     let scenario: ScenarioRecord
-    /// Delegates to the caller's own `highRiskIntent = .forceDestroyScenario`
-    /// — the Host confirmation for that path is unchanged, just reached from
-    /// here once a loaded preview says it is actually blocked.
-    let onForceDelete: (ScenarioRecord) -> Void
 
     @EnvironmentObject private var model: HarnessViewModel
     @Environment(\.dismiss) private var dismiss
-    @State private var loaded = false
+    @State private var phase: DestroyPreviewPhase = .loading
+    @State private var confirmingForceDelete = false
+    @State private var actionFailure: String?
+
+    private var target: DestroyFlowTarget {
+        DestroyFlowTarget(scenarioID: scenario.id, generation: scenario.generation)
+    }
+
+    private var currentSelection: DestroyFlowTarget? {
+        model.selectedScenario.map {
+            DestroyFlowTarget(scenarioID: $0.id, generation: $0.generation)
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -156,25 +166,9 @@ private struct DestroyPanel: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
-            if !loaded {
-                HStack {
-                    ProgressView().controlSize(.small)
-                    Text(S.Risk.destroyPreviewLoading)
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                }
-            } else if model.destroyPreviewEligible {
-                Label(S.Risk.destroyPreviewOK, systemImage: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-            } else {
-                Label(
-                    S.Risk.destroyPreviewBlocked(model.destroyPreviewBlockers),
-                    systemImage: "exclamationmark.triangle.fill"
-                )
-                .foregroundStyle(.orange)
-            }
+            statusLine
 
-            if loaded, !model.destroyPreviewText.isEmpty {
+            if phase == .eligible, !model.destroyPreviewText.isEmpty {
                 ScrollView {
                     Text(model.destroyPreviewText)
                         .font(.system(.caption, design: .monospaced))
@@ -184,6 +178,12 @@ private struct DestroyPanel: View {
                 .frame(maxHeight: 180)
             }
 
+            if let actionFailure {
+                Label(actionFailure, systemImage: "xmark.octagon.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+
             HStack {
                 Button(S.Common.cancel) { dismiss() }
                 Spacer()
@@ -191,20 +191,15 @@ private struct DestroyPanel: View {
                     Task { await load() }
                 }
                 .disabled(model.isBusy)
-                if loaded, model.destroyPreviewEligible {
+                if DestroyFlowDecision.canDestroy(phase) {
                     Button(S.Risk.destroyScenario, role: .destructive) {
-                        Task {
-                            await model.destroyScenario()
-                            dismiss()
-                        }
+                        Task { await performDestroy() }
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(model.isBusy)
-                } else if loaded {
+                } else if DestroyFlowDecision.canForceDelete(phase) {
                     Button(S.Rooms.forceDelete, role: .destructive) {
-                        let target = scenario
-                        dismiss()
-                        onForceDelete(target)
+                        confirmingForceDelete = true
                     }
                     .disabled(model.isBusy)
                 }
@@ -213,15 +208,108 @@ private struct DestroyPanel: View {
         .padding(20)
         .frame(width: 460)
         .task { await load() }
+        .confirmationDialog(
+            S.HighRisk.forceDestroyTitle,
+            isPresented: $confirmingForceDelete,
+            titleVisibility: .visible
+        ) {
+            Button(S.Common.continueToHostConfirmation, role: .destructive) {
+                Task { await performForceDelete() }
+            }
+            Button(S.Common.cancel, role: .cancel) {}
+        } message: {
+            Text(S.HighRisk.forceDestroyMessage(scenario.id))
+        }
     }
 
+    @ViewBuilder
+    private var statusLine: some View {
+        switch phase {
+        case .loading:
+            HStack {
+                ProgressView().controlSize(.small)
+                Text(S.Risk.destroyPreviewLoading)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+        case .eligible:
+            Label(S.Risk.destroyPreviewOK, systemImage: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+        case .blocked:
+            Label(
+                S.Risk.destroyPreviewBlocked(model.destroyPreviewBlockers),
+                systemImage: "exclamationmark.triangle.fill"
+            )
+            .foregroundStyle(.orange)
+        case let .failed(message):
+            Label(message, systemImage: "xmark.octagon.fill")
+                .foregroundStyle(.red)
+        case .stale:
+            Label(S.Risk.destroyPanelStale, systemImage: "arrow.triangle.2.circlepath")
+                .foregroundStyle(.orange)
+        }
+    }
+
+    /// A failed read is never read as the Host having said blocked, and a
+    /// target that drifted mid-load — destroyed and recreated, or selection
+    /// changed out from under this panel — is `.stale`, not silently
+    /// answered from whatever the new target's preview happens to be
+    /// (review 20260903-191042-y57u0q P0/P1).
     private func load() async {
-        loaded = false
+        phase = .loading
+        actionFailure = nil
         if model.selectedScenarioID != scenario.id {
             await model.selectScenario(scenario.id)
         }
+        guard currentSelection == target else {
+            phase = .stale
+            return
+        }
+        model.dismissError()
         await model.loadDestroyPreview()
-        loaded = true
+        phase = DestroyFlowDecision.phaseAfterLoad(
+            target: target,
+            currentSelection: currentSelection,
+            errorMessage: model.errorMessage,
+            eligible: model.destroyPreviewEligible
+        )
+    }
+
+    /// Only closes the panel once the delete is confirmed to have actually
+    /// gone through — a Host rejection keeps it open, with the preview and
+    /// blocker context still on screen, instead of vanishing and leaving the
+    /// failure to a background banner the user has to go find.
+    private func performDestroy() async {
+        guard currentSelection == target else {
+            phase = .stale
+            return
+        }
+        model.dismissError()
+        await model.destroyScenario()
+        if DestroyFlowDecision.shouldDismissAfterAction(errorMessage: model.errorMessage) {
+            dismiss()
+        } else {
+            actionFailure = model.errorMessage
+        }
+    }
+
+    /// Passes the Host `model.forceDestroyScenario(_:)` its *current*
+    /// `ScenarioRecord` — freshly re-verified against `target` immediately
+    /// before the call — never the snapshot captured when the sheet first
+    /// opened, which by now may carry a stale `stateRevision` the Host would
+    /// reject, or belong to an incarnation that no longer exists.
+    private func performForceDelete() async {
+        guard let current = model.selectedScenario, currentSelection == target else {
+            phase = .stale
+            return
+        }
+        model.dismissError()
+        await model.forceDestroyScenario(current)
+        if DestroyFlowDecision.shouldDismissAfterAction(errorMessage: model.errorMessage) {
+            dismiss()
+        } else {
+            actionFailure = model.errorMessage
+        }
     }
 }
 
@@ -303,10 +391,8 @@ struct ContentView: View {
             }
         }
         .sheet(item: $destroyPanelTarget) { target in
-            DestroyPanel(scenario: target.scenario) { scenario in
-                highRiskIntent = .forceDestroyScenario(scenario)
-            }
-            .environmentObject(model)
+            DestroyPanel(scenario: target.scenario)
+                .environmentObject(model)
         }
         .overlay(alignment: .top) { errorBanner }
         .overlay(alignment: .bottomTrailing) { readyMomentCard }
@@ -2074,8 +2160,6 @@ struct ContentView: View {
             await model.recreateParticipantWithHandoff(participant)
         case let .breakResource(resource):
             await model.breakResource(resource)
-        case let .forceDestroyScenario(scenario):
-            await model.forceDestroyScenario(scenario)
         case let .unregisterProject(project):
             await model.unregisterProject(project)
         }

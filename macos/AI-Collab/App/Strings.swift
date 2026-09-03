@@ -681,6 +681,16 @@ enum S {
         static var destroyPreviewLoading: String {
             t("Loading destroy preview…", "正在加载删除预览…")
         }
+        /// The panel's target (id + generation) no longer matches what is
+        /// actually selected — recreated under the same name, or selection
+        /// changed, while the panel was open. Neither delete action is
+        /// offered in this phase; only Retry.
+        static var destroyPanelStale: String {
+            t(
+                "This task room changed while the panel was open. Retry to check again.",
+                "面板打开期间这个任务房间发生了变化，请重试以重新核对。"
+            )
+        }
         static func destroyPreviewBlocked(_ blockers: [String]) -> String {
             let detail = blockers.isEmpty
                 ? t("the Host reported unresolved blockers", "后台服务报告仍有阻塞条件")

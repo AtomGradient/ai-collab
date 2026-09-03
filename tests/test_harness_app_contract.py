@@ -269,7 +269,9 @@ def test_app_exposes_degraded_and_high_risk_repair_actions() -> None:
     assert "participant_fault" in strings
     assert "AI colleague needs recovery" in strings
     assert "humanDegradedReason" in content
-    assert ".forceDestroyScenario(scenario)" in content
+    # DestroyPanel calls the ViewModel method directly now, not through a
+    # HighRiskIntent case (review 20260903-191042-y57u0q P1).
+    assert "await model.forceDestroyScenario(current)" in content
     assert 'case "scenario.open":' in view_model
     assert "await openScenario()" in view_model
     assert "Resume Task Room" in strings
@@ -364,16 +366,20 @@ def test_iterm_python_api_setup_runs_detached_before_quitting_iterm() -> None:
 
 
 def test_app_exposes_context_menu_delete_through_the_destroy_panel() -> None:
-    """Superseded by DestroyPanel (review 20260903-185641-e6nznb): the row
-    context menu no longer force-destroys directly — see
-    test_destroy_flow_has_one_panel_entry_point_not_a_direct_force_delete.
+    """Superseded by DestroyPanel (review 20260903-185641-e6nznb, then
+    20260903-191042-y57u0q): the row context menu no longer force-destroys
+    directly, and `HighRiskIntent` no longer carries a force-destroy case at
+    all — the panel calls `model.forceDestroyScenario` itself once its own
+    `.confirmationDialog` confirms. See
+    test_destroy_flow_has_one_panel_entry_point_not_a_direct_force_delete and
+    test_destroy_panel_force_confirmation_is_self_contained_not_cross_modal.
     This still pins that the row menu exists and that Force Delete, reached
     only via the panel now, still calls scenario.force-destroy underneath."""
     content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
     view_model = (APP_ROOT / "HarnessViewModel.swift").read_text(encoding="utf-8")
     assert '.contextMenu {' in content
     assert "struct DestroyPanel: View" in content
-    assert "case forceDestroyScenario(ScenarioRecord)" in content
+    assert "func forceDestroyScenario(_ scenario: ScenarioRecord)" in view_model
     strings = (APP_ROOT / "Strings.swift").read_text(encoding="utf-8")
     assert "registered project source is never deleted" in strings
     assert 'operation: "scenario.force-destroy"' in view_model
@@ -425,7 +431,7 @@ def test_app_surfaces_destroy_preview_blockers_and_force_delete_escape_hatch() -
     # from ContentView now.
     assert "model.destroyPreviewEligible" in content
     assert "S.Risk.destroyPreviewBlocked(model.destroyPreviewBlockers)" in content
-    assert ".forceDestroyScenario(scenario)" in content
+    assert "await model.forceDestroyScenario(current)" in content
     assert "Destroy preview is blocked" in strings
     assert "The destroy preview is blocked" in strings
 
@@ -616,12 +622,93 @@ def test_destroy_flow_has_one_panel_entry_point_not_a_direct_force_delete() -> N
     # preview, rather than trusting whatever scenario happened to already be
     # selected — the row a user right-clicks is not necessarily the one open
     # in the detail pane.
-    panel = content.split("private struct DestroyPanel", 1)[1]
+    panel = content.split("private struct DestroyPanel", 1)[1].split(
+        "// MARK: - ContentView", 1
+    )[0]
     assert "model.selectedScenarioID != scenario.id" in panel
     assert "await model.selectScenario(scenario.id)" in panel
     assert "await model.loadDestroyPreview()" in panel
     # Force Delete only appears once loaded and only for the blocked branch.
     assert 'Button(S.Rooms.forceDelete, role: .destructive)' in panel
+
+
+def test_destroy_panel_target_identity_includes_generation() -> None:
+    """codex review 20260903-191042-y57u0q P1: a same-named Scenario that was
+    destroyed and recreated is a different incarnation with a different
+    fence. `.sheet(item:)` identity keyed on id alone could reuse a stale
+    sheet already showing the old incarnation's preview."""
+    content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
+    target_struct = content.split("private struct DestroyPanelTarget", 1)[1].split(
+        "private struct DestroyPanel", 1
+    )[0]
+    assert "scenario.generation" in target_struct
+
+
+def test_destroy_panel_never_reads_a_failed_load_as_blocked() -> None:
+    """codex review 20260903-191042-y57u0q P0: the panel must use a typed
+    phase derived from an explicit success/failure outcome, never infer
+    "blocked" from the mere absence of an "eligible" answer. The actual
+    branch logic is pinned executable-state-test style in
+    DestroyFlowTests.swift (testFailedReadIsFailedNeverBlockedAndOffersNeitherDeleteAction,
+    mutated back to the bug and confirmed to fail for the right reason); this
+    only pins the structural wiring stays in place."""
+    content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
+    assert "enum DestroyPreviewPhase" not in content, (
+        "the phase type lives in DestroyFlow.swift, not duplicated in ContentView"
+    )
+    decision = (APP_ROOT / "DestroyFlow.swift").read_text(encoding="utf-8")
+    assert "case failed(String)" in decision
+    assert "case stale" in decision
+    panel = content.split("private struct DestroyPanel", 1)[1].split(
+        "// MARK: - ContentView", 1
+    )[0]
+    assert "model.dismissError()" in panel
+    assert "DestroyFlowDecision.phaseAfterLoad(" in panel
+    assert "errorMessage: model.errorMessage" in panel
+    # Every load and every destructive action re-checks identity against the
+    # panel's own target — not just once when the sheet opened.
+    assert panel.count("currentSelection == target") >= 2
+
+
+def test_destroy_panel_force_confirmation_is_self_contained_not_cross_modal() -> None:
+    """codex review 20260903-191042-y57u0q P1: a `dismiss()` paired with the
+    parent view setting `highRiskIntent` in the same action is two modal
+    presentations racing in one turn, which risked losing the confirmation
+    on real hardware. Force Delete's confirmation must be DestroyPanel's own
+    `.confirmationDialog`, not a hand-off to the parent's `highRiskIntent`."""
+    content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
+    # HighRiskIntent no longer has a destroy-scenario case at all — both the
+    # eligible and blocked paths call the ViewModel directly from the panel.
+    high_risk_intent = content.split("private enum HighRiskIntent", 1)[1].split(
+        "private struct DestroyPanelTarget", 1
+    )[0]
+    assert "forceDestroyScenario" not in high_risk_intent
+    assert "case destroyScenario" not in high_risk_intent
+    panel = content.split("private struct DestroyPanel", 1)[1].split(
+        "// MARK: - ContentView", 1
+    )[0]
+    assert ".confirmationDialog(" in panel
+    assert "confirmingForceDelete" in panel
+    # No hand-off to the parent's highRiskIntent from inside the panel's own
+    # actions — only mentioned in the doc comment explaining what this
+    # replaced, never assigned.
+    assert "highRiskIntent =" not in panel
+
+
+def test_destroy_panel_only_dismisses_after_a_confirmed_success() -> None:
+    """codex review 20260903-191042-y57u0q P1: a Host rejection must keep the
+    panel open with its preview/blocker context intact, not vanish and leave
+    the failure to a background banner."""
+    content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
+    panel = content.split("private struct DestroyPanel", 1)[1].split(
+        "// MARK: - ContentView", 1
+    )[0]
+    assert "DestroyFlowDecision.shouldDismissAfterAction(errorMessage: model.errorMessage)" in panel
+    # dismiss() must not appear unconditionally right after either destroy
+    # call — both are gated by the shouldDismissAfterAction check above,
+    # never a bare `await model.destroyScenario(); dismiss()`.
+    assert "await model.destroyScenario()\n        dismiss()" not in panel
+    assert "await model.forceDestroyScenario" in panel
 
 
 def test_guide_is_a_dismissable_centered_card_deck() -> None:
