@@ -2425,6 +2425,51 @@ def test_closed_unprovisioned_scenario_has_a_confirmed_destroy_exit(
     assert evidence["binding_state_before"] == "absent"
 
 
+def test_recreated_scenario_advances_generation_and_private_namespace(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    with running_high_risk_host(state_root) as (host, client):
+        first = client.create_scenario(
+            project_instance_id="project",
+            scenario_id="reused-name",
+            project_binding_digest=HOST_PROJECT_DIGEST,
+            request_id="create-reused-name-one",
+        )["scenario"]
+        first_private_root = host.store.participant_private_path(
+            "project", "reused-name", first["scenario_generation"], "analyst", 1
+        )
+        client.destroy_scenario(
+            project_instance_id="project",
+            scenario_id="reused-name",
+            scenario_generation=first["scenario_generation"],
+            scenario_state_revision=first["state_revision"],
+            request_id="destroy-reused-name-one",
+        )
+
+        second = client.create_scenario(
+            project_instance_id="project",
+            scenario_id="reused-name",
+            project_binding_digest=HOST_PROJECT_DIGEST,
+            request_id="create-reused-name-two",
+        )["scenario"]
+        second_private_root = host.store.participant_private_path(
+            "project", "reused-name", second["scenario_generation"], "analyst", 1
+        )
+
+        assert first["scenario_generation"] == 1
+        assert second["scenario_generation"] == 2
+        assert second_private_root != first_private_root
+        destroyed = client.destroy_scenario(
+            project_instance_id="project",
+            scenario_id="reused-name",
+            scenario_generation=second["scenario_generation"],
+            scenario_state_revision=second["state_revision"],
+            request_id="destroy-reused-name-two",
+        )
+        assert destroyed["unregistered"] is True
+
+
 def test_empty_provision_failure_can_be_destroyed_without_adapter_cleanup(
     tmp_path: Path,
 ) -> None:

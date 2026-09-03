@@ -523,6 +523,7 @@ class ParticipantCoordinator:
                     self.store.participant_private_path(
                         project_instance_id,
                         scenario_id,
+                        scenario_generation,
                         participant_id,
                         participant_generation,
                     )
@@ -628,6 +629,7 @@ class ParticipantCoordinator:
                             self.store.participant_private_path(
                                 project_instance_id,
                                 scenario_id,
+                                scenario_generation,
                                 record["participant_id"],
                                 record["participant_generation"],
                             )

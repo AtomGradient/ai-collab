@@ -1785,6 +1785,13 @@ class ScenarioStore:
                     "host.workspace-conflict",
                     "workspace binding path already exists without durable state",
                 )
+            previous_item = state["scenario_history"].get(key)
+            previous_generation = (
+                previous_item["record"]["scenario_generation"]
+                if previous_item is not None
+                else 0
+            )
+            next_generation = previous_generation + 1
             operation = self._new_scenario_operation(
                 state,
                 request_id=request_id,
@@ -1795,11 +1802,11 @@ class ScenarioStore:
                 scenario_generation=None,
                 scenario_state_revision=None,
                 desired_state_after="closed",
-                resulting_scenario_generation=1,
+                resulting_scenario_generation=next_generation,
             )
             record = {
                 "scenario_id": scenario_id,
-                "scenario_generation": 1,
+                "scenario_generation": next_generation,
                 "state_revision": 1,
                 "desired_state": "closed",
                 "observed_state": "provisioning",
@@ -2240,6 +2247,7 @@ class ScenarioStore:
                                 self.participant_private_path(
                                     project_instance_id,
                                     scenario_id,
+                                    record["scenario_generation"],
                                     participant_id,
                                     participant["participant_generation"],
                                 )
@@ -3258,6 +3266,7 @@ class ScenarioStore:
             private_root = self.participant_private_path(
                 project_instance_id,
                 scenario_id,
+                scenario_generation,
                 participant_id,
                 participant_generation,
             )
@@ -3328,6 +3337,7 @@ class ScenarioStore:
             private_root = self.participant_private_path(
                 project_instance_id,
                 scenario_id,
+                scenario_generation,
                 holder["participant_id"],
                 holder["participant_generation"],
             )
@@ -4638,6 +4648,7 @@ class ScenarioStore:
                 self.participant_private_path(
                     project_instance_id,
                     scenario_id,
+                    scenario["scenario_generation"],
                     participant_id,
                     participant_generation,
                 ),
@@ -5203,6 +5214,7 @@ class ScenarioStore:
                     self.participant_private_path(
                         project_instance_id,
                         scenario_id,
+                        scenario_generation,
                         participant_id,
                         participant_generation,
                     )
@@ -5443,6 +5455,7 @@ class ScenarioStore:
                     self.participant_private_path(
                         project_instance_id,
                         scenario_id,
+                        scenario_generation,
                         participant_id,
                         participant_generation,
                     )
@@ -5462,7 +5475,7 @@ class ScenarioStore:
         key = self._scenario_key(project_instance_id, scenario_id)
         with self._lock:
             state = self._read_state()
-            item, _, record, artifact = self._participant_state(
+            item, scenario, record, artifact = self._participant_state(
                 state, key, participant_id
             )
             operation = state["operations"][operation_id]
@@ -5514,6 +5527,23 @@ class ScenarioStore:
             record["journal_head_sequence"] = state["journal_head_sequence"]
             operation["state"] = "succeeded"
             operation["mutation_state"] = "committed"
+            participants, _ = self._participant_maps(item)
+            if (
+                scenario["desired_state"] == "running"
+                and scenario["observed_state"] == "degraded"
+                and scenario.get("degraded", {}).get("reason")
+                in {"participant_fault", "participant_restore_incomplete"}
+                and not any(
+                    participant["observed_state"] == "degraded"
+                    for participant in participants.values()
+                )
+            ):
+                scenario["observed_state"] = "running"
+                scenario["degraded"] = None
+                scenario["state_revision"] += 1
+                scenario["journal_head_sequence"] = state[
+                    "journal_head_sequence"
+                ]
             result = {"participant": copy.deepcopy(record)}
             request = state["requests"][request_id]
             request["status"] = "completed"
@@ -5654,6 +5684,7 @@ class ScenarioStore:
                     self.participant_private_path(
                         project_instance_id,
                         scenario_id,
+                        scenario_generation,
                         participant_id,
                         participant_generation,
                     )
@@ -5936,6 +5967,7 @@ class ScenarioStore:
                     self.participant_private_path(
                         project_instance_id,
                         scenario_id,
+                        scenario_generation,
                         participant_id,
                         participant_generation,
                     )
@@ -6102,6 +6134,7 @@ class ScenarioStore:
                         self.participant_private_path(
                             project_instance_id,
                             scenario_id,
+                            scenario["scenario_generation"],
                             participant_id,
                             next_generation,
                         )
@@ -6397,12 +6430,14 @@ class ScenarioStore:
         self,
         project_instance_id: str,
         scenario_id: str,
+        scenario_generation: int,
         participant_id: str,
         participant_generation: int,
     ) -> Path:
-        digest = hashlib.sha256(
-            f"{project_instance_id}\0{scenario_id}\0{participant_id}".encode("utf-8")
-        ).hexdigest()
+        identity = f"{project_instance_id}\0{scenario_id}\0{participant_id}"
+        if scenario_generation > 1:
+            identity += f"\0scenario-generation:{scenario_generation}"
+        digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
         return self.participant_root / digest[:32] / f"generation-{participant_generation}"
 
     def resource_supervision_inputs(
@@ -6445,6 +6480,7 @@ class ScenarioStore:
                             self.participant_private_path(
                                 item["project_instance_id"],
                                 scenario["scenario_id"],
+                                scenario["scenario_generation"],
                                 participant_id,
                                 record["participant_generation"],
                             )

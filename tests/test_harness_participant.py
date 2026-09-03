@@ -1402,6 +1402,59 @@ def test_participant_replace_validates_before_mutation_and_retains_old_generatio
         assert driver.start_generations == [1]
 
 
+def test_stopping_last_degraded_participant_heals_running_scenario(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    with running_host(state_root) as (_, client, driver):
+        opened, ready = _start_ready_participant(client)
+        driver.fail_stop = True
+        with pytest.raises(HarnessClientError):
+            client.replace_participant(
+                project_instance_id=PROJECT_ID,
+                scenario_id=SCENARIO_ID,
+                participant_id=PARTICIPANT_ID,
+                scenario_generation=opened["scenario_generation"],
+                scenario_state_revision=opened["state_revision"],
+                participant_generation=ready["participant_generation"],
+                participant_state_revision=ready["state_revision"],
+                launch_spec={
+                    **_launch_spec(),
+                    "runtime_profile_ref": "runtime-profile.replacement",
+                },
+                presentation_driver_id="presentation.iterm2",
+                request_id="degrade-before-stop",
+            )
+
+        degraded_scenario = client.scenario_status(
+            project_instance_id=PROJECT_ID, scenario_id=SCENARIO_ID
+        )["scenario"]
+        degraded_participant = client.list_participants(
+            project_instance_id=PROJECT_ID, scenario_id=SCENARIO_ID
+        )["participants"][0]
+        assert degraded_scenario["observed_state"] == "degraded"
+        assert degraded_participant["observed_state"] == "degraded"
+
+        driver.fail_stop = False
+        stopped = client.stop_participant(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            participant_id=PARTICIPANT_ID,
+            scenario_generation=degraded_scenario["scenario_generation"],
+            scenario_state_revision=degraded_scenario["state_revision"],
+            participant_generation=degraded_participant["participant_generation"],
+            participant_state_revision=degraded_participant["state_revision"],
+            request_id="settle-degraded-with-stop",
+        )["participant"]
+        healed = client.scenario_status(
+            project_instance_id=PROJECT_ID, scenario_id=SCENARIO_ID
+        )["scenario"]
+
+        assert stopped["observed_state"] == "stopped"
+        assert healed["observed_state"] == "running"
+        assert healed["degraded"] is None
+
+
 def test_participant_replace_keeps_stopped_intent_and_post_cas_failure_is_new_generation_degraded(
     tmp_path: Path,
 ) -> None:
