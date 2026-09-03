@@ -1359,13 +1359,19 @@ struct ContentView: View {
                     .font(.callout)
                     .foregroundStyle(.green)
             } else if let totals = model.deliveryAttentionTotals {
-                Text(
-                    S.NeedsAttention.roomTotals(
-                        degraded: totals.degraded, retried: totals.retried
-                    )
-                )
-                .font(.callout)
-                .foregroundStyle(.orange)
+                // One line per category, never a sum: a delivery whose
+                // repeated last attempt failed is counted in both, and the
+                // summary carries no intersection to subtract.
+                if totals.degraded > 0 {
+                    Text(S.NeedsAttention.degradedCount(totals.degraded))
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                }
+                if totals.retried > 0 {
+                    Text(S.NeedsAttention.retriedCount(totals.retried))
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                }
                 if model.deliveryAttention.isEmpty {
                     Text(
                         S.NeedsAttention.noExamplesOnPage(

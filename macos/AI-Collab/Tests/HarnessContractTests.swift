@@ -198,6 +198,13 @@ final class HarnessContractTests: XCTestCase {
                 "collection_digest": String(repeating: "b", count: 64),
             ],
         ]))
+        // One delivery, third attempt, degraded: it is in both attention
+        // categories at once. The counts must stay per category — summing them
+        // would report two deliveries in a room that holds one.
+        let overlap = DeliveryAttentionTotals(summary: collection.summary)
+        XCTAssertEqual(overlap.degraded, 1)
+        XCTAssertEqual(overlap.retried, 1)
+        XCTAssertFalse(overlap.isClear)
         XCTAssertEqual(collection.summary.total, 1)
         XCTAssertEqual(collection.summary.states, ["delivery_attempted": 1])
         XCTAssertEqual(collection.deliveries.first?.sender.participantID, "analyst")
@@ -282,7 +289,8 @@ final class HarnessContractTests: XCTestCase {
         XCTAssertFalse(retriedOnly.isClear)
 
         let both = try totals(["degraded_total": 2, "first_attempt_total": 65])
-        XCTAssertEqual(both.total, 6)
+        XCTAssertEqual(both.degraded, 2)
+        XCTAssertEqual(both.retried, 4)
         XCTAssertFalse(both.isClear)
     }
 
@@ -300,8 +308,9 @@ final class HarnessContractTests: XCTestCase {
 
         XCTAssertTrue(model.deliveryAttention.isEmpty, "the page shows no problem")
         let totals = try XCTUnwrap(model.deliveryAttentionTotals)
-        XCTAssertEqual(totals.total, 4)
-        XCTAssertFalse(totals.isClear, "the room still has four")
+        XCTAssertEqual(totals.degraded, 1)
+        XCTAssertEqual(totals.retried, 3)
+        XCTAssertFalse(totals.isClear, "the room still has problems")
 
         model.deliverySummary = nil
         XCTAssertNil(

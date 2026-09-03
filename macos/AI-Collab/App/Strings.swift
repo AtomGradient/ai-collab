@@ -551,17 +551,19 @@ enum S {
         static var allClear: String {
             t("No delivery needs attention.", "没有需要关注的投递。")
         }
-        /// Stated over the whole collection, never over the loaded page.
-        static func roomTotals(degraded: Int, retried: Int) -> String {
-            let count = degraded + retried
-            let parts = [
-                degraded > 0 ? t("\(degraded) degraded", "\(degraded) 条降级") : nil,
-                retried > 0 ? t("\(retried) retried", "\(retried) 条重试") : nil,
-            ].compactMap { $0 }
-            let breakdown = parts.joined(separator: t(", ", "，"))
-            return t(
-                "\(count) deliver\(count == 1 ? "y" : "ies") need attention — \(breakdown).",
-                "有 \(count) 条投递需要关注——\(breakdown)。"
+        /// Stated over the whole collection, never over the loaded page, and
+        /// one line per category. The two overlap, so they are never joined
+        /// into a count of deliveries.
+        static func degradedCount(_ count: Int) -> String {
+            t(
+                "\(count) deliver\(count == 1 ? "y is" : "ies are") degraded.",
+                "有 \(count) 条投递降级。"
+            )
+        }
+        static func retriedCount(_ count: Int) -> String {
+            t(
+                "\(count) deliver\(count == 1 ? "y" : "ies") needed more than one attempt.",
+                "有 \(count) 条投递不止一次尝试。"
             )
         }
         static var examplesHeading: String {

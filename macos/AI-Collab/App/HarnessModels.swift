@@ -853,8 +853,12 @@ struct DeliveryAttentionTotals: Equatable {
         retried = summary.attemptedTotal - summary.firstAttemptTotal
     }
 
-    var total: Int { degraded + retried }
-    var isClear: Bool { total == 0 }
+    /// Deliberately no union count. The two categories overlap — a delivery
+    /// whose repeated last attempt failed is degraded *and* retried — and the
+    /// aggregate summary carries no intersection, so no unique total can be
+    /// derived from it without new IPC. Clear is still exact: both zero means
+    /// neither category holds anything.
+    var isClear: Bool { degraded == 0 && retried == 0 }
 }
 
 struct DeliverySummaryRecord: Equatable {
