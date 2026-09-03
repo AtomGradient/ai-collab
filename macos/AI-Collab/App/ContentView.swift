@@ -66,7 +66,6 @@ private enum HighRiskIntent: Identifiable {
     case forceStop(ParticipantRecord)
     case recreateParticipantWithHandoff(ParticipantRecord)
     case breakResource(ResourceLeaseRecord)
-    case destroyScenario
     case forceDestroyScenario(ScenarioRecord)
     case unregisterProject(ProjectRecord)
 
@@ -77,7 +76,6 @@ private enum HighRiskIntent: Identifiable {
         case let .recreateParticipantWithHandoff(participant):
             "participant.recreate-with-handoff:\(participant.id)"
         case let .breakResource(resource): "resource.break:\(resource.id)"
-        case .destroyScenario: "scenario.destroy"
         case let .forceDestroyScenario(scenario):
             "scenario.force-destroy:\(scenario.id)"
         case let .unregisterProject(project):
@@ -91,7 +89,6 @@ private enum HighRiskIntent: Identifiable {
         case .forceStop: S.HighRisk.forceStopTitle
         case .recreateParticipantWithHandoff: S.HighRisk.recreateTitle
         case .breakResource: S.HighRisk.breakResourceTitle
-        case .destroyScenario: S.HighRisk.destroyTitle
         case .forceDestroyScenario: S.HighRisk.forceDestroyTitle
         case .unregisterProject: S.HighRisk.unregisterTitle
         }
@@ -109,13 +106,122 @@ private enum HighRiskIntent: Identifiable {
             S.HighRisk.breakResourceMessage(
                 resource.resourceClass, String(resource.id.prefix(12))
             )
-        case .destroyScenario:
-            S.HighRisk.destroyMessage
         case let .forceDestroyScenario(scenario):
             S.HighRisk.forceDestroyMessage(scenario.id)
         case let .unregisterProject(project):
             S.HighRisk.unregisterMessage(project.key)
         }
+    }
+}
+
+// MARK: - Destroy panel (the one entry point into the delete flow)
+
+/// `.sheet(item:)` payload — identity is the Scenario's own id, so retargeting
+/// the sheet at a different room (another row's "Delete…") is a normal state
+/// change, not a reuse of stale identity.
+private struct DestroyPanelTarget: Identifiable {
+    let scenario: ScenarioRecord
+    var id: String { scenario.id }
+}
+
+/// The single UI component behind every "delete a task room" entry point —
+/// the room board's row menu, the mission bar's "…" menu, and Evidence &
+/// Diagnostics' high-risk tab all open this same sheet instead of each
+/// rolling their own preview/blockers/confirm mechanics.
+///
+/// Review 20260903-185641-e6nznb: the room a user right-clicks is not
+/// necessarily `model.selectedScenario` — `loadDestroyPreview()` reads
+/// whichever Scenario is selected, so this panel explicitly selects its own
+/// target first and only then loads the preview, rather than trusting
+/// whatever happened to be open already.
+private struct DestroyPanel: View {
+    let scenario: ScenarioRecord
+    /// Delegates to the caller's own `highRiskIntent = .forceDestroyScenario`
+    /// — the Host confirmation for that path is unchanged, just reached from
+    /// here once a loaded preview says it is actually blocked.
+    let onForceDelete: (ScenarioRecord) -> Void
+
+    @EnvironmentObject private var model: HarnessViewModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var loaded = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(S.Risk.destroyPanelTitle(scenario.id))
+                .font(.title3.bold())
+            Text(S.HighRisk.destroyMessage)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text(S.Risk.hostConfirmNote)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if !loaded {
+                HStack {
+                    ProgressView().controlSize(.small)
+                    Text(S.Risk.destroyPreviewLoading)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+            } else if model.destroyPreviewEligible {
+                Label(S.Risk.destroyPreviewOK, systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+            } else {
+                Label(
+                    S.Risk.destroyPreviewBlocked(model.destroyPreviewBlockers),
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .foregroundStyle(.orange)
+            }
+
+            if loaded, !model.destroyPreviewText.isEmpty {
+                ScrollView {
+                    Text(model.destroyPreviewText)
+                        .font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 180)
+            }
+
+            HStack {
+                Button(S.Common.cancel) { dismiss() }
+                Spacer()
+                Button(S.Common.retry, systemImage: "arrow.clockwise") {
+                    Task { await load() }
+                }
+                .disabled(model.isBusy)
+                if loaded, model.destroyPreviewEligible {
+                    Button(S.Risk.destroyScenario, role: .destructive) {
+                        Task {
+                            await model.destroyScenario()
+                            dismiss()
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(model.isBusy)
+                } else if loaded {
+                    Button(S.Rooms.forceDelete, role: .destructive) {
+                        let target = scenario
+                        dismiss()
+                        onForceDelete(target)
+                    }
+                    .disabled(model.isBusy)
+                }
+            }
+        }
+        .padding(20)
+        .frame(width: 460)
+        .task { await load() }
+    }
+
+    private func load() async {
+        loaded = false
+        if model.selectedScenarioID != scenario.id {
+            await model.selectScenario(scenario.id)
+        }
+        await model.loadDestroyPreview()
+        loaded = true
     }
 }
 
@@ -126,6 +232,7 @@ struct ContentView: View {
     @AppStorage("AICollabGuideSeen") private var guideSeen = false
     @State private var highRiskIntent: HighRiskIntent?
     @State private var pendingDeletion: ParticipantRecord?
+    @State private var destroyPanelTarget: DestroyPanelTarget?
 
     var body: some View {
         NavigationSplitView {
@@ -195,6 +302,12 @@ struct ContentView: View {
                 Text(S.Colleagues.deleteConfirmMessage(participant.id))
             }
         }
+        .sheet(item: $destroyPanelTarget) { target in
+            DestroyPanel(scenario: target.scenario) { scenario in
+                highRiskIntent = .forceDestroyScenario(scenario)
+            }
+            .environmentObject(model)
+        }
         .overlay(alignment: .top) { errorBanner }
         .overlay(alignment: .bottomTrailing) { readyMomentCard }
         .overlay { guideCard }
@@ -244,8 +357,6 @@ struct ContentView: View {
                         .disabled(model.isBusy)
                 }
             }
-            .padding(10)
-            .background(.secondary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
         } else {
             VStack(alignment: .leading, spacing: 9) {
                 Text(flowEyebrow)
@@ -262,8 +373,6 @@ struct ContentView: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(13)
-            .background(.secondary.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
         }
     }
 
@@ -592,8 +701,8 @@ struct ContentView: View {
                                 .listRowInsets(EdgeInsets(top: 3, leading: 6, bottom: 3, trailing: 6))
                                 .listRowSeparator(.hidden)
                                 .contextMenu {
-                                    Button(S.Rooms.forceDelete, role: .destructive) {
-                                        highRiskIntent = .forceDestroyScenario(scenario)
+                                    Button(S.Rooms.deleteMenu, role: .destructive) {
+                                        destroyPanelTarget = DestroyPanelTarget(scenario: scenario)
                                     }
                                 }
                         }
@@ -683,9 +792,13 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 12) {
             scenarioHeader(scenario)
             validationBanner(for: .scenarioLifecycle)
+            Divider()
             scenarioFlowSection
+            Divider()
             objectiveSection(scenario)
         }
+        .padding(14)
+        .background(.secondary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
     }
 
     private func objectiveSection(_ scenario: ScenarioRecord) -> some View {
@@ -760,8 +873,6 @@ struct ContentView: View {
                 validationBanner(for: .objective)
             }
         }
-        .padding(10)
-        .background(.secondary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
     }
 
     // MARK: - Scenario header
@@ -818,6 +929,20 @@ struct ContentView: View {
                                     scenario.observedState
                                 )
                         )
+                    // The one UI entry point for the delete flow, alongside
+                    // the room board's own row menu — both open the same
+                    // `DestroyPanel`. Force Delete is never offered here
+                    // directly; the panel decides eligible-vs-blocked after
+                    // loading a real preview (review 20260903-185641-e6nznb).
+                    Menu {
+                        Button(S.Rooms.deleteMenu) {
+                            destroyPanelTarget = DestroyPanelTarget(scenario: scenario)
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
                 }
             }
             HStack(spacing: 16) {
@@ -1542,31 +1667,15 @@ struct ContentView: View {
                 Text(S.Risk.hostConfirmNote)
                     .font(.callout)
                     .foregroundStyle(.secondary)
-                HStack {
-                    // Repair moved to the mission bar header (one canonical
-                    // place); this section keeps only the actions that are
-                    // actually high-risk/destructive.
-                    Button(S.Risk.loadDestroyPreview) {
-                        Task { await model.loadDestroyPreview() }
-                    }
-                    .controlSize(.small)
-                    Button(S.Risk.destroyScenario, role: .destructive) {
-                        highRiskIntent = .destroyScenario
-                    }
-                    .controlSize(.small)
-                    .disabled(!model.destroyPreviewEligible)
-                    if model.destroyPreviewBlocked {
-                        Button(S.Rooms.forceDelete, role: .destructive) {
-                            highRiskIntent = .forceDestroyScenario(scenario)
-                        }
-                        .controlSize(.small)
-                    }
+                // Repair moved to the mission bar header (one canonical
+                // place). Delete opens the one shared `DestroyPanel` — the
+                // same component the room board's row menu and the mission
+                // bar's "…" menu open; it loads its own preview rather than
+                // this section keeping a second, possibly-stale copy.
+                Button(S.Rooms.deleteMenu, role: .destructive) {
+                    destroyPanelTarget = DestroyPanelTarget(scenario: scenario)
                 }
-                if model.destroyPreviewBlocked {
-                    Text(S.Risk.destroyPreviewBlocked(model.destroyPreviewBlockers))
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                }
+                .controlSize(.small)
                 ForEach(model.resources.filter(\.canBreak)) { resource in
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
@@ -1584,11 +1693,6 @@ struct ContentView: View {
                         }
                         .controlSize(.small)
                     }
-                }
-                if !model.destroyPreviewText.isEmpty {
-                    Text(model.destroyPreviewText)
-                        .font(.system(.caption, design: .monospaced))
-                        .textSelection(.enabled)
                 }
             }
             .padding(.vertical, 6)
@@ -1728,8 +1832,9 @@ struct ContentView: View {
     /// point 7).
     private func technicalSection(_ scenario: ScenarioRecord) -> some View {
         DisclosureGroup(isExpanded: $showTechnical) {
-            VStack(alignment: .leading, spacing: 12) {
-                evidenceTabStrip
+            HStack(alignment: .top, spacing: 12) {
+                evidenceNav
+                Divider()
                 Group {
                     switch evidenceTab {
                     case .deliveries: deliveriesSection
@@ -1741,6 +1846,7 @@ struct ContentView: View {
                     case .highRisk: highRiskSection(scenario)
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
             .padding(.top, 8)
         } label: {
@@ -1759,38 +1865,45 @@ struct ContentView: View {
         .background(.secondary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
     }
 
-    /// The seven evidence domains, one row, exactly one visible at a time —
-    /// this replaces the drawer-of-drawers review 20260903-183736-clqu6r
-    /// P1-4 flagged. Every domain stays a single click from the drawer being
-    /// open, never nested behind its own fold.
-    private var evidenceTabStrip: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 4) {
-                evidenceTabButton(.deliveries, S.Deliveries.rawActivity)
-                evidenceTabButton(.preflight, S.Preflight.sectionTitle)
-                evidenceTabButton(.topology, S.Topology.sectionTitle)
-                evidenceTabButton(.policy, S.Policy.sectionTitle)
-                evidenceTabButton(.resources, S.Sections.resources)
-                evidenceTabButton(.inspector, S.Inspector.sectionTitle)
-                evidenceTabButton(.highRisk, S.Risk.sectionTitle, tint: .red)
-            }
+    /// A fixed-width left nav, not a horizontally-scrolling strip — review
+    /// 20260903-185641-e6nznb P2: a scrolling row can hide the high-risk tab
+    /// off the visible edge with no indicator on a narrow window, and hand-
+    /// rolled capsules skip native selected/keyboard semantics. All seven
+    /// domains are always fully visible at once here, same fixed column
+    /// regardless of window width, high-risk included — nothing to scroll to
+    /// discover it.
+    private var evidenceNav: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            evidenceNavRow(.deliveries, S.Deliveries.rawActivity, "envelope.fill")
+            evidenceNavRow(.preflight, S.Preflight.sectionTitle, "checkmark.shield")
+            evidenceNavRow(.topology, S.Topology.sectionTitle, "macwindow.on.rectangle")
+            evidenceNavRow(.policy, S.Policy.sectionTitle, "shared.with.you")
+            evidenceNavRow(.resources, S.Sections.resources, "cpu")
+            evidenceNavRow(.inspector, S.Inspector.sectionTitle, "terminal")
+            evidenceNavRow(.highRisk, S.Risk.sectionTitle, "exclamationmark.triangle", tint: .red)
         }
+        .frame(width: 140, alignment: .leading)
     }
 
-    private func evidenceTabButton(
-        _ tab: EvidenceTab, _ title: String, tint: Color = .accentColor
+    private func evidenceNavRow(
+        _ tab: EvidenceTab, _ title: String, _ symbol: String, tint: Color = .accentColor
     ) -> some View {
         let selected = evidenceTab == tab
-        return Button(title) { evidenceTab = tab }
-            .buttonStyle(.plain)
-            .font(.caption.weight(selected ? .bold : .regular))
-            .foregroundStyle(selected ? tint : Color.secondary)
-            .padding(.horizontal, 9)
-            .padding(.vertical, 5)
-            .background(
-                selected ? tint.opacity(0.12) : Color.clear,
-                in: Capsule()
-            )
+        return Button {
+            evidenceTab = tab
+        } label: {
+            Label(title, systemImage: symbol)
+                .font(.caption.weight(selected ? .bold : .regular))
+                .foregroundStyle(selected ? tint : Color.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+                .background(
+                    selected ? tint.opacity(0.12) : Color.clear,
+                    in: RoundedRectangle(cornerRadius: 6)
+                )
+        }
+        .buttonStyle(.plain)
     }
 
     /// One line, shown only while the drawer is collapsed, composed from
@@ -1961,8 +2074,6 @@ struct ContentView: View {
             await model.recreateParticipantWithHandoff(participant)
         case let .breakResource(resource):
             await model.breakResource(resource)
-        case .destroyScenario:
-            await model.destroyScenario()
         case let .forceDestroyScenario(scenario):
             await model.forceDestroyScenario(scenario)
         case let .unregisterProject(project):

@@ -236,9 +236,10 @@ def test_app_exposes_scenario_focus_and_topology_without_vendor_logic() -> None:
     view_model = (APP_ROOT / "HarnessViewModel.swift").read_text(encoding="utf-8")
     models = (APP_ROOT / "HarnessModels.swift").read_text(encoding="utf-8")
     ipc = (APP_ROOT / "HarnessIPC.swift").read_text(encoding="utf-8")
-    # The section must exist and be labelled; whether it renders as a GroupBox or
-    # a collapsible section is layout, not contract.
-    assert 'Label(S.Topology.sectionTitle' in content
+    # The section must exist and be labelled; whether it renders as a GroupBox,
+    # a collapsible section, or an Evidence & Diagnostics nav row is layout,
+    # not contract.
+    assert 'evidenceNavRow(.topology, S.Topology.sectionTitle' in content
     assert 'Button(S.Topology.focusRestore)' in content
     assert 'operation: "scenario.topology"' in view_model
     assert 'operation: "scenario.focus"' in view_model
@@ -362,11 +363,16 @@ def test_iterm_python_api_setup_runs_detached_before_quitting_iterm() -> None:
     assert "Terminal.app" in strings
 
 
-def test_app_exposes_single_entry_context_menu_force_destroy() -> None:
+def test_app_exposes_context_menu_delete_through_the_destroy_panel() -> None:
+    """Superseded by DestroyPanel (review 20260903-185641-e6nznb): the row
+    context menu no longer force-destroys directly — see
+    test_destroy_flow_has_one_panel_entry_point_not_a_direct_force_delete.
+    This still pins that the row menu exists and that Force Delete, reached
+    only via the panel now, still calls scenario.force-destroy underneath."""
     content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
     view_model = (APP_ROOT / "HarnessViewModel.swift").read_text(encoding="utf-8")
     assert '.contextMenu {' in content
-    assert 'Button(S.Rooms.forceDelete, role: .destructive)' in content
+    assert "struct DestroyPanel: View" in content
     assert "case forceDestroyScenario(ScenarioRecord)" in content
     strings = (APP_ROOT / "Strings.swift").read_text(encoding="utf-8")
     assert "registered project source is never deleted" in strings
@@ -413,7 +419,11 @@ def test_app_surfaces_destroy_preview_blockers_and_force_delete_escape_hatch() -
     assert "destroyPreviewBlocked" in view_model
     assert 'preview["blockers"] as? [String]' in view_model
     assert "S.Msg.destroyPreviewBlocked(self.destroyPreviewBlockers)" in view_model
-    assert "model.destroyPreviewBlocked" in content
+    # DestroyPanel branches on the primitive `destroyPreviewEligible` flag
+    # directly rather than through the `destroyPreviewBlocked` convenience —
+    # that computed property still exists in HarnessViewModel, just unused
+    # from ContentView now.
+    assert "model.destroyPreviewEligible" in content
     assert "S.Risk.destroyPreviewBlocked(model.destroyPreviewBlockers)" in content
     assert ".forceDestroyScenario(scenario)" in content
     assert "Destroy preview is blocked" in strings
@@ -513,19 +523,105 @@ def test_prepare_workspace_wires_the_progress_session() -> None:
 
 
 def test_degraded_room_shows_a_visible_repair_entry() -> None:
-    """R6: a durable degraded/provision_failed room must offer repair in the
-    always-visible Health card, not only inside the collapsed technical fold."""
+    """R6: a durable degraded/provision_failed room must offer repair from an
+    always-visible surface, not only inside the collapsed technical fold.
+
+    Phase 1 redesign (review 20260903-183736-clqu6r) moved the one canonical
+    Repair control from the Health card into the mission bar's header row,
+    which is unconditionally visible for every Scenario — a strictly more
+    always-visible surface than the Health card, which only renders at all
+    while degraded/provision_failed. Health card keeps the explanatory
+    sentence and Run Preflight, not a second Repair button.
+    """
 
     content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
+    header = content.split("private func scenarioHeader", 1)[1].split("private ", 1)[0]
+    assert '["provision_failed", "degraded"].contains(scenario.observedState)' in header
+    assert "Button(S.Risk.repairScenario)" in header
+    assert "highRiskIntent = .repairScenario" in header
     card = content.split("private func healthCard", 1)[1].split("private ", 1)[0]
     assert '"degraded", "provision_failed"' in card
-    assert "Button(S.Risk.repairScenario)" in card
-    assert "highRiskIntent = .repairScenario" in card
+    assert "Button(S.Risk.repairScenario)" not in card, (
+        "repair must not be duplicated back into the Health card"
+    )
     assert "Button(S.Preflight.runButton)" in card
     detail = content.split("private var scenarioDetail", 1)[1].split("private ", 1)[0]
     assert "healthCard(scenario)" in detail
     assert "Label(S.Sections.health" in card
-    assert "Label(S.Deliveries.rawActivity" in content
+    assert "evidenceNavRow(.deliveries, S.Deliveries.rawActivity" in content
+
+
+def test_needs_attention_delivery_link_opens_the_drawer_it_expands() -> None:
+    """codex review 20260903-183736-clqu6r P1-2: the inner tab used to expand
+    while the outer drawer disclosure stayed collapsed, so the click looked
+    like it did nothing. Both must be set together."""
+
+    content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
+    attention = content.split("private var needsAttentionSection", 1)[1].split(
+        "private ", 1
+    )[0]
+    assert "showTechnical = true" in attention
+    assert "evidenceTab = .deliveries" in attention
+    # The per-section disclosure bools P1-4 replaced must not come back.
+    for removed_state in (
+        "showPreflight",
+        "showTopology",
+        "showPolicy",
+        "showDeliveries",
+        "showInspector",
+    ):
+        assert removed_state not in content
+
+
+def test_evidence_nav_is_a_fixed_column_not_a_scrolling_strip() -> None:
+    """codex review 20260903-185641-e6nznb P2: a horizontally-scrolling row of
+    capsule buttons can hide the high-risk tab off a narrow window with no
+    indicator. The nav must be a fixed-width column where every domain,
+    including high-risk, is always on screen."""
+
+    content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
+    nav = content.split("private var evidenceNav", 1)[1].split("private func", 1)[0]
+    assert "ScrollView(.horizontal" not in nav
+    for tab in (
+        "deliveries",
+        "preflight",
+        "topology",
+        "policy",
+        "resources",
+        "inspector",
+        "highRisk",
+    ):
+        assert f"evidenceNavRow(.{tab}" in nav
+
+
+def test_destroy_flow_has_one_panel_entry_point_not_a_direct_force_delete() -> None:
+    """codex review 20260903-185641-e6nznb: the room board's row menu must not
+    jump straight to Force Delete — every delete entry point (row menu,
+    mission bar, Evidence & Diagnostics) opens the same DestroyPanel, which
+    loads a real preview for its explicit target before offering normal
+    delete (eligible) or Force Delete (only once blocked)."""
+
+    content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
+    assert "struct DestroyPanel: View" in content
+    # The room list's own row menu: no direct forceDestroyScenario shortcut.
+    scenarios_list = content.split("private var scenariosList", 1)[1].split(
+        "private var scenarioGroups", 1
+    )[0]
+    assert "forceDestroyScenario" not in scenarios_list
+    assert "destroyPanelTarget = DestroyPanelTarget(scenario: scenario)" in scenarios_list
+    # At least three independent entry points open the same panel: the room
+    # board row menu, the mission bar's "…" menu, and Evidence & Diagnostics.
+    assert content.count("DestroyPanelTarget(scenario: scenario)") >= 3
+    # The panel itself explicitly (re)selects its target before loading a
+    # preview, rather than trusting whatever scenario happened to already be
+    # selected — the row a user right-clicks is not necessarily the one open
+    # in the detail pane.
+    panel = content.split("private struct DestroyPanel", 1)[1]
+    assert "model.selectedScenarioID != scenario.id" in panel
+    assert "await model.selectScenario(scenario.id)" in panel
+    assert "await model.loadDestroyPreview()" in panel
+    # Force Delete only appears once loaded and only for the blocked branch.
+    assert 'Button(S.Rooms.forceDelete, role: .destructive)' in panel
 
 
 def test_guide_is_a_dismissable_centered_card_deck() -> None:

@@ -141,6 +141,13 @@ enum S {
         static var forceDelete: String {
             t("Force Delete Task Room…", "强制删除任务房间…")
         }
+        /// The one row-menu / mission-bar entry point into the delete flow
+        /// (review 20260903-185641-e6nznb): opens `DestroyPanel`, which loads
+        /// a real preview before offering either the normal delete or, only
+        /// once blocked, `forceDelete` above. Never itself force-deletes.
+        static var deleteMenu: String {
+            t("Delete Task Room…", "删除任务房间…")
+        }
         static var selectTitle: String { t("Select a Task Room", "选择一个任务房间") }
         /// Group header for the room board's active/transitioning bucket.
         /// "Needs Attention" and "Closed" reuse existing labels
@@ -336,9 +343,6 @@ enum S {
                 "只有当服务端证明占用它的进程确实已不存在、并获得一次性授权后，"
                     + "才会释放这个失效的 \(resourceClass) 占用（\(shortID)）。"
             )
-        }
-        static var destroyTitle: String {
-            t("Delete this task room?", "删除这个任务房间？")
         }
         static var destroyMessage: String {
             t(
@@ -667,8 +671,16 @@ enum S {
             )
         }
         static var repairScenario: String { t("Repair Task Room", "修复任务房间") }
-        static var loadDestroyPreview: String { t("Load Destroy Preview", "加载删除预览") }
         static var destroyScenario: String { t("Delete Task Room", "删除任务房间") }
+        static func destroyPanelTitle(_ id: String) -> String {
+            t("Delete “\(id)”", "删除「\(id)」")
+        }
+        static var destroyPreviewOK: String {
+            t("No blockers — this task room can be deleted.", "没有阻塞条件——可以删除这个任务房间。")
+        }
+        static var destroyPreviewLoading: String {
+            t("Loading destroy preview…", "正在加载删除预览…")
+        }
         static func destroyPreviewBlocked(_ blockers: [String]) -> String {
             let detail = blockers.isEmpty
                 ? t("the Host reported unresolved blockers", "后台服务报告仍有阻塞条件")
