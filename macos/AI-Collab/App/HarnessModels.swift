@@ -1046,7 +1046,11 @@ struct DeliveryDistributionRecord: Equatable {
 }
 
 struct DeliveryCollectionRecord: Equatable {
-    static let rawActivityLimit = 5
+    /// The "collaboration activity" list in the workbench shows this many of
+    /// the room's most recent deliveries (the Host sorts by enqueue_sequence
+    /// descending and accepts 1...256). Still one page, never paginated —
+    /// the raw ledger stays in Evidence & Diagnostics.
+    static let rawActivityLimit = 30
 
     let deliveries: [DeliveryRecord]
     let summary: DeliverySummaryRecord

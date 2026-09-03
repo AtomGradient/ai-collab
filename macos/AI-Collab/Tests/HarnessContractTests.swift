@@ -236,17 +236,21 @@ final class HarnessContractTests: XCTestCase {
                 ],
             ]
         }
-        let rawDeliveries = (1 ... 6).reversed().map { delivery($0) }
+        // Limit-relative, so this pins "one page, truncated to the limit"
+        // rather than a hard-coded count (the v2 workbench raised the limit
+        // from 5 to 30 when the delivery stream became the main content).
+        let limit = DeliveryCollectionRecord.rawActivityLimit
+        let rawDeliveries = (1 ... limit + 1).reversed().map { delivery($0) }
         let collection = try XCTUnwrap(DeliveryCollectionRecord([
             "summary": [
-                "total": 6,
-                "states": ["consumed": 6],
-                "kinds": ["collaboration.message": 0, "collaboration.notice": 6],
+                "total": limit + 1,
+                "states": ["consumed": limit + 1],
+                "kinds": ["collaboration.message": 0, "collaboration.notice": limit + 1],
                 "reply_expected_total": 0,
                 "reply_expected_closed": 0,
                 "delivered_with_reply": 0,
-                "attempted_total": 6,
-                "first_attempt_total": 6,
+                "attempted_total": limit + 1,
+                "first_attempt_total": limit + 1,
                 "degraded_total": 0,
             ],
             "deliveries": rawDeliveries,
@@ -255,7 +259,11 @@ final class HarnessContractTests: XCTestCase {
                 "collection_digest": String(repeating: "b", count: 64),
             ],
         ]))
-        XCTAssertEqual(collection.deliveries.map(\.enqueueSequence), [6, 5, 4, 3, 2])
+        XCTAssertEqual(
+            collection.deliveries.map(\.enqueueSequence),
+            Array((2 ... limit + 1).reversed()),
+            "the page keeps exactly the newest `rawActivityLimit` rows"
+        )
         XCTAssertTrue(DeliveryAttentionRecord.items(from: collection.deliveries).isEmpty)
 
         let degraded = try XCTUnwrap(DeliveryRecord(delivery(6, degraded: "transport")))

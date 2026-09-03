@@ -124,18 +124,29 @@ def test_stale_host_bundle_status_survives_successful_refreshes_and_mutations() 
     ) == 2
 
 
+
 def test_app_live_refreshes_selected_scenario_deliveries_without_full_page_polling() -> None:
+    """The room's live loop (v2 `monitorRoom`, formerly `monitorDeliveries`)
+    polls deliveries every 2 seconds and, on the same tick, takes a read-only
+    look at the room record and its participants — never the full
+    `refreshSelectedScenarioValues` (preflight, topology, diagnostic,
+    resources, policy) which is the explicit-refresh path."""
     content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
     view_model = (APP_ROOT / "HarnessViewModel.swift").read_text(encoding="utf-8")
     assert ".task(id: scenario.id)" in content
-    assert "await model.monitorDeliveries(for: scenario.id)" in content
-    assert "func monitorDeliveries(for scenarioID: String) async" in view_model
+    assert "await model.monitorRoom(for: scenario.id)" in content
+    assert "func monitorRoom(for scenarioID: String) async" in view_model
     monitor = view_model.split(
-        "func monitorDeliveries(for scenarioID: String) async", 1
-    )[1].split("func retryDelivery", 1)[0]
+        "func monitorRoom(for scenarioID: String) async", 1
+    )[1].split("private func observeRoom", 1)[0]
     assert "fetchDeliveries(" in monitor
     assert "refreshSelectedScenarioValues" not in monitor
     assert "Task.sleep(nanoseconds: 2_000_000_000)" in monitor
+    # The participant/room read is skipped while a mutation is in flight so
+    # it cannot race the post-mutation refresh.
+    assert "if !isBusy {" in monitor
+    assert "observeRoom(project: project, scenarioID: scenarioID)" in monitor
+
 
 
 def test_harness_app_raw_activity_has_no_pagination_callpoints() -> None:
@@ -144,7 +155,9 @@ def test_harness_app_raw_activity_has_no_pagination_callpoints() -> None:
     content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
 
     assert '["limit": DeliveryCollectionRecord.rawActivityLimit]' in view_model
-    assert "static let rawActivityLimit = 5" in models
+    # v2: the workbench's activity stream shows the 30 most recent
+    # deliveries (Host accepts 1...256). Still exactly one page.
+    assert "static let rawActivityLimit = 30" in models
     for removed in (
         "nextDeliveryPage",
         "loadMoreDeliveries",
@@ -239,7 +252,7 @@ def test_app_exposes_scenario_focus_and_topology_without_vendor_logic() -> None:
     # The section must exist and be labelled; whether it renders as a GroupBox,
     # a collapsible section, or an Evidence & Diagnostics nav row is layout,
     # not contract.
-    assert 'evidenceNavRow(.topology, S.Topology.sectionTitle' in content
+    assert 'case .topology: S.Topology.sectionTitle' in content
     assert 'Button(S.Topology.focusRestore)' in content
     assert 'operation: "scenario.topology"' in view_model
     assert 'operation: "scenario.focus"' in view_model
@@ -555,14 +568,11 @@ def test_degraded_room_shows_a_visible_repair_entry() -> None:
         "repair must not be duplicated back into the Health card"
     )
     assert "Button(S.Preflight.runButton)" in card
-    # healthCard is called from workbenchBody (review 20260903-194506-9xgiml
-    # P0's two-column workbench), reached from scenarioDetail either way.
-    workbench = content.split("private func workbenchBody", 1)[1].split(
-        "private var emptyDetailCanvas", 1
-    )[0]
-    assert "healthCard(scenario)" in workbench
-    assert "Label(S.Sections.health" in card
-    assert "evidenceNavRow(.deliveries, S.Deliveries.rawActivity" in content
+    # v2: the alert row is rendered inside the mission bar (the Artifact's
+    # mission-alert position), directly under the objective.
+    assert "healthCard(scenario)" in header
+    assert "S.Sections.health" in card
+    assert "case .deliveries: S.Deliveries.rawActivity" in content
 
 
 def test_needs_attention_delivery_link_opens_the_drawer_it_expands() -> None:
@@ -587,15 +597,23 @@ def test_needs_attention_delivery_link_opens_the_drawer_it_expands() -> None:
         assert removed_state not in content
 
 
+
 def test_evidence_nav_is_a_fixed_column_not_a_scrolling_strip() -> None:
-    """codex review 20260903-185641-e6nznb P2: a horizontally-scrolling row of
-    capsule buttons can hide the high-risk tab off a narrow window with no
-    indicator. The nav must be a fixed-width column where every domain,
-    including high-risk, is always on screen."""
+    """codex review 20260903-185641-e6nznb P2: every evidence domain, high-
+    risk included, must be visible at once at any width — never a
+    horizontally-scrolling strip. v2 keeps that guarantee with a native
+    segmented `Picker` over `EvidenceTab.allCases` (icon-only, Xcode's
+    inspector bar) instead of hand-drawn nav rows."""
 
     content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
-    nav = content.split("private var evidenceNav", 1)[1].split("private func", 1)[0]
-    assert "ScrollView(.horizontal" not in nav
+    picker = content.split("private var evidenceDomainPicker", 1)[1].split(
+        "\n    // MARK:", 1
+    )[0]
+    assert "ScrollView(.horizontal" not in picker
+    assert "ForEach(EvidenceTab.allCases" in picker
+    assert ".pickerStyle(.segmented)" in picker
+    enum_body = content.split("private enum EvidenceTab", 1)[1].split("\n    }\n", 1)[0]
+    assert "CaseIterable" in content.split("private enum EvidenceTab", 1)[1][:80]
     for tab in (
         "deliveries",
         "preflight",
@@ -606,65 +624,60 @@ def test_evidence_nav_is_a_fixed_column_not_a_scrolling_strip() -> None:
         "analytics",
         "highRisk",
     ):
-        assert f"evidenceNavRow(.{tab}" in nav
+        assert f"case .{tab}:" in content.split("private enum EvidenceTab", 1)[1].split(
+            "@State private var evidenceTab", 1
+        )[0], tab
+    assert "evidenceNavRow" not in content, "hand-drawn nav rows replaced by the picker"
+
 
 
 def test_workbench_is_two_column_team_primary_with_narrow_fallback() -> None:
-    """codex review 20260903-194506-9xgiml P0: the real first viewport was
-    still the old flat vertical stack (Health tiles, Needs Attention, two
-    large charts, then Team almost below the fold) instead of the agreed
-    58%/42% Team-primary / Health+Attention-secondary two-column workbench.
-    `ViewThatFits` — not an unconstrained `GeometryReader`, which fights a
-    surrounding `ScrollView` for height — picks whichever column
-    arrangement actually fits; its second child is the narrow fallback,
-    Team still first in both."""
+    """v2 (design re-review 2026-09-04): the detail column is a native
+    `List` (team first, then the activity stream) beside a 300pt progress
+    column, chosen by the real available width — a `GeometryReader` as the
+    detail root, reading width only — not `ViewThatFits`, whose decision
+    depended on the children's ideal widths (≈771pt with the old evidence
+    pane, so the 1100pt default window never got two columns). Below the
+    width the progress groups fold into the List's last section, Team still
+    first."""
     content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
-    workbench = content.split("private func workbenchBody", 1)[1].split(
-        "private var emptyDetailCanvas", 1
+    detail = content.split("private var scenarioDetail", 1)[1].split(
+        "@ToolbarContentBuilder", 1
     )[0]
-    assert "ViewThatFits(in: .horizontal)" in workbench
-    assert "GeometryReader" not in workbench
-    # Two occurrences of each: once in the two-column arrangement, once in
-    # the narrow stacked fallback — both must lead with Team. The secondary
-    # column merged into one `progressPanel` (review 20260903-201119-r9tf2j:
-    # a lifecycle timeline leading a compact grid, with the attention list
-    # folded into the same card, not three unrelated blocks) — see
-    # test_progress_panel_merges_timeline_metrics_and_attention.
-    assert workbench.count("healthCard(scenario)") == 2
-    assert workbench.count("participantsSection") == 2
-    assert workbench.count("progressPanel(scenario)") == 2
-    # Team textually precedes the progress panel both times — once in the
-    # two-column arrangement (so it is the left/primary column) and once
-    # more in the narrow stacked fallback (so it stays first there too).
-    team_positions = [i for i in range(len(workbench)) if workbench.startswith("participantsSection", i)]
-    panel_positions = [i for i in range(len(workbench)) if workbench.startswith("progressPanel(scenario)", i)]
-    assert len(team_positions) == len(panel_positions) == 2
-    assert team_positions[0] < panel_positions[0]
-    assert team_positions[1] < panel_positions[1]
+    assert "GeometryReader { geo in" in detail
+    assert "geo.size.width >= Self.twoColumnMinimumWidth" in detail
+    assert "geo.size.height" not in detail, "width only — never a height estimate"
+    assert "roomList(scenario, wide: wide)" in detail
+    assert "progressColumn(scenario)" in detail
+    assert "ViewThatFits(" not in content
+    room_list = content.split("private func roomList", 1)[1].split(
+        "\n    /// ", 1
+    )[0]
+    assert "List {" in room_list
+    assert ".listStyle(.inset)" in room_list
+    assert "ScrollView" not in room_list, "a List is the scrolling container, never nested in a ScrollView"
+    assert room_list.index("teamSection") < room_list.index("activitySection")
+    narrow = room_list.split("if !wide {", 1)[1]
+    for group in ("stageTimeline(scenario)", "collaborationHealthSection(", "needsAttentionSection"):
+        assert group in narrow, group
+
 
 
 def test_progress_panel_merges_timeline_metrics_and_attention() -> None:
-    """codex review 20260903-201119-r9tf2j: the Artifact's secondary column
-    is one card — a lifecycle timeline, then the metrics grid, then the
-    attention list — not `collaborationHealthSection` and
-    `needsAttentionSection` standing as separate top-level blocks the way
-    they did before this review. Both keep their own names/content
-    (still independently useful, still what the app-contract tests below
-    pin), just called from inside `progressPanel` now."""
+    """codex review 20260903-201119-r9tf2j: the secondary column is one
+    unit — lifecycle stage, then the four facts, then the attention list.
+    v2 renders it as `progressColumn` at its natural height (no card fill,
+    no `maxHeight: .infinity` stretch), still one column with all three."""
     content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
-    panel = content.split("private func progressPanel", 1)[1].split(
-        "private enum WorkbenchStage", 1
+    column = content.split("private func progressColumn", 1)[1].split(
+        "\n    /// review", 1
     )[0]
-    assert "stageTimeline(scenario)" in panel
-    assert "collaborationHealthSection" in panel
-    assert "needsAttentionSection" in panel
-    # One shared surface for the whole merged card.
-    assert ".background(.secondary.opacity(0.04)" in panel
-    stage = content.split("private func stageTimeline", 1)[1].split(
-        "private func stageRow", 1
-    )[0]
-    for label in ("S.Stage.setup", "S.Stage.staffing", "S.Stage.running", "S.Stage.closed"):
-        assert label in stage
+    assert "stageTimeline(scenario)" in column
+    assert "collaborationHealthSection(" in column
+    assert "needsAttentionSection" in column
+    assert ".frame(width: 300)" in column
+    assert "maxHeight: .infinity" not in column
+    assert ".background(" not in column, "hairlines between groups, no card fill"
 
 
 def test_current_stage_checks_workspace_and_staffing_evidence_before_closed() -> None:
@@ -707,51 +720,83 @@ def test_project_row_has_no_nested_interactive_control() -> None:
     assert "S.Projects.applyDetectedUpdate" in menu
 
 
+
 def test_evidence_uses_primary_column_slack_with_a_pinned_bottom_disclosure() -> None:
-    """codex review 20260903-203219-kq79nn P1 visual: Evidence & Diagnostics
-    must be the Artifact's bottom bar — a `.safeAreaInset(edge: .bottom)`
-    sibling on the same ScrollView the mission bar already pins to `.top`.
-    Follow-up from the real m2 screenshot: only the disclosure stays pinned;
-    expanded evidence uses the sparse primary column below Team instead of a
-    full-width lower band that preserves a large empty rectangle above it."""
+    """v2 (design re-review 2026-09-04): Evidence & Diagnostics is a native
+    macOS 14 `.inspector` toggled from the toolbar — it no longer competes
+    with the workbench for height. The bottom drawer, the in-column pane,
+    the `GeometryReader`-minus-190 estimate and the nested ScrollView it
+    needed are gone. The open state is a persisted preference whose first
+    default is closed: the delivery stream the user asked to see without
+    clicking is the workbench's own activity section now, so review
+    20260903-181141-6gjonu point 7 (never auto-open on a fault) holds
+    again."""
     content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
-    assert "@State private var showTechnical = true" in content
+    assert '@AppStorage("AICollabEvidenceInspectorShown") private var showTechnical = false' in content
+    assert "@State private var showTechnical" not in content
     detail = content.split("private var scenarioDetail", 1)[1].split(
-        "private func workbenchBody", 1
+        "@ToolbarContentBuilder", 1
     )[0]
-    assert ".safeAreaInset(edge: .bottom" in detail
-    assert "evidenceBar(scenario)" in detail
-    assert "technicalSection" not in content, "renamed to evidenceBar, not left as a dead alias"
-    workbench = content.split("private func workbenchBody", 1)[1].split(
-        "private var emptyDetailCanvas", 1
+    assert ".inspector(isPresented: $showTechnical)" in detail
+    assert "evidenceInspector(scenario)" in detail
+    assert ".inspectorColumnWidth(min: 300, ideal: 360, max: 560)" in detail
+    # (the project rail's own bottom inset — "register project" — is a
+    # different, unrelated inset; only the detail column is asserted here)
+    assert ".safeAreaInset(edge: .bottom" not in detail
+    for gone in (
+        "evidenceBar(",
+        "evidencePane(",
+        "geo.size.height - 190",
+        "technicalSection",
+    ):
+        assert gone not in content, gone
+    inspector = content.split("private func evidenceInspector", 1)[1].split(
+        "private var evidenceDomainPicker", 1
     )[0]
-    assert workbench.count("if showTechnical") == 2
-    assert workbench.count("evidencePane(scenario)") == 2
-    pane = content.split("private func evidencePane", 1)[1].split(
-        "\n    private func evidenceBar", 1
+    assert "evidenceDomainPicker" in inspector
+    for case in (
+        "case .deliveries: deliveriesSection",
+        "case .preflight: preflightSection",
+        "case .topology: topologySection",
+        "case .policy: policySection",
+        "case .resources: resourcesSection",
+        "case .inspector: inspectorSection",
+        "case .analytics: deliveryDistributionSection",
+        "case .highRisk: highRiskSection(scenario)",
+    ):
+        assert case in inspector, case
+    toolbar = content.split("private func detailToolbar", 1)[1].split(
+        "private func roomList", 1
     )[0]
-    assert "ScrollView {" in pane
-    assert ".frame(minHeight: 280, maxHeight: .infinity" in pane
-    bar = content.split("private func evidenceBar", 1)[1].split(
-        "\n    private var evidenceNav", 1
-    )[0]
-    assert "showTechnical.toggle()" in bar
-    assert "ScrollView {" not in bar
-    assert "case .deliveries" not in bar
+    assert "showTechnical.toggle()" in toolbar
+    assert 'systemImage: "sidebar.trailing"' in toolbar
+
 
 
 def test_progress_metrics_are_exactly_four_not_five() -> None:
-    """codex review 20260903-203219-kq79nn P1 visual: the Artifact's progress
-    card has exactly four tiles (team ready, requests closed, first-attempt
-    delivery, degraded) in a true 2×2 — five tiles in a fixed two-column
-    grid wraps into an orphan fifth. End-to-end evidence relocated to the
-    Analytics tab rather than dropped."""
+    """codex review 20260903-203219-kq79nn P1 visual: exactly four
+    collaboration-health metrics (team ready, requests closed, first-attempt
+    delivery, degraded); end-to-end evidence lives in Analytics. v2 renders
+    them as label/value rows, not 2×2 big-number tiles, and neutralises the
+    ratio rows in an inactive (closed) room so an expected "0/2 team ready"
+    is never painted as needing attention."""
     content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
-    grid = content.split("private var collaborationHealthSection", 1)[1].split(
-        "\n    private func healthColor", 1
+    rows = content.split("private func collaborationHealthSection(neutral: Bool)", 1)[1].split(
+        "\n    private func healthClass", 1
     )[0]
-    assert grid.count("CollaborationHealthMetricTile(") == 4
-    assert "S.CollaborationHealth.endToEndEvidence" not in grid
+    assert rows.count("CollaborationHealthMetricRow(") == 4
+    assert "S.CollaborationHealth.endToEndEvidence" not in rows
+    assert "CollaborationHealthMetricTile" not in content
+    row_struct = content.split("private struct CollaborationHealthMetricRow", 1)[1].split(
+        "private struct StateBadge", 1
+    )[0]
+    assert "textCase(.uppercase)" not in row_struct
+    assert ".monospacedDigit()" in row_struct
+    classifier = content.split("private func healthClass", 1)[1].split("\n    }\n", 1)[0]
+    assert "case .incomplete: neutral ? nil : .attention" in classifier
+    assert content.count(
+        "collaborationHealthSection(neutral: scenario.presentationClass == .inactive)"
+    ) == 2, "both the wide column and the narrow fallback must neutralise closed rooms"
     distribution = content.split("private var deliveryDistributionSection", 1)[1].split(
         "\n    private var inspectorSection", 1
     )[0]
@@ -772,11 +817,14 @@ def test_mission_bar_is_sticky_outside_the_scroll_view() -> None:
     address the actual cause."""
     content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
     detail = content.split("private var scenarioDetail", 1)[1].split(
-        "private func workbenchBody", 1
+        "@ToolbarContentBuilder", 1
     )[0]
     assert ".safeAreaInset(edge: .top" in detail
     assert "missionBar(scenario)" in detail
     assert ".layoutPriority(1)" not in detail
+    # v2: the inset hangs on the List (the scrolling view), which is what
+    # participates in the unified title bar's inset accounting.
+    assert "roomList(scenario, wide: wide)\n                            .safeAreaInset(edge: .top" in detail
     bar = content.split("private func missionBar", 1)[1].split("private func", 1)[0]
     assert "RoundedRectangle" not in bar
     assert ".background(.bar)" in bar
@@ -833,8 +881,8 @@ def test_delivery_distribution_charts_moved_into_the_evidence_drawer() -> None:
     ahead of the team roster. They belong in Evidence & Diagnostics as their
     own tab, not the primary workbench."""
     content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
-    workbench = content.split("private func workbenchBody", 1)[1].split(
-        "private var emptyDetailCanvas", 1
+    workbench = content.split("private func roomList", 1)[1].split(
+        "\n    /// review", 1
     )[0]
     assert "deliveryDistributionSection" not in workbench
     assert "case .analytics: deliveryDistributionSection" in content
@@ -1058,3 +1106,138 @@ def test_objective_workbench_and_issuance_status_use_authoritative_revisions() -
     assert 'value["issued_objective_revision"] as? Int ?? 0' in models
     assert 't("Issued", "已下发")' in strings
     assert 't("Pending issuance", "待下发")' in strings
+
+
+def test_activity_stream_is_a_workbench_section_not_an_evidence_tab() -> None:
+    """v2 (design re-review 2026-09-04, from the user's own m2 screenshot of a
+    room with 78 deliveries): the delivery stream is the room's main content
+    and renders as the workbench List's second section, newest first — not
+    only as the first tab of the diagnostics. Still delivery metadata only:
+    the Host's message_kind token as a noun, sender, receiver, state."""
+    content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
+    strings = (APP_ROOT / "Strings.swift").read_text(encoding="utf-8")
+    room_list = content.split("private func roomList", 1)[1].split(
+        "private func progressColumn", 1
+    )[0]
+    assert "activitySection" in room_list
+    section = content.split("private var activitySection", 1)[1].split(
+        "private func activityRow", 1
+    )[0]
+    assert "$0.enqueueSequence > $1.enqueueSequence" in section, "newest first"
+    assert "model.deliveryMessage" in section, "the showing-N-of-M footnote is rendered"
+    assert "S.Deliveries.activityEmptyBody" in section
+    row = content.split("private func activityRow", 1)[1].split("\n    /// ", 1)[0]
+    assert "S.Deliveries.kindNoun(delivery.messageKind)" in row
+    assert "delivery.presentationClass" in row
+    assert "S.Delivery.stateLabel(delivery.state)" in row
+    for forbidden in ("payload", "content", "message_body"):
+        assert forbidden not in row.lower()
+    for kind in (
+        '"collaboration.review-request"',
+        '"collaboration.question"',
+        '"collaboration.pushback"',
+        '"collaboration.done"',
+    ):
+        assert kind in strings.split("static func kindNoun", 1)[1].split("\n        }\n", 1)[0], kind
+    # The raw ledger keeps its place in the inspector.
+    assert "case .deliveries: deliveriesSection" in content
+
+
+def test_stopped_colleague_issuance_reads_neutral_not_attention() -> None:
+    """From the user's closed-room screenshot: every stopped colleague wore
+    an orange "pending issuance" although a stopped colleague cannot hold a
+    new revision until its next start. Only a running colleague on an old
+    revision is attention-coloured."""
+    content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
+    strings = (APP_ROOT / "Strings.swift").read_text(encoding="utf-8")
+    meta = content.split("private func participantMetaLine", 1)[1].split(
+        "\n    /// ", 1
+    )[0]
+    assert "participant.presentationClass == .inactive" in meta
+    assert "S.Objective.pendingIssuanceInactive" in meta
+    assert "issued || inactive ? Color.secondary : Color.orange" in meta
+    assert 't("Issued at next start", "下次启动时下发")' in strings
+
+
+def test_room_actions_live_in_the_toolbar_not_the_mission_bar() -> None:
+    """v2: refresh / close / the delete menu / the inspector toggle are
+    window-toolbar items over the detail column; the mission bar keeps only
+    the contextual pair — the guide's single next step and the Host-gated
+    Repair — so its height no longer depends on which buttons happen to
+    apply."""
+    content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
+    toolbar = content.split("private func detailToolbar", 1)[1].split(
+        "private func roomList", 1
+    )[0]
+    assert "ToolbarItemGroup" in toolbar
+    assert "S.Detail.refresh" in toolbar
+    assert "S.Detail.close" in toolbar
+    assert "S.Rooms.deleteMenu" in toolbar
+    assert "DestroyPanelTarget(" in toolbar
+    assert '["opening", "running", "degraded"].contains(scenario.observedState)' in toolbar
+    header = content.split("private func missionBar", 1)[1].split(
+        "private func objectiveInline", 1
+    )[0]
+    for moved in ("S.Detail.refresh", "S.Detail.close", "S.Rooms.deleteMenu", "ellipsis.circle"):
+        assert moved not in header, moved
+    assert "liveGuideAction()" in header
+    # Prominent only while the step advances the room; the steady state's
+    # focus action is a plain button.
+    assert "model.guidance == .focusAndAssign" in header
+    assert header.count(".buttonStyle(.borderedProminent)") == 1
+
+
+def test_evidence_badges_use_entity_aware_presentation_classes() -> None:
+    """The approved entity-aware table (claude reply 20260903-182112-nymtlc)
+    was only wired to Scenario/Participant in Phase 1; the delivery,
+    preflight, permission, topology, policy and lease badges kept the old
+    global colour switch. v2 finishes it: `StateBadge` survives only inside
+    the Diagnostics settings view."""
+    content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
+    presentation = (APP_ROOT / "PresentationState.swift").read_text(encoding="utf-8")
+    main_view = content.split("struct DiagnosticsView", 1)[0]
+    assert "StateBadge(" not in main_view
+    for call in (
+        "cls: .preflight(preflight.status)",
+        "cls: .preflight(check.status)",
+        "cls: .permission(permission.status)",
+        "cls: .topologyHealth(item.health)",
+        "cls: .policy(requiresReplan: status.requiresReplan)",
+        "cls: .policyPlan(canApply: plan.canApply)",
+        "cls: delivery.presentationClass",
+        "cls: .resourceLease(resource.status)",
+    ):
+        assert call in main_view, call
+    assert "extension DeliveryRecord" in presentation
+    assert 'case "not_determined": .waiting' in presentation
+
+
+def test_window_opens_at_the_two_column_workbench_size() -> None:
+    """The 1100×720 floor stayed the first-launch size, which never reached
+    the two-column width. v2 sets a first-launch default; the floor is
+    unchanged."""
+    app = (APP_ROOT / "AICollabApp.swift").read_text(encoding="utf-8")
+    content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
+    assert ".defaultSize(width: 1440, height: 900)" in app
+    assert ".frame(minWidth: 1100, minHeight: 720)" in content
+
+
+def test_live_loop_observes_participants_read_only() -> None:
+    """v2: colleague state used to refresh only on select / manual refresh /
+    after a mutation, so a dead TUI stayed "ready" on screen. The live loop
+    now reads `scenario.status` + `participant.list` each tick — reads only,
+    equality-gated so an unchanged roster does not re-render, and the
+    objective draft is never touched from the loop."""
+    view_model = (APP_ROOT / "HarnessViewModel.swift").read_text(encoding="utf-8")
+    observe = view_model.split("private func observeRoom", 1)[1].split(
+        "\n    func retryDelivery", 1
+    )[0]
+    assert 'operation: "scenario.status"' in observe
+    assert "reloadParticipants(project: project, scenario: scenario)" in observe
+    assert "scenarios[index] != current" in observe
+    for forbidden in ("performMutation", "syncObjectiveDraft", "reloadPreflight", "reloadTopology"):
+        assert forbidden not in observe, forbidden
+    reload = view_model.split("private func reloadParticipants", 1)[1].split(
+        "\n    func applyProgress", 1
+    )[0]
+    assert "if participants != parsed {" in reload

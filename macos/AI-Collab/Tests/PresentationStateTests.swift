@@ -181,4 +181,116 @@ final class PresentationStateTests: XCTestCase {
             XCTAssertNotEqual(participant(state).presentationClass, .success, state)
         }
     }
+
+    // MARK: - Delivery / Preflight / Permission / Topology / Lease / Policy
+    // (v2 finishes the approved entity-aware table, claude reply
+    // 20260903-182112-nymtlc: the evidence badges used the old global
+    // colour switch until now.)
+
+    private func delivery(_ state: String, degradedReason: String? = nil) -> DeliveryRecord {
+        var value: [String: Any] = [
+            "delivery_id": "delivery-1",
+            "enqueue_sequence": 7,
+            "message_kind": "collaboration.review-request",
+            "sender": ["participant_id": "analyst", "participant_generation": 1],
+            "receiver": ["participant_id": "reviewer", "participant_generation": 1],
+            "thread_root_delivery_id": "delivery-1",
+            "state": state,
+            "event_sequence": 3,
+            "last_event": ["event": "consumed", "attempt_number": 1],
+            "retry_eligibility": ["eligible": false, "reason": "n/a"],
+        ]
+        if let degradedReason { value["degraded_reason"] = degradedReason }
+        return DeliveryRecord(value)!
+    }
+
+    /// The App's own `S.Delivery.stateLabel` switch and the Host's
+    /// delivery.state enum: queued, delivery_attempted, delivered, consumed,
+    /// recipient_deleted (contracts/collaboration_policy_delivery_v1).
+    private static let deliveryStates = [
+        "queued", "delivery_attempted", "delivered", "consumed", "recipient_deleted",
+    ]
+
+    private static let expectedDeliveryClass: [String: PresentationClass] = [
+        "queued": .working,
+        "delivery_attempted": .working,
+        "delivered": .success,
+        "consumed": .success,
+        "recipient_deleted": .attention,
+    ]
+
+    func testEveryDeliveryStateMapsToItsExpectedClass() {
+        XCTAssertEqual(Set(Self.expectedDeliveryClass.keys), Set(Self.deliveryStates))
+        for state in Self.deliveryStates {
+            XCTAssertEqual(delivery(state).presentationClass, Self.expectedDeliveryClass[state], state)
+        }
+    }
+
+    /// A delivered-then-degraded record is not a success story: the
+    /// degraded reason wins over the state token.
+    func testDegradedDeliveryIsAttentionEvenWhenDelivered() {
+        XCTAssertEqual(delivery("delivered", degradedReason: "route_refused").presentationClass, .attention)
+        XCTAssertEqual(delivery("consumed", degradedReason: "route_refused").presentationClass, .attention)
+    }
+
+    func testUnrecognizedDeliveryStateFailsClosedToAttention() {
+        XCTAssertEqual(delivery("some-future-state").presentationClass, .attention)
+    }
+
+    /// `PreflightCheckRecord.status` / `ScenarioPreflightRecord.status`:
+    /// ready | blocked | not_required (HarnessModels.swift guards).
+    func testPreflightStatusesMapAcrossAllThreeClasses() {
+        XCTAssertEqual(PresentationClass.preflight("ready"), .success)
+        XCTAssertEqual(PresentationClass.preflight("blocked"), .attention)
+        XCTAssertEqual(PresentationClass.preflight("not_required"), .inactive)
+        XCTAssertEqual(PresentationClass.preflight("weird"), .attention)
+    }
+
+    /// `PermissionObservationRecord.status`: granted | denied |
+    /// not_determined | restricted | unavailable | unknown — all six, and
+    /// `not_determined` is the product's only `waiting`.
+    func testPermissionStatusesCoverAllSixContractValues() {
+        let expected: [String: PresentationClass] = [
+            "granted": .success,
+            "not_determined": .waiting,
+            "denied": .failed,
+            "restricted": .failed,
+            "unavailable": .attention,
+            "unknown": .attention,
+        ]
+        for (status, cls) in expected {
+            XCTAssertEqual(PresentationClass.permission(status), cls, status)
+        }
+        XCTAssertEqual(
+            expected.values.filter { $0 == .waiting }.count, 1,
+            "not_determined is the single waiting state in the whole product"
+        )
+    }
+
+    /// `PresentationTopologyRecord.health`: ready | degraded | not_running |
+    /// not_required. A ready window is an operating state — working, never
+    /// success — exactly like a ready Participant.
+    func testTopologyHealthReadyIsWorkingNotSuccess() {
+        XCTAssertEqual(PresentationClass.topologyHealth("ready"), .working)
+        XCTAssertEqual(PresentationClass.topologyHealth("degraded"), .attention)
+        XCTAssertEqual(PresentationClass.topologyHealth("not_running"), .inactive)
+        XCTAssertEqual(PresentationClass.topologyHealth("not_required"), .inactive)
+        XCTAssertEqual(PresentationClass.topologyHealth("weird"), .attention)
+    }
+
+    /// `ResourceLeaseRecord.status`: active | stale | released — released is
+    /// over, not a success (same reading as a closed Scenario).
+    func testResourceLeaseReleasedIsInactiveNotSuccess() {
+        XCTAssertEqual(PresentationClass.resourceLease("active"), .working)
+        XCTAssertEqual(PresentationClass.resourceLease("stale"), .attention)
+        XCTAssertEqual(PresentationClass.resourceLease("released"), .inactive)
+        XCTAssertEqual(PresentationClass.resourceLease("weird"), .attention)
+    }
+
+    func testPolicyStatusAndPlanClasses() {
+        XCTAssertEqual(PresentationClass.policy(requiresReplan: false), .success)
+        XCTAssertEqual(PresentationClass.policy(requiresReplan: true), .attention)
+        XCTAssertEqual(PresentationClass.policyPlan(canApply: true), .success)
+        XCTAssertEqual(PresentationClass.policyPlan(canApply: false), .attention)
+    }
 }

@@ -1555,7 +1555,14 @@ final class HarnessViewModel: ObservableObject {
         }
     }
 
-    func monitorDeliveries(for scenarioID: String) async {
+    /// The room's live loop: deliveries every 2 seconds as before, plus a
+    /// read-only look at the room record and its participants on the same
+    /// tick. Colleague state used to refresh only on select / manual refresh
+    /// / after a mutation, so a TUI that died stayed "ready" on screen until
+    /// the user thought to click Refresh. Reads only — never a mutation, and
+    /// skipped entirely while one is in flight so it cannot race the
+    /// post-mutation refresh.
+    func monitorRoom(for scenarioID: String) async {
         while !Task.isCancelled {
             guard
                 selectedScenarioID == scenarioID,
@@ -1581,12 +1588,44 @@ final class HarnessViewModel: ObservableObject {
                 guard selectedScenarioID == scenarioID else { return }
                 presentDeliveryFailure(error, live: true)
             }
+            if !isBusy {
+                do {
+                    try await observeRoom(project: project, scenarioID: scenarioID)
+                } catch is CancellationError {
+                    return
+                } catch {
+                    // Keep the last known participants/room record; the
+                    // delivery read above already reports live failures.
+                }
+            }
             do {
                 try await Task.sleep(nanoseconds: 2_000_000_000)
             } catch {
                 return
             }
         }
+    }
+
+    /// One read of `scenario.status` + `participant.list`, written back only
+    /// when something actually changed so the 2-second tick does not re-render
+    /// an unchanged roster or disturb objective editing (`syncObjectiveDraft`
+    /// is deliberately not called here — that stays with the explicit
+    /// refresh path).
+    private func observeRoom(project: ProjectRecord, scenarioID: String) async throws {
+        let target = scenarioTarget(projectID: project.id, scenarioID: scenarioID)
+        let status = try await client.call(
+            HarnessCall(operation: "scenario.status", target: target)
+        )
+        guard selectedScenarioID == scenarioID else { return }
+        if let raw = status["scenario"] as? [String: Any],
+           let current = ScenarioRecord(raw),
+           let index = scenarios.firstIndex(where: { $0.id == current.id }),
+           scenarios[index] != current
+        {
+            scenarios[index] = current
+        }
+        guard let scenario = selectedScenario else { return }
+        try await reloadParticipants(project: project, scenario: scenario)
     }
 
     func retryDelivery(_ delivery: DeliveryRecord) async {
@@ -2022,7 +2061,10 @@ final class HarnessViewModel: ObservableObject {
         guard parsed.count == rawParticipants.count else {
             throw HarnessIPCError.invalidReply
         }
-        participants = parsed
+        // Equality-gated: the live loop calls this every 2 seconds.
+        if participants != parsed {
+            participants = parsed
+        }
     }
 
     func applyProgress(

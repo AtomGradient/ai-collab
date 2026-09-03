@@ -853,54 +853,62 @@ struct ContentView: View {
 
     // MARK: - Detail: Scenario
 
-    /// review 20260903-194506-9xgiml P0/P1: MissionBar sits outside the
-    /// `ScrollView` so it stays put while everything below scrolls — it was
-    /// still the ScrollView's first child before, so it scrolled away with
-    /// the rest. `workbenchBody` is the actual two-column IA: Team is the
-    /// primary column, Health/Needs Attention the compact secondary one,
-    /// falling back to a single stacked column (Team still first) below the
-    /// width a real two-column layout can hold. Deliveries/Preflight/
-    /// Topology/Policy/Resources/Inspector/Distribution/high-risk stay in
-    /// the collapsed Evidence & Diagnostics drawer, unchanged.
+    /// v2 workbench (design re-review 2026-09-04, Artifact 53fd6463 v2).
+    /// The detail column is: a pinned mission bar over a native `List`
+    /// (AI colleagues → collaboration activity), a fixed 300pt progress
+    /// column beside it when the width allows, and Evidence & Diagnostics
+    /// in a native `.inspector` toggled from the toolbar.
+    ///
+    /// Why a `List` and not a `ScrollView` of cards: a List is NSTableView-
+    /// backed and fills whatever height it is given, so two colleagues and
+    /// a handful of deliveries leave list background below them — what
+    /// Mail shows with two messages — instead of the blank rectangle the
+    /// user photographed on m2. That removes the `GeometryReader`-minus-190
+    /// estimate, the `maxHeight: .infinity` stretch chain, and the
+    /// ScrollView-inside-ScrollView the old evidence pane needed (an inner
+    /// ScrollView inside an outer one does not scroll on its own; it grows
+    /// to its content).
+    ///
+    /// The `GeometryReader` reads width only, to choose the two-column or
+    /// stacked arrangement from the real available width — not
+    /// `ViewThatFits`, whose choice depends on the children's ideal widths
+    /// (measured ≈771pt with the old evidence pane open, so the 1100pt
+    /// default window never got two columns). As the detail root it is
+    /// meant to take all the space it is offered; it is not inside a
+    /// ScrollView, so the height-fighting concern that ruled it out before
+    /// does not apply. The mission bar stays a `.safeAreaInset(edge: .top)`
+    /// on the List — the scrolling view is what participates correctly in
+    /// the unified title bar's inset accounting (review 20260903-201119-
+    /// r9tf2j); the progress column is its own ScrollView for the same
+    /// reason.
+    private static let twoColumnMinimumWidth: CGFloat = 760
+
     private var scenarioDetail: some View {
         Group {
             if let scenario = model.selectedScenario {
-                // `.safeAreaInset(edge: .top)`, not a plain VStack sibling
-                // above the ScrollView (review 20260903-201119-r9tf2j): a
-                // bare sibling does not participate in the same toolbar
-                // safe-area accounting a ScrollView gets automatically as
-                // NavigationSplitView detail content, so the mission bar and
-                // the ScrollView's own first content both rendered up under
-                // the unified title bar. `safeAreaInset` is the documented
-                // pattern for a pinned header that stays correctly below the
-                // title bar while the content beneath it scrolls.
-                //
-                // The outer `GeometryReader` gives the overview a stable
-                // minimum height. In expanded diagnostics mode the evidence
-                // pane lives inside the primary column and absorbs that
-                // height; it is not a second full-width drawer below a short
-                // team card, which left most of the primary column blank.
                 GeometryReader { geo in
-                    ScrollView {
-                        workbenchBody(scenario)
-                            .frame(
-                                minHeight: max(geo.size.height - 190, 0),
-                                alignment: .top
-                            )
-                            .padding(20)
-                    }
-                    .safeAreaInset(edge: .top, spacing: 0) {
-                        VStack(spacing: 0) {
-                            missionBar(scenario)
+                    let wide = geo.size.width >= Self.twoColumnMinimumWidth
+                    HStack(spacing: 0) {
+                        roomList(scenario, wide: wide)
+                            .safeAreaInset(edge: .top, spacing: 0) {
+                                VStack(spacing: 0) {
+                                    missionBar(scenario)
+                                    Divider()
+                                }
+                            }
+                        if wide {
                             Divider()
+                            progressColumn(scenario)
                         }
                     }
-                    .safeAreaInset(edge: .bottom, spacing: 0) {
-                        evidenceBar(scenario)
-                    }
+                }
+                .toolbar { detailToolbar(scenario) }
+                .inspector(isPresented: $showTechnical) {
+                    evidenceInspector(scenario)
+                        .inspectorColumnWidth(min: 300, ideal: 360, max: 560)
                 }
                 .task(id: scenario.id) {
-                    await model.monitorDeliveries(for: scenario.id)
+                    await model.monitorRoom(for: scenario.id)
                 }
             } else {
                 emptyDetailCanvas
@@ -908,44 +916,93 @@ struct ContentView: View {
         }
     }
 
-    /// `ViewThatFits` rather than a `GeometryReader` breakpoint: it sizes to
-    /// whichever child actually fits, so it never fights the surrounding
-    /// `ScrollView` for height the way an unconstrained `GeometryReader`
-    /// would. The left column's `minWidth` is what decides the breakpoint —
-    /// below it, the two-column arrangement no longer fits and this falls
-    /// straight to the stacked one, Team still first.
-    @ViewBuilder
-    private func workbenchBody(_ scenario: ScenarioRecord) -> some View {
-        // The bottom inset remains the stable disclosure control. Expanded
-        // evidence belongs in the primary column, where a sparse team leaves
-        // usable space while the progress panel remains visible alongside it.
-        ViewThatFits(in: .horizontal) {
-            // The secondary panel can fill the row. In expanded mode the
-            // evidence pane does the same in the primary column, directly
-            // below the naturally sized team roster.
-            HStack(alignment: .top, spacing: 20) {
-                VStack(alignment: .leading, spacing: 16) {
-                    healthCard(scenario)
-                    participantsSection
-                    if showTechnical {
-                        evidencePane(scenario)
-                    }
-                }
-                .frame(minWidth: 340, maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                progressPanel(scenario)
-                    .frame(width: 280)
-                    .frame(maxHeight: .infinity, alignment: .top)
+    /// Room-level standing commands live in the window toolbar (macOS 13+
+    /// toolbars track columns, so these land over the detail column):
+    /// refresh, close, the "…" menu with the one delete entry point, and
+    /// the inspector toggle (Xcode's `sidebar.trailing`). The mission bar
+    /// keeps only the contextual actions — the guide's one next step and
+    /// the Host-gated Repair.
+    @ToolbarContentBuilder
+    private func detailToolbar(_ scenario: ScenarioRecord) -> some ToolbarContent {
+        ToolbarItemGroup {
+            Button(S.Detail.refresh, systemImage: "arrow.clockwise") {
+                Task { await model.refreshSelectedScenario() }
             }
-            .frame(maxHeight: .infinity, alignment: .top)
-            VStack(alignment: .leading, spacing: 16) {
-                healthCard(scenario)
-                participantsSection
-                progressPanel(scenario)
-                if showTechnical {
-                    evidencePane(scenario)
+            .help(S.Detail.refresh)
+            // close accepts only opening/running/degraded; disabled rather
+            // than hidden so the toolbar does not reflow with room state.
+            Button(S.Detail.close, systemImage: "pause.circle") {
+                Task { await model.closeScenario() }
+            }
+            .help(S.Detail.close)
+            .disabled(
+                model.isBusy
+                    || model.lifecycleActionsPreempted
+                    || !["opening", "running", "degraded"].contains(scenario.observedState)
+            )
+            // The one UI entry point for the delete flow, alongside the
+            // room board's own row menu — both open the same `DestroyPanel`.
+            // Force Delete is never offered here directly (review
+            // 20260903-185641-e6nznb).
+            Menu {
+                Button(S.Rooms.deleteMenu) {
+                    guard let projectID = model.selectedProjectID else { return }
+                    destroyPanelTarget = DestroyPanelTarget(
+                        projectID: projectID,
+                        scenario: scenario
+                    )
+                }
+            } label: {
+                Label(S.Detail.more, systemImage: "ellipsis.circle")
+            }
+            .help(S.Detail.more)
+            Button(S.Sections.evidenceAndDiagnostics, systemImage: "sidebar.trailing") {
+                showTechnical.toggle()
+            }
+            .help(S.Sections.inspectorToggleHelp)
+        }
+    }
+
+    /// The workbench List. Team first, then the activity stream; below the
+    /// two-column width the progress groups become the List's last section
+    /// so nothing is lost on a narrow window (the inspector open on the
+    /// 1100pt minimum leaves ≈350pt for this column).
+    private func roomList(_ scenario: ScenarioRecord, wide: Bool) -> some View {
+        List {
+            teamSection
+            activitySection
+            if !wide {
+                Section {
+                    stageTimeline(scenario)
+                    collaborationHealthSection(neutral: scenario.presentationClass == .inactive)
+                    needsAttentionSection
+                } header: {
+                    Label(S.Sections.progress, systemImage: "checklist")
                 }
             }
         }
+        .listStyle(.inset)
+    }
+
+    /// The Artifact's secondary column at its natural height — hairlines
+    /// between the three groups, no card fill, no stretching to the column
+    /// height. Its own ScrollView so a long attention list scrolls and so
+    /// its content takes the title-bar inset the way the List does.
+    private func progressColumn(_ scenario: ScenarioRecord) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                Label(S.Sections.progress, systemImage: "checklist")
+                    .font(.headline)
+                stageTimeline(scenario)
+                Divider()
+                collaborationHealthSection(neutral: scenario.presentationClass == .inactive)
+                Divider()
+                needsAttentionSection
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(width: 300)
     }
 
     /// review 20260903-194506-9xgiml P1: a project with no Task Rooms yet
@@ -1187,27 +1244,33 @@ struct ContentView: View {
                     label: HarnessViewModel.humanState(scenario.observedState)
                 )
                 Spacer()
-                // The one real lifecycle action, inline with the other
-                // controls — never a duplicate of what Repair already
-                // covers: `model.guidance` offers no action at all for
-                // .attend/.working/.inconsistent's blocked shape, and this
-                // must not pretend otherwise by falling back to something
-                // else.
+                // The one contextual action — `model.guidance`'s single next
+                // step, never a duplicate of what Repair covers, and nothing
+                // at all for .attend/.working (the Host offers no lifecycle
+                // action there). Prominent only while it actually advances
+                // the room (prepare / add / apply rules / start / resume);
+                // the steady state's "focus all windows" is a plain button
+                // so the prominent slot is not occupied for the whole life
+                // of a healthy room. Refresh / Close / More moved to the
+                // toolbar (`detailToolbar`).
                 if let action = liveGuideAction() {
-                    Button(action.label, action: action.perform)
-                        .buttonStyle(.borderedProminent)
+                    if model.guidance == .focusAndAssign {
+                        Button(
+                            action.label, systemImage: "macwindow.and.cursorarrow",
+                            action: action.perform
+                        )
                         .controlSize(.small)
                         .disabled(model.isBusy)
+                    } else {
+                        Button(action.label, action: action.perform)
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+                            .disabled(model.isBusy)
+                    }
                 }
-                Button(S.Detail.refresh, systemImage: "arrow.clockwise") {
-                    Task { await model.refreshSelectedScenario() }
-                }
-                .labelStyle(.iconOnly)
                 // Repair is gated on the exact Host precondition
                 // (`scenario.repair` accepts only provision_failed or
-                // degraded) — the one canonical place this control appears
-                // (removed from `healthCard` and `highRiskSection`, both
-                // redundant with this one).
+                // degraded) — the one canonical place this control appears.
                 if ["provision_failed", "degraded"].contains(scenario.observedState) {
                     Button(S.Risk.repairScenario) {
                         highRiskIntent = .repairScenario
@@ -1215,42 +1278,9 @@ struct ContentView: View {
                     .controlSize(.small)
                     .tint(.orange)
                 }
-                // Prepare / Resume / Start All live in the header's own
-                // action slot above, offering exactly the one step whose
-                // Host precondition currently holds. Keeping a header
-                // duplicate meant offering operations the Host refuses:
-                // workspace.plan needs a closed Scenario, scenario.open
-                // needs a ready workspace, close accepts only
-                // opening/running/degraded.
-                Button(S.Detail.close) { Task { await model.closeScenario() } }
-                    .controlSize(.small)
-                    .disabled(
-                        model.isBusy
-                            || model.lifecycleActionsPreempted
-                            || !["opening", "running", "degraded"].contains(
-                                scenario.observedState
-                            )
-                    )
-                // The one UI entry point for the delete flow, alongside the
-                // room board's own row menu — both open the same
-                // `DestroyPanel`. Force Delete is never offered here
-                // directly; the panel decides eligible-vs-blocked after
-                // loading a real preview (review 20260903-185641-e6nznb).
-                Menu {
-                    Button(S.Rooms.deleteMenu) {
-                        guard let projectID = model.selectedProjectID else { return }
-                        destroyPanelTarget = DestroyPanelTarget(
-                            projectID: projectID,
-                            scenario: scenario
-                        )
-                    }
-                } label: {
-                    Image(systemName: "ellipsis.circle")
-                }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
             }
             objectiveInline(scenario)
+            healthCard(scenario)
             validationBanner(for: .scenarioLifecycle)
         }
         .padding(.horizontal, 16)
@@ -1344,73 +1374,161 @@ struct ContentView: View {
 
     // MARK: - Participants (primary section)
 
-    private var participantsSection: some View {
-        GroupBox {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack {
-                    TextField(S.Colleagues.identityPlaceholder, text: $model.newParticipantID)
-                        .onSubmit {
-                            Task { await model.addParticipant() }
-                        }
-                    Picker(S.Colleagues.templatePicker, selection: $model.selectedTemplateID) {
-                        ForEach(model.interactiveTemplates) { template in
-                            Text(template.displayName).tag(Optional(template.id))
-                        }
-                        if !model.diagnosticTemplates.isEmpty {
-                            Divider()
-                            Section(S.Colleagues.advanced) {
-                                ForEach(model.diagnosticTemplates) { template in
-                                    Text(template.displayName).tag(Optional(template.id))
-                                }
+    /// The List's first section (v2): the roster rows, then the composer as
+    /// the section's last row — a new colleague is added at the bottom of
+    /// the team, the way macOS lists add entries at the bottom, not in a
+    /// form above them. No GroupBox: the List's section chrome is the
+    /// grouping.
+    private var teamSection: some View {
+        Section {
+            if model.participants.isEmpty {
+                Text(S.Colleagues.emptyHint)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 6)
+            } else {
+                ForEach(model.participants) { participant in
+                    participantRow(participant)
+                        .padding(.vertical, 4)
+                }
+            }
+            HStack {
+                TextField(S.Colleagues.identityPlaceholder, text: $model.newParticipantID)
+                    .onSubmit {
+                        Task { await model.addParticipant() }
+                    }
+                Picker(S.Colleagues.templatePicker, selection: $model.selectedTemplateID) {
+                    ForEach(model.interactiveTemplates) { template in
+                        Text(template.displayName).tag(Optional(template.id))
+                    }
+                    if !model.diagnosticTemplates.isEmpty {
+                        Divider()
+                        Section(S.Colleagues.advanced) {
+                            ForEach(model.diagnosticTemplates) { template in
+                                Text(template.displayName).tag(Optional(template.id))
                             }
                         }
                     }
-                    .frame(minWidth: 180)
-                    Button(S.Colleagues.add) { Task { await model.addParticipant() } }
                 }
-                validationBanner(for: .participantAdd)
-                validationBanner(for: .participantAction)
-                if model.participants.isEmpty {
-                    Text(S.Colleagues.emptyHint)
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .center)
-                        .padding(.vertical, 12)
-                } else {
-                    ForEach(model.participants) { participant in
-                        participantRow(participant)
-                        if participant.id != model.participants.last?.id {
-                            Divider()
-                        }
-                    }
-                }
+                .frame(minWidth: 180)
+                Button(S.Colleagues.add) { Task { await model.addParticipant() } }
             }
-            .padding(6)
-        } label: {
+            .padding(.vertical, 4)
+            validationBanner(for: .participantAdd)
+            validationBanner(for: .participantAction)
+        } header: {
             HStack {
                 Label(S.Colleagues.sectionTitle, systemImage: "person.3.fill")
-                    .font(.headline)
                 Spacer()
-                // The header's own former "N running / N messages" summary
-                // row moved here — it belongs with the team, not floating
-                // separately above it (review 20260903-201119-r9tf2j: the
-                // Artifact's compact mission header carries no counts row at
-                // all; this is where that count actually lives now).
-                if !model.participants.isEmpty {
-                    Text(S.Colleagues.runningCount(model.runningParticipantCount))
-                        .font(.caption)
-                        .foregroundStyle(
-                            model.participants.contains { $0.presentationClass == .attention }
-                                ? Color.orange
-                                : Color.secondary
-                        )
+                Text(teamSummaryLine)
+                    .foregroundStyle(teamHasAttention ? Color.orange : Color.secondary)
+            }
+        }
+    }
+
+    private var teamHasAttention: Bool {
+        model.participants.contains { $0.presentationClass == .attention }
+    }
+
+    /// Header summary: attention count wins over the running count, so a
+    /// team with one broken colleague never reads as "1 running".
+    private var teamSummaryLine: String {
+        if model.participants.isEmpty { return S.Colleagues.noneYet }
+        let attention = model.participants.filter { $0.presentationClass == .attention }.count
+        if attention > 0 { return S.Colleagues.attentionCount(attention) }
+        return S.Colleagues.runningCount(model.runningParticipantCount)
+    }
+
+    // MARK: - Collaboration activity (the room's main content)
+
+    /// The delivery stream as the workbench's second List section (v2).
+    /// Still nothing but delivery metadata — sender, receiver, the Host's
+    /// message_kind token as a noun, and the six-class state; the client
+    /// has no message bodies and invents none. The raw ledger (ids,
+    /// sequences, last events, retry) stays in the inspector's Raw activity.
+    /// Newest first by enqueue sequence — the Store has no clock.
+    private var activitySection: some View {
+        Section {
+            if model.deliveries.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(S.Deliveries.activityEmptyTitle)
+                        .font(.callout)
+                    Text(S.Deliveries.activityEmptyBody)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.vertical, 6)
+            } else {
+                ForEach(
+                    model.deliveries.sorted { $0.enqueueSequence > $1.enqueueSequence }
+                ) { delivery in
+                    activityRow(delivery)
+                }
+                Text(model.deliveryMessage)
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+        } header: {
+            HStack {
+                Label(S.Deliveries.activityTitle, systemImage: "arrow.left.arrow.right")
+                Spacer()
+                if let total = model.deliverySummary?.total, !model.deliveries.isEmpty {
+                    Text(S.Deliveries.recentCount(model.deliveries.count, total))
+                        .foregroundStyle(.secondary)
                 }
             }
         }
     }
 
+    private func activityRow(_ delivery: DeliveryRecord) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            ParticipantInitialsView(id: delivery.sender.participantID, size: 18)
+                .padding(.top, 1)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 5) {
+                    Text(delivery.sender.participantID)
+                        .font(.callout.weight(.semibold))
+                    Image(systemName: "arrow.right")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                    Text(delivery.receiver.participantID)
+                        .font(.callout.weight(.semibold))
+                }
+                Text(S.Deliveries.kindNoun(delivery.messageKind))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if let reason = delivery.degradedReason {
+                    Text(reason)
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+            }
+            Spacer(minLength: 8)
+            if delivery.retryEligible {
+                Button(S.Common.retry) {
+                    Task { await model.retryDelivery(delivery) }
+                }
+                .controlSize(.small)
+            }
+            PresentationBadge(
+                cls: delivery.presentationClass,
+                label: S.Delivery.stateLabel(delivery.state)
+            )
+            Text(String(delivery.id.prefix(12)))
+                .font(.caption.monospaced())
+                .foregroundStyle(.tertiary)
+        }
+        .padding(.vertical, 3)
+    }
+
+    /// A colleague's row as a work card, not a configuration card: name and
+    /// six-class badge, the degraded reason if there is one, the honest
+    /// situation line from delivery metadata, then runtime/model/issuance
+    /// as one tertiary line.
     private func participantRow(_ participant: ParticipantRecord) -> some View {
-        HStack(alignment: .top) {
+        HStack(alignment: .top, spacing: 10) {
+            ParticipantInitialsView(id: participant.id, size: 26)
+                .padding(.top, 1)
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
                     Text(participant.id).font(.headline)
@@ -1419,42 +1537,57 @@ struct ContentView: View {
                         label: HarnessViewModel.humanState(participant.observedState)
                     )
                 }
-                if let activity = recentActivityLine(for: participant) {
-                    Text(activity)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                if let runtimeProfileRef = participant.runtimeProfileRef {
-                    Text(runtimeProfileRef)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                if let modelBinding = participant.modelBinding {
-                    Text(modelBinding.modelRef)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                if let scenario = model.selectedScenario,
-                   scenario.objectiveRevision > 0 {
-                    let issued = participant.issuedObjectiveRevision
-                        >= scenario.objectiveRevision
-                    Text(issued ? S.Objective.issued : S.Objective.pendingIssuance)
-                        .font(.caption)
-                        .foregroundStyle(issued ? Color.secondary : Color.orange)
-                        .help(issued ? "" : S.Objective.pendingIssuanceHelp)
-                }
-                if participant.cleanupPending {
-                    Text(
-                        participant.degradedReason.map(
-                            HarnessViewModel.humanDegradedReason
-                        ) ?? S.Colleagues.repairRequired
+                if let reason = participant.degradedReason {
+                    Label(
+                        HarnessViewModel.humanDegradedReason(reason),
+                        systemImage: "exclamationmark.triangle.fill"
                     )
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                } else if participant.cleanupPending {
+                    Label(S.Colleagues.repairRequired, systemImage: "exclamationmark.triangle.fill")
                         .font(.caption)
                         .foregroundStyle(.orange)
                 }
+                if let activity = recentActivityLine(for: participant) {
+                    Label(activity, systemImage: "envelope")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                participantMetaLine(participant)
             }
             Spacer()
             participantActions(participant)
+        }
+    }
+
+    /// runtime · model · issuance, tertiary. Issuance colour is honest about
+    /// the room: a stopped/detached colleague cannot hold the new revision
+    /// yet and gets it at the next start — grey, not the orange reserved for
+    /// a running colleague still on the old revision (the user's closed-room
+    /// screenshot showed every stopped colleague in orange "pending").
+    private func participantMetaLine(_ participant: ParticipantRecord) -> some View {
+        HStack(spacing: 4) {
+            let refs = [participant.runtimeProfileRef, participant.modelBinding?.modelRef]
+                .compactMap { $0 }
+            if !refs.isEmpty {
+                Text(refs.joined(separator: " · "))
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.tertiary)
+            }
+            if let scenario = model.selectedScenario,
+               scenario.objectiveRevision > 0 {
+                let issued = participant.issuedObjectiveRevision
+                    >= scenario.objectiveRevision
+                let inactive = participant.presentationClass == .inactive
+                let label = issued
+                    ? S.Objective.issued
+                    : (inactive ? S.Objective.pendingIssuanceInactive : S.Objective.pendingIssuance)
+                Text((refs.isEmpty ? "" : "· ") + label)
+                    .font(.caption)
+                    .foregroundStyle(issued || inactive ? Color.secondary : Color.orange)
+                    .help(issued || inactive ? "" : S.Objective.pendingIssuanceHelp)
+            }
         }
     }
 
@@ -1474,10 +1607,12 @@ struct ContentView: View {
         guard let latest = related.max(by: { $0.enqueueSequence < $1.enqueueSequence })
         else { return nil }
         let state = S.Delivery.stateLabel(latest.state)
+        // The Host's message_kind token as a noun — a token, never a body.
+        let noun = S.Deliveries.kindNoun(latest.messageKind)
         if latest.sender.participantID == participant.id {
-            return S.Colleagues.recentActivitySent(latest.receiver.participantID, state)
+            return S.Colleagues.situationSent(latest.receiver.participantID, noun, state)
         }
-        return S.Colleagues.recentActivityReceived(latest.sender.participantID, state)
+        return S.Colleagues.situationReceived(latest.sender.participantID, noun, state)
     }
 
     @ViewBuilder
@@ -1564,8 +1699,34 @@ struct ContentView: View {
     /// inside the outer drawer's own `DisclosureGroup` added a second fold
     /// nobody asked for. A single selection replaces all five of the old
     /// per-section `show*` bools.
-    private enum EvidenceTab: Hashable {
-        case deliveries, preflight, topology, policy, resources, inspector, highRisk, analytics
+    private enum EvidenceTab: Hashable, CaseIterable {
+        case deliveries, preflight, topology, policy, resources, inspector, analytics, highRisk
+
+        var title: String {
+            switch self {
+            case .deliveries: S.Deliveries.rawActivity
+            case .preflight: S.Preflight.sectionTitle
+            case .topology: S.Topology.sectionTitle
+            case .policy: S.Policy.sectionTitle
+            case .resources: S.Sections.resources
+            case .inspector: S.Inspector.sectionTitle
+            case .analytics: S.DeliveryDistribution.tabTitle
+            case .highRisk: S.Risk.sectionTitle
+            }
+        }
+
+        var symbolName: String {
+            switch self {
+            case .deliveries: "envelope"
+            case .preflight: "checkmark.shield"
+            case .topology: "macwindow.on.rectangle"
+            case .policy: "shared.with.you"
+            case .resources: "cpu"
+            case .inspector: "terminal"
+            case .analytics: "chart.bar"
+            case .highRisk: "exclamationmark.triangle"
+            }
+        }
     }
     @State private var evidenceTab: EvidenceTab = .deliveries
 
@@ -1577,7 +1738,10 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
                     if let preflight = model.preflight {
-                        StateBadge(state: preflight.status)
+                        PresentationBadge(
+                            cls: .preflight(preflight.status),
+                            label: HarnessViewModel.humanState(preflight.status)
+                        )
                         Text(
                             preflight.status == "ready"
                                 ? S.Preflight.allPassed
@@ -1598,7 +1762,10 @@ struct ContentView: View {
                 if let preflight = model.preflight {
                     ForEach(preflight.checks) { check in
                         HStack(alignment: .top) {
-                            StateBadge(state: check.status)
+                            PresentationBadge(
+                                cls: .preflight(check.status),
+                                label: HarnessViewModel.humanState(check.status)
+                            )
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(check.id).font(.callout.bold())
                                 Text(check.summary)
@@ -1654,7 +1821,10 @@ struct ContentView: View {
                             }
                             Spacer(minLength: 8)
                             VStack(alignment: .trailing, spacing: 4) {
-                                Text(S.Preflight.permissionStatus(permission.status))
+                                PresentationBadge(
+                                    cls: .permission(permission.status),
+                                    label: S.Preflight.permissionStatus(permission.status)
+                                )
                                     .font(.caption.bold())
                                 if let remediation = permission.remediationRef,
                                    model.canPerformRepairAction(remediation) {
@@ -1693,7 +1863,10 @@ struct ContentView: View {
                     } else {
                         ForEach(topology.participants) { item in
                             HStack {
-                                StateBadge(state: item.health)
+                                PresentationBadge(
+                                    cls: .topologyHealth(item.health),
+                                    label: HarnessViewModel.humanState(item.health)
+                                )
                                 Text(item.id).font(.callout.bold())
                                 Spacer()
                                 if let geometry = item.geometryLabel {
@@ -1734,8 +1907,11 @@ struct ContentView: View {
                                 .foregroundStyle(.secondary)
                         }
                         Spacer()
-                        StateBadge(
-                            state: status.requiresReplan ? "re-plan required" : "current"
+                        PresentationBadge(
+                            cls: .policy(requiresReplan: status.requiresReplan),
+                            label: HarnessViewModel.humanState(
+                                status.requiresReplan ? "re-plan required" : "current"
+                            )
                         )
                     }
                     if !status.generationDrift.isEmpty {
@@ -1802,7 +1978,10 @@ struct ContentView: View {
                         HStack {
                             Text(S.Policy.planPreview).font(.callout.bold())
                             Spacer()
-                            StateBadge(state: plan.canApply ? "ready" : "blocked")
+                            PresentationBadge(
+                                cls: .policyPlan(canApply: plan.canApply),
+                                label: HarnessViewModel.humanState(plan.canApply ? "ready" : "blocked")
+                            )
                         }
                         ForEach(plan.team) { member in
                             HStack {
@@ -1866,7 +2045,10 @@ struct ContentView: View {
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                                 Spacer()
-                                StateBadge(state: delivery.state)
+                                PresentationBadge(
+                                    cls: delivery.presentationClass,
+                                    label: S.Delivery.stateLabel(delivery.state)
+                                )
                                 if delivery.retryEligible {
                                     Button(S.Common.retry) {
                                         Task { await model.retryDelivery(delivery) }
@@ -1896,36 +2078,7 @@ struct ContentView: View {
             .padding(.vertical, 6)
     }
 
-    /// review 20260903-194506-9xgiml P1: the section header used to draw a
-    /// prominent alert triangle unconditionally, so a perfectly healthy room
-    /// still opened with "⚠ Needs attention" directly above a green
-    /// all-clear line — contradictory hierarchy where the icon disagreed
-    /// with the words right under it. Clear now renders as one compact,
-    /// neutral line; the alert-styled headline only appears once there is
-    /// something to actually flag.
-    /// The Artifact's actual secondary column: a lifecycle timeline leading
-    /// a compact metrics grid, with the attention list folded into the same
-    /// card — not three unrelated blocks (review 20260903-201119-r9tf2j).
-    /// One shared surface for all three; `collaborationHealthSection` and
-    /// `needsAttentionSection` keep their existing names and content
-    /// unchanged (still independently referenced by the app-contract
-    /// tests), just called from here instead of standing on their own.
-    private func progressPanel(_ scenario: ScenarioRecord) -> some View {
-        VStack(alignment: .leading, spacing: 16) {
-            stageTimeline(scenario)
-            Divider()
-            collaborationHealthSection
-            Divider()
-            needsAttentionSection
-        }
-        .padding(14)
-        // Stretch before painting the background, not after, so the card
-        // surface itself reaches down to match the team column's height
-        // instead of stopping at its own short content (same fix as
-        // `participantsSection`'s GroupBox, same user-reported gap).
-        .frame(maxHeight: .infinity, alignment: .top)
-        .background(.secondary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
-    }
+    // MARK: - Progress (stage, four facts, attention)
 
     private enum WorkbenchStage: Int {
         case setup, staffing, running, closed
@@ -1955,7 +2108,7 @@ struct ContentView: View {
     private func stageTimeline(_ scenario: ScenarioRecord) -> some View {
         let stage = currentStage(scenario)
         let attention = [.attention, .failed].contains(scenario.presentationClass)
-        return VStack(alignment: .leading, spacing: 0) {
+        return VStack(alignment: .leading, spacing: 4) {
             stageRow(.setup, current: stage, label: S.Stage.setup)
             stageRow(.staffing, current: stage, label: S.Stage.staffing)
             stageRow(
@@ -1963,51 +2116,33 @@ struct ContentView: View {
                 label: (attention && stage == .running) ? S.Stage.runningAttention : S.Stage.running,
                 attention: attention
             )
-            stageRow(.closed, current: stage, label: S.Stage.closed, isLast: true)
+            stageRow(.closed, current: stage, label: S.Stage.closed)
         }
     }
 
+    /// One `Label` per stage in the six-class symbol vocabulary — no hand-
+    /// drawn circles or connector line (that was a web stepper, and its
+    /// green-filled check was a third checkmark glyph on the same screen).
+    /// Done → success, current → the room's working/attention class,
+    /// upcoming → an empty circle in tertiary.
     private func stageRow(
         _ step: WorkbenchStage, current: WorkbenchStage, label: String,
-        attention: Bool = false, isLast: Bool = false
+        attention: Bool = false
     ) -> some View {
         let done = step.rawValue < current.rawValue
         let isCurrent = step == current
-        let tint: Color = isCurrent && attention ? .orange : .brandAccent
-        return HStack(alignment: .top, spacing: 10) {
-            VStack(spacing: 0) {
-                ZStack {
-                    Circle()
-                        .fill(done ? Color.green : (isCurrent ? tint : Color.clear))
-                        .overlay(
-                            Circle().stroke(
-                                done || isCurrent ? Color.clear : Color.secondary.opacity(0.35),
-                                lineWidth: 1.3
-                            )
-                        )
-                    if done {
-                        Image(systemName: "checkmark")
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundStyle(.white)
-                    } else if isCurrent {
-                        Circle().fill(.white).frame(width: 6, height: 6)
-                    }
-                }
-                .frame(width: 18, height: 18)
-                if !isLast {
-                    Rectangle()
-                        .fill(Color.secondary.opacity(0.25))
-                        .frame(width: 1.3)
-                        .frame(minHeight: 16)
-                }
-            }
+        let cls: PresentationClass? = done
+            ? .success
+            : (isCurrent ? (attention ? .attention : .working) : nil)
+        return Label {
             Text(label)
                 .font(.callout.weight(isCurrent ? .semibold : .regular))
                 .foregroundStyle(done || isCurrent ? Color.primary : Color.secondary)
-                .padding(.top, 1)
-            Spacer(minLength: 0)
+        } icon: {
+            Image(systemName: cls?.symbolName ?? "circle")
+                .foregroundStyle(cls?.color ?? Color.secondary.opacity(0.5))
         }
-        .padding(.bottom, isLast ? 0 : 10)
+        .padding(.vertical, 2)
     }
 
     private var needsAttentionSection: some View {
@@ -2085,67 +2220,63 @@ struct ContentView: View {
         }
     }
 
-    /// Two fixed columns, not an adaptive grid that happened to read as
-    /// compact only because a 300pt secondary column left room for two —
-    /// review 20260903-201119-r9tf2j wants the Artifact's deliberate 2×2,
-    /// not an accident of whatever width this panel ends up with.
-    /// Exactly the Artifact's four (review 20260903-203219-kq79nn P1 visual):
-    /// team ready, requests closed, first-attempt delivery, degraded — a
-    /// clean 2×2, not five tiles wrapping into an orphan last row.
-    /// End-to-end evidence moved to the Analytics tab (`deliveryDistribution
-    /// Section`) rather than being dropped outright.
-    private var collaborationHealthSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Label(S.CollaborationHealth.sectionTitle, systemImage: "waveform.path.ecg")
-                .font(.headline)
+    /// The Artifact's four facts as label/value rows (v2) — the same four
+    /// metrics the 2×2 tiles carried (team ready, requests closed, first-
+    /// attempt delivery, degraded; end-to-end evidence stays in Analytics),
+    /// one row each with monospaced digits, the way Activity Monitor and
+    /// Xcode's Organizer state figures. Big coloured numbers under uppercase
+    /// captions were a web KPI card.
+    ///
+    /// `neutral` (an inactive room — closed) keeps incomplete ratios grey:
+    /// "0/2 team ready" in a room that is deliberately closed is expected,
+    /// not something to attend to, and orange there broke the rule that
+    /// attention colour means "needs a person" (user's m2 screenshot).
+    /// Degraded deliveries are real regardless, so that row keeps its
+    /// attention colour in any room.
+    private func collaborationHealthSection(neutral: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
             if let health = model.collaborationHealth {
-                LazyVGrid(
-                    columns: [
-                        GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10),
-                    ],
-                    alignment: .leading,
-                    spacing: 10
-                ) {
-                    CollaborationHealthMetricTile(
-                        title: S.CollaborationHealth.teamReady,
-                        value: health.teamReady.value,
-                        total: health.teamReady.total,
-                        color: healthColor(for: health.teamReady)
-                    )
-                    CollaborationHealthMetricTile(
-                        title: S.CollaborationHealth.requestsClosed,
-                        value: health.requestsClosed.value,
-                        total: health.requestsClosed.total,
-                        color: healthColor(for: health.requestsClosed)
-                    )
-                    CollaborationHealthMetricTile(
-                        title: S.CollaborationHealth.firstAttemptDelivery,
-                        value: health.firstAttemptDelivery.value,
-                        total: health.firstAttemptDelivery.total,
-                        color: healthColor(for: health.firstAttemptDelivery)
-                    )
-                    CollaborationHealthMetricTile(
-                        title: S.CollaborationHealth.degraded,
-                        value: health.degradedTotal,
-                        total: nil,
-                        color: health.degradedTotal == 0 ? .green : .orange
-                    )
-                }
+                CollaborationHealthMetricRow(
+                    title: S.CollaborationHealth.teamReady,
+                    value: health.teamReady.value,
+                    total: health.teamReady.total,
+                    cls: healthClass(for: health.teamReady, neutral: neutral)
+                )
+                CollaborationHealthMetricRow(
+                    title: S.CollaborationHealth.requestsClosed,
+                    value: health.requestsClosed.value,
+                    total: health.requestsClosed.total,
+                    cls: healthClass(for: health.requestsClosed, neutral: neutral)
+                )
+                CollaborationHealthMetricRow(
+                    title: S.CollaborationHealth.firstAttemptDelivery,
+                    value: health.firstAttemptDelivery.value,
+                    total: health.firstAttemptDelivery.total,
+                    cls: healthClass(for: health.firstAttemptDelivery, neutral: neutral)
+                )
+                CollaborationHealthMetricRow(
+                    title: S.CollaborationHealth.degraded,
+                    value: health.degradedTotal,
+                    total: nil,
+                    cls: health.degradedTotal == 0 ? .success : .attention
+                )
             } else {
                 Text(S.CollaborationHealth.loading)
                     .font(.callout)
                     .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    .padding(.vertical, 12)
             }
         }
     }
 
-    private func healthColor(for ratio: CollaborationHealthRatio) -> Color {
+    /// nil is the neutral row: unobserved (0/0), or incomplete in a room
+    /// where incomplete is the expected state.
+    private func healthClass(
+        for ratio: CollaborationHealthRatio, neutral: Bool
+    ) -> PresentationClass? {
         switch ratio.state {
-        case .unobserved: .secondary
-        case .complete: .green
-        case .incomplete: .orange
+        case .unobserved: nil
+        case .complete: .success
+        case .incomplete: neutral ? nil : .attention
         }
     }
 
@@ -2159,13 +2290,13 @@ struct ContentView: View {
                 // dropped, just not competing for the primary card's four
                 // slots.
                 if let health = model.collaborationHealth {
-                    CollaborationHealthMetricTile(
+                    CollaborationHealthMetricRow(
                         title: S.CollaborationHealth.endToEndEvidence,
                         value: health.endToEndEvidence.value,
                         total: health.endToEndEvidence.total,
-                        color: healthColor(for: health.endToEndEvidence)
+                        cls: healthClass(for: health.endToEndEvidence, neutral: false)
                     )
-                    .frame(maxWidth: 220, alignment: .leading)
+                    .frame(maxWidth: 320, alignment: .leading)
                 }
                 LazyVGrid(
                     columns: [GridItem(.adaptive(minimum: 300), spacing: 12)],
@@ -2277,42 +2408,37 @@ struct ContentView: View {
         }
     }
 
-    // MARK: - Health card (durable degraded state, always visible)
+    // MARK: - Health alert (durable degraded state, in the mission bar)
 
+    /// The Artifact's mission-alert row: rendered inside `missionBar` under
+    /// the objective while the room is degraded / provision_failed — not a
+    /// GroupBox card at the top of the workbench. Repair itself stays in
+    /// the mission bar's action row (the one canonical place); this row
+    /// keeps the explanatory sentence and Run Preflight. Same shape as
+    /// `validationBanner`, so the two never read as different kinds of
+    /// thing. Accessibility name: S.Sections.health.
     @ViewBuilder
     private func healthCard(_ scenario: ScenarioRecord) -> some View {
         if ["degraded", "provision_failed"].contains(scenario.observedState) {
-            GroupBox {
-                HStack(alignment: .top, spacing: 10) {
-                    Image(systemName: "cross.case.fill")
-                        .foregroundStyle(.orange)
-                        .font(.title3)
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text(
-                            S.Sections.healthNeedsRepair(
-                                HarnessViewModel.humanState(scenario.observedState)
-                            )
-                        )
-                        .font(.callout)
-                        // Repair itself now lives once, in the mission bar's
-                        // header row — this card keeps the reassurance
-                        // sentence plus the one action that isn't a
-                        // duplicate of it.
-                        HStack {
-                            Button(S.Preflight.runButton) {
-                                Task { await model.runPreflight() }
-                            }
-                            .controlSize(.small)
-                        }
-                    }
-                    Spacer()
-                }
-                .padding(6)
-            } label: {
-                Label(S.Sections.health, systemImage: "heart.text.square")
-                    .font(.headline)
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
+                Text(
+                    S.Sections.healthNeedsRepair(
+                        HarnessViewModel.humanState(scenario.observedState)
+                    )
+                )
+                .font(.callout)
+                Spacer(minLength: 8)
+                Button(S.Preflight.runButton) {
+                    Task { await model.runPreflight() }
+                }
+                .controlSize(.small)
             }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
+            .accessibilityLabel(S.Sections.health)
         }
     }
 
@@ -2332,7 +2458,10 @@ struct ContentView: View {
                     // overview never claims a released lease is still held.
                     ForEach(model.visibleResources) { resource in
                         HStack {
-                            StateBadge(state: resource.status)
+                            PresentationBadge(
+                                cls: .resourceLease(resource.status),
+                                label: HarnessViewModel.humanState(resource.status)
+                            )
                             Text(
                                 S.Sections.resourceRow(
                                     resource.resourceClass, resource.participantID
@@ -2354,17 +2483,35 @@ struct ContentView: View {
         }
     }
 
-    // MARK: - Technical fold (machine view, complete and collapsed)
+    // MARK: - Evidence & Diagnostics (native inspector)
 
-    @State private var showTechnical = true
+    /// Persisted, not a per-View default: the inspector comes back the way
+    /// the user left it. First run is closed — the delivery stream the user
+    /// wanted "without clicking" is the workbench's own activity section
+    /// now, so the diagnostics no longer need to open by default to show
+    /// it, and review 20260903-181141-6gjonu point 7 (never auto-open on a
+    /// fault) holds again. The needs-attention links still open it
+    /// explicitly, to the domain they name.
+    @AppStorage("AICollabEvidenceInspectorShown") private var showTechnical = false
 
-    /// Expanded diagnostics use the otherwise empty part of the primary
-    /// column instead of reserving a second full-width horizontal band below
-    /// the overview. The body scrolls independently and absorbs the column's
-    /// remaining height without pushing the progress panel away.
-    private func evidencePane(_ scenario: ScenarioRecord) -> some View {
-        HStack(alignment: .top, spacing: 12) {
-            evidenceNav
+    /// macOS 14 `.inspector` content: a segmented, icon-only domain picker
+    /// (Xcode's inspector bar), the domain's title, then the domain's own
+    /// section — the eight section bodies are unchanged from the drawer.
+    private func evidenceInspector(_ scenario: ScenarioRecord) -> some View {
+        VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 8) {
+                evidenceDomainPicker
+                HStack {
+                    Text(evidenceTab.title).font(.headline)
+                    Spacer()
+                    Text(S.Sections.evidenceAndDiagnostics)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, 10)
+            .padding(.bottom, 8)
             Divider()
             ScrollView {
                 Group {
@@ -2380,114 +2527,24 @@ struct ContentView: View {
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(12)
             }
         }
-        .padding(12)
-        .frame(minHeight: 280, maxHeight: .infinity, alignment: .top)
-        .background(.bar, in: RoundedRectangle(cornerRadius: 8))
-        .overlay {
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(.separator.opacity(0.6), lineWidth: 1)
-        }
     }
 
-    /// The Artifact's persistent bottom disclosure. Only the control stays
-    /// pinned; `evidencePane` renders the expanded workspace in the main
-    /// layout so opening it cannot create a large unused region under Team.
-    private func evidenceBar(_: ScenarioRecord) -> some View {
-        VStack(spacing: 0) {
-            Button {
-                showTechnical.toggle()
-            } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: showTechnical ? "chevron.down" : "chevron.right")
-                        .font(.caption2.bold())
-                        .foregroundStyle(.secondary)
-                    Label(S.Sections.evidenceAndDiagnostics, systemImage: "terminal")
-                        .font(.callout.weight(.semibold))
-                    if !showTechnical, !evidenceSummaryLine.isEmpty {
-                        Text(evidenceSummaryLine)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-                    Spacer(minLength: 8)
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 8)
-                .contentShape(Rectangle())
+    /// Every domain, high-risk included, visible at any inspector width —
+    /// the guarantee the fixed nav column gave (review 20260903-185641-
+    /// e6nznb P2), now with native selected/keyboard semantics.
+    private var evidenceDomainPicker: some View {
+        Picker(S.Sections.evidenceAndDiagnostics, selection: $evidenceTab) {
+            ForEach(EvidenceTab.allCases, id: \.self) { tab in
+                Image(systemName: tab.symbolName)
+                    .accessibilityLabel(tab.title)
+                    .tag(tab)
             }
-            .buttonStyle(.plain)
         }
-        .background(.bar)
-    }
-
-    /// A fixed-width left nav, not a horizontally-scrolling strip — review
-    /// 20260903-185641-e6nznb P2: a scrolling row can hide the high-risk tab
-    /// off the visible edge with no indicator on a narrow window, and hand-
-    /// rolled capsules skip native selected/keyboard semantics. All seven
-    /// domains are always fully visible at once here, same fixed column
-    /// regardless of window width, high-risk included — nothing to scroll to
-    /// discover it.
-    private var evidenceNav: some View {
-        VStack(alignment: .leading, spacing: 1) {
-            evidenceNavRow(.deliveries, S.Deliveries.rawActivity, "envelope.fill")
-            evidenceNavRow(.preflight, S.Preflight.sectionTitle, "checkmark.shield")
-            evidenceNavRow(.topology, S.Topology.sectionTitle, "macwindow.on.rectangle")
-            evidenceNavRow(.policy, S.Policy.sectionTitle, "shared.with.you")
-            evidenceNavRow(.resources, S.Sections.resources, "cpu")
-            evidenceNavRow(.inspector, S.Inspector.sectionTitle, "terminal")
-            evidenceNavRow(.analytics, S.DeliveryDistribution.tabTitle, "chart.bar")
-            evidenceNavRow(.highRisk, S.Risk.sectionTitle, "exclamationmark.triangle", tint: .red)
-        }
-        .frame(width: 140, alignment: .leading)
-    }
-
-    private func evidenceNavRow(
-        _ tab: EvidenceTab, _ title: String, _ symbol: String, tint: Color = .accentColor
-    ) -> some View {
-        let selected = evidenceTab == tab
-        return Button {
-            evidenceTab = tab
-        } label: {
-            Label(title, systemImage: symbol)
-                .font(.caption.weight(selected ? .bold : .regular))
-                .foregroundStyle(selected ? tint : Color.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 6)
-                .background(
-                    selected ? tint.opacity(0.12) : Color.clear,
-                    in: RoundedRectangle(cornerRadius: 6)
-                )
-        }
-        .buttonStyle(.plain)
-    }
-
-    /// One line, shown only while the drawer is collapsed, composed from
-    /// fragments its own sections already localize (same " · " idiom
-    /// `scenarioHeader` and `highRiskSection` already use) — not a new
-    /// hardcoded sentence.
-    private var evidenceSummaryLine: String {
-        var parts: [String] = []
-        if let preflight = model.preflight {
-            parts.append(
-                "\(S.Preflight.sectionTitle) \(HarnessViewModel.humanState(preflight.status))"
-            )
-        }
-        if let policy = model.policyStatus {
-            parts.append(
-                "\(S.Policy.sectionTitle) "
-                    + S.Status.label(policy.requiresReplan ? "re-plan required" : "current")
-            )
-        }
-        if let total = model.deliverySummary?.total, total > 0 {
-            parts.append("\(S.Deliveries.rawActivity) \(total)")
-        }
-        if !model.visibleResources.isEmpty {
-            parts.append("\(S.Sections.resources) \(model.visibleResources.count)")
-        }
-        return parts.joined(separator: " · ")
+        .pickerStyle(.segmented)
+        .labelsHidden()
     }
 
     // MARK: - Overlays
@@ -2904,53 +2961,41 @@ private struct DeliveryKindDistributionPanel: View {
     }
 }
 
-private struct CollaborationHealthMetricTile: View {
+/// One collaboration-health fact as a label/value row. `cls == nil` is the
+/// neutral row (unobserved, or expected-incomplete in an inactive room):
+/// grey text, an empty circle, no colour claim either way.
+private struct CollaborationHealthMetricRow: View {
     let title: String
     let value: Int
     let total: Int?
-    let color: Color
+    let cls: PresentationClass?
 
-    private var accessibilityValue: String {
+    private var displayValue: String {
         guard let total else { return String(value) }
-        return "\(value)/\(total)"
+        return "\(value) / \(total)"
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            HStack(alignment: .firstTextBaseline, spacing: 2) {
-                Text(String(value))
-                    .font(.system(size: 26, weight: .semibold))
-                    .monospacedDigit()
-                    .foregroundStyle(color)
-                if let total {
-                    Text("/\(total)")
-                        .font(.system(size: 15, weight: .regular))
-                        .monospacedDigit()
-                        .foregroundStyle(.tertiary)
-                }
-            }
-            HStack(spacing: 5) {
-                Circle()
-                    .fill(color)
-                    .frame(width: 6, height: 6)
-                Text(title)
-                    .font(.system(size: 10, weight: .medium))
-                    .textCase(.uppercase)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-        .frame(maxWidth: .infinity, minHeight: 66, alignment: .leading)
-        .padding(10)
-        .background(.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
-        .overlay {
-            RoundedRectangle(cornerRadius: 6)
-                .stroke(color.opacity(0.24), lineWidth: 1)
+        HStack(spacing: 8) {
+            Image(systemName: cls?.symbolName ?? "circle")
+                .font(.caption)
+                .foregroundStyle(cls?.color ?? Color.secondary.opacity(0.6))
+                .frame(width: 14)
+            Text(title)
+                .font(.callout)
+                .foregroundStyle(cls == nil ? Color.secondary : Color.primary)
+            Spacer(minLength: 8)
+            Text(displayValue)
+                .font(.callout.monospacedDigit())
+                .foregroundStyle(
+                    cls == .attention
+                        ? Color.orange
+                        : (cls == nil ? Color.secondary : Color.primary)
+                )
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(title)
-        .accessibilityValue(accessibilityValue)
+        .accessibilityValue(displayValue)
     }
 }
 
@@ -3127,6 +3172,7 @@ private struct ScenarioRoomCard: View {
 
 private struct ParticipantInitialsView: View {
     let id: String
+    var size: CGFloat = 20
 
     private var initials: String {
         let cleaned = id.replacingOccurrences(of: "-", with: " ")
@@ -3147,9 +3193,9 @@ private struct ParticipantInitialsView: View {
 
     var body: some View {
         Text(initials)
-            .font(.system(size: 9, weight: .bold))
+            .font(.system(size: size * 0.45, weight: .bold))
             .foregroundStyle(.white)
-            .frame(width: 20, height: 20)
+            .frame(width: size, height: size)
             .background(color, in: Circle())
             .overlay(Circle().stroke(.background, lineWidth: 2))
     }

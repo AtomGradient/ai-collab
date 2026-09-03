@@ -246,6 +246,13 @@ enum S {
         static var pendingIssuance: String {
             t("Pending issuance", "待下发")
         }
+        /// A stopped/detached colleague cannot have the revision yet and is
+        /// not a problem — it arrives with the next start. Neutral wording,
+        /// neutral colour (the orange `pendingIssuance` is for a colleague
+        /// that is running and still on the old revision).
+        static var pendingIssuanceInactive: String {
+            t("Issued at next start", "下次启动时下发")
+        }
         static var pendingIssuanceHelp: String {
             t(
                 "This revision takes effect at the next startup, resume, or compact.",
@@ -258,6 +265,7 @@ enum S {
 
     enum Detail {
         static var refresh: String { t("Refresh", "刷新") }
+        static var more: String { t("More", "更多") }
         static var prepareWorkspace: String { t("Prepare Workspace", "准备工作区") }
         static var resume: String { t("Resume", "恢复") }
         static var startAll: String { t("Start All", "全部启动") }
@@ -446,8 +454,27 @@ enum S {
         static var add: String { t("Add", "添加") }
         static var emptyHint: String {
             t(
-                "No AI colleagues yet. Add one above to get started.",
-                "房间里还没有 AI 同事。在上面添加一位即可开工。"
+                "No AI colleagues yet. Add one below, then Start All — each works in its own terminal window.",
+                "房间里还没有 AI 同事。在下面添加一位，然后「全部启动」，他们就会在各自的终端窗口里开工。"
+            )
+        }
+        static var noneYet: String { t("No colleagues yet", "还没有同事") }
+        static func attentionCount(_ count: Int) -> String {
+            t("\(count) need\(count == 1 ? "s" : "") attention", "\(count) 位需要处理")
+        }
+        /// The team row's situation line (v2): still only sender / receiver /
+        /// kind / state off a real DeliveryRecord — the kind is the Host's
+        /// own message_kind token rendered as a noun, never message content.
+        static func situationSent(_ receiverID: String, _ kindNoun: String, _ stateLabel: String) -> String {
+            t(
+                "Sent \(receiverID) a \(kindNoun) · \(stateLabel)",
+                "向 \(receiverID) 发出\(kindNoun) · \(stateLabel)"
+            )
+        }
+        static func situationReceived(_ senderID: String, _ kindNoun: String, _ stateLabel: String) -> String {
+            t(
+                "Received a \(kindNoun) from \(senderID) · \(stateLabel)",
+                "收到 \(senderID) 的\(kindNoun) · \(stateLabel)"
             )
         }
         static var start: String { t("Start", "启动") }
@@ -457,21 +484,6 @@ enum S {
         static var recreateHandoff: String { t("Recreate + Handoff", "重建并交接") }
         static var replaceWith: String { t("Replace with", "替换为") }
         static var repairRequired: String { t("repair required", "需要修复") }
-        /// Honest recent-activity line (review 20260903-194506-9xgiml P1):
-        /// only sender/receiver/state from a real delivery, never message
-        /// content the client does not have.
-        static func recentActivitySent(_ receiverID: String, _ stateLabel: String) -> String {
-            t(
-                "Recently: Message to \(receiverID) · \(stateLabel)",
-                "最近活动：发往 \(receiverID) 的消息 · \(stateLabel)"
-            )
-        }
-        static func recentActivityReceived(_ senderID: String, _ stateLabel: String) -> String {
-            t(
-                "Recently: Message from \(senderID) · \(stateLabel)",
-                "最近活动：来自 \(senderID) 的消息 · \(stateLabel)"
-            )
-        }
         static func runningCount(_ count: Int) -> String {
             t("\(count) running", "\(count) 位工作中")
         }
@@ -616,6 +628,44 @@ enum S {
         static var sectionTitle: String { t("Deliveries", "消息投递") }
         static var rawActivity: String { t("Raw activity", "原始活动") }
         static var empty: String { t("No deliveries recorded yet.", "还没有消息记录。") }
+        /// v2 workbench: the delivery stream is the room's main content, not
+        /// an evidence tab — this is its List section title.
+        static var activityTitle: String { t("Collaboration Activity", "协作动态") }
+        static func recentCount(_ shown: Int, _ total: Int) -> String {
+            t("latest \(shown) of \(total)", "最近 \(shown) 条 · 共 \(total) 条")
+        }
+        static var activityEmptyTitle: String {
+            t(
+                "Handoffs, questions, reviews and done notices between colleagues appear here.",
+                "同事之间的交接、提问、审核和完成通知会显示在这里。"
+            )
+        }
+        static var activityEmptyBody: String {
+            t(
+                "This app does not assign the work for you — once colleagues are running, focus their terminal windows and tell them directly. Every delivery they exchange shows up in this list.",
+                "这个 App 不替你布置任务——同事就位后，聚焦他们的终端窗口直接说；他们互发的每一条投递都会出现在这个列表里。"
+            )
+        }
+        /// The Host's `message_kind` token as a noun. Only the token is
+        /// interpreted — the client never sees message content. Unknown kinds
+        /// show their raw token minus the `collaboration.` prefix.
+        static func kindNoun(_ kind: String) -> String {
+            switch kind {
+            case "collaboration.review-request": return t("review request", "审核请求")
+            case "collaboration.review-response": return t("review response", "审核回复")
+            case "collaboration.request": return t("request", "请求")
+            case "collaboration.response": return t("response", "回复")
+            case "collaboration.question": return t("question", "提问")
+            case "collaboration.pushback": return t("pushback", "回推")
+            case "collaboration.notice": return t("notice", "通知")
+            case "collaboration.done": return t("done notice", "完成通知")
+            case "collaboration.message": return t("message", "消息")
+            default:
+                let trimmed = kind.hasPrefix("collaboration.")
+                    ? String(kind.dropFirst("collaboration.".count)) : kind
+                return trimmed
+            }
+        }
         static func lastEvent(_ event: String, _ sequence: Int) -> String {
             t("Last: \(event) · seq \(sequence)", "最近事件：\(event) · 序号 \(sequence)")
         }
@@ -684,7 +734,6 @@ enum S {
     }
 
     enum CollaborationHealth {
-        static var sectionTitle: String { t("Collaboration Health", "协作健康") }
         static var loading: String { t("Loading health data…", "正在加载健康数据…") }
         static var teamReady: String { t("Team ready", "团队就绪") }
         static var requestsClosed: String { t("Requests closed", "请求闭环") }
@@ -1490,7 +1539,9 @@ enum S {
                 "都在工作中——聚焦同事窗口，直接布置任务。"
             )
         }
-        static var focusAction: String { t("Focus Colleague Window", "聚焦同事窗口") }
+        /// Honest about the Host's semantics: `scenario.focus` focuses every
+        /// interactive colleague's window, not one.
+        static var focusAction: String { t("Focus All Windows", "聚焦所有窗口") }
 
         static var checkingWorkspace: String {
             t("Checking the workspace", "正在检查工作区")
@@ -1655,7 +1706,6 @@ enum S {
     // MARK: Room detail sections
 
     enum Sections {
-        static var activity: String { t("Activity", "最近活动") }
         static var health: String { t("Health", "健康") }
         static var resources: String { t("Resources", "资源") }
         /// Phase 1 redesign: the collapsed drawer holding Preflight, Window
@@ -1665,6 +1715,12 @@ enum S {
         static var evidenceAndDiagnostics: String {
             t("Evidence & Diagnostics", "证据与诊断")
         }
+        static var inspectorToggleHelp: String {
+            t("Show or hide Evidence & Diagnostics", "显示或隐藏证据与诊断")
+        }
+        /// The workbench's secondary column (v2): lifecycle stage, the four
+        /// collaboration-health facts, and the needs-attention list.
+        static var progress: String { t("Progress", "协作进度") }
         static var noResources: String { t("Nothing is held.", "无占用。") }
         static func healthNeedsRepair(_ stateLabel: String) -> String {
             t(

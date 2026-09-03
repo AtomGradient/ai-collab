@@ -48,6 +48,11 @@ struct AICollabApp: App {
                 .tint(.brandAccent)
         }
         .windowStyle(.titleBar)
+        // First-launch size, not a minimum: three columns plus a 300pt
+        // progress column need more than the 1100pt floor to read as the
+        // two-column workbench; a window this size the user later resizes is
+        // remembered by the frame autosave as usual.
+        .defaultSize(width: 1440, height: 900)
         .commands {
             CommandGroup(replacing: .newItem) {}
         }

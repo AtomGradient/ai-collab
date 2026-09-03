@@ -110,3 +110,90 @@ extension ParticipantRecord {
         }
     }
 }
+
+extension DeliveryRecord {
+    /// The approved Delivery row of the entity-aware table (claude reply
+    /// 20260903-182112-nymtlc): queued / pending / delivery_attempted are
+    /// in flight (`working`); delivered / consumed are the two real positive
+    /// outcomes (`success`); recipient_deleted, or any delivery carrying a
+    /// `degraded_reason`, needs a person (`attention`). A degraded reason
+    /// wins over the state token because a delivered-then-degraded record
+    /// is not a success story. Unknown tokens fail closed to `attention`.
+    var presentationClass: PresentationClass {
+        if degradedReason != nil { return .attention }
+        switch state {
+        case "queued", "pending", "delivery_attempted":
+            return .working
+        case "delivered", "consumed":
+            return .success
+        case "recipient_deleted":
+            return .attention
+        default:
+            return .attention
+        }
+    }
+}
+
+extension PresentationClass {
+    /// Preflight overall status and per-check status share one vocabulary
+    /// (`ScenarioPreflightRecord.status`: ready | blocked;
+    /// `PreflightCheckRecord.status`: ready | blocked | not_required).
+    static func preflight(_ status: String) -> PresentationClass {
+        switch status {
+        case "ready": .success
+        case "blocked": .attention
+        case "not_required": .inactive
+        default: .attention
+        }
+    }
+
+    /// `PreflightPermissionRecord.status`: granted | denied | not_determined
+    /// | restricted | unavailable | unknown. Permission rows are the one
+    /// place the product really is waiting on the user's decision, so
+    /// `not_determined` is the single legitimate `waiting` (the nymtlc
+    /// table's only waiting entry). unavailable/unknown mean the probe
+    /// could not answer — that needs a person, so they fail closed.
+    static func permission(_ status: String) -> PresentationClass {
+        switch status {
+        case "granted": .success
+        case "not_determined": .waiting
+        case "denied", "restricted": .failed
+        default: .attention
+        }
+    }
+
+    /// `PresentationTopologyRecord.health`: ready | degraded | not_running |
+    /// not_required. `ready` is an operating state (a live window), so it is
+    /// `working` exactly like a ready Participant — never `success`.
+    static func topologyHealth(_ health: String) -> PresentationClass {
+        switch health {
+        case "ready": .working
+        case "degraded": .attention
+        case "not_running", "not_required": .inactive
+        default: .attention
+        }
+    }
+
+    /// `ResourceLeaseRecord.status`: active | stale | released. A released
+    /// lease is over, not a success — `inactive`, matching how a closed
+    /// Scenario reads.
+    static func resourceLease(_ status: String) -> PresentationClass {
+        switch status {
+        case "active": .working
+        case "stale": .attention
+        case "released": .inactive
+        default: .attention
+        }
+    }
+
+    /// Policy status: current is settled, re-plan required needs the user.
+    static func policy(requiresReplan: Bool) -> PresentationClass {
+        requiresReplan ? .attention : .success
+    }
+
+    /// A policy plan preview: applicable is the positive outcome; blocked
+    /// needs the user to resolve the listed blockers first.
+    static func policyPlan(canApply: Bool) -> PresentationClass {
+        canApply ? .success : .attention
+    }
+}
