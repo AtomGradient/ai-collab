@@ -1423,6 +1423,8 @@ def _record_vendor_session_binding(
     launch_spec: Mapping[str, Any],
     provider: str,
     session_id: str,
+    *,
+    allow_rebind: bool = False,
 ) -> None:
     continuity_binding_ref = launch_spec.get("continuity_binding_ref")
     if not isinstance(continuity_binding_ref, str) or not continuity_binding_ref:
@@ -1434,9 +1436,9 @@ def _record_vendor_session_binding(
         "vendor_session_id": session_id,
     }
     existing = _stored_vendor_binding(private_root, launch_spec, provider)
-    if existing is not None and existing != binding:
+    if existing is not None and existing != binding and not allow_rebind:
         raise DriverError("vendor session binding differs")
-    if existing is None:
+    if existing != binding:
         _write_private(_vendor_binding_path(private_root), binding)
 
 
@@ -1569,11 +1571,26 @@ def _verify_vendor_session(
     expected_sources = (
         {"resume", "compact"} if resume_requested else {"startup", "compact"}
     )
+    expected_identity_differs = False
+    if expected_session_id is not None:
+        try:
+            expected_identity_differs = (
+                normalized_session_id != str(uuid.UUID(expected_session_id))
+            )
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise DriverError("expected vendor session identity is invalid") from exc
+    proven_in_tui_rebind = (
+        expected_identity_differs
+        and proof.get("source") in {"resume", "compact"}
+        and _vendor_session_activity_matches(
+            private_root, provider, normalized_session_id
+        )
+    )
     if (
         set(proof) != {"schema_version", "provider", "session_id", "source"}
         or proof["provider"] != provider
         or proof["source"] not in expected_sources
-        or (expected_session_id is not None and session_id != expected_session_id)
+        or (expected_identity_differs and not proven_in_tui_rebind)
     ):
         raise DriverError("vendor session lifecycle proof differs")
     source = proof["source"]
@@ -1587,7 +1604,11 @@ def _verify_vendor_session(
     if not materialized:
         return None
     _record_vendor_session_binding(
-        private_root, launch_spec, provider, normalized_session_id
+        private_root,
+        launch_spec,
+        provider,
+        normalized_session_id,
+        allow_rebind=proven_in_tui_rebind,
     )
     return hashlib.sha256(normalized_session_id.encode("utf-8")).hexdigest()
 
@@ -1619,6 +1640,12 @@ def _refresh_vendor_session_binding(
         resume_requested,
     )
     if identity_digest is not None:
+        binding = _stored_vendor_binding(private_root, launch_spec, provider)
+        if binding is None:  # pragma: no cover - verification records it
+            raise DriverError("vendor session binding is unavailable")
+        rebound = binding["vendor_session_id"] != expected_session_id
+        state["expected_vendor_session_id"] = binding["vendor_session_id"]
+        state["vendor_resume_requested"] = resume_requested or rebound
         state["vendor_session_identity_sha256"] = identity_digest
         _write_private(_state_path(private_root), state)
     return identity_digest

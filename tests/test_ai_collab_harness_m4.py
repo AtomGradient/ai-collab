@@ -3319,6 +3319,115 @@ def test_vendor_session_hook_captures_and_reuses_exact_identity(
     ) == hashlib.sha256(session_id.encode()).hexdigest()
 
 
+def test_claude_adopts_a_prompt_proven_session_selected_inside_the_owned_tui(
+    tmp_path: Path,
+) -> None:
+    private_root = tmp_path / "participant"
+    private_root.mkdir()
+    launch_spec = {
+        "continuity_binding_ref": "vendor-session-slot:primary",
+    }
+    generated_session_id = "11111111-1111-4111-8111-111111111111"
+    selected_session_id = "22222222-2222-4222-8222-222222222222"
+    participant_driver._write_private(  # noqa: SLF001
+        participant_driver._vendor_proof_path(private_root),  # noqa: SLF001
+        {
+            "schema_version": 1,
+            "provider": "claude",
+            "session_id": selected_session_id,
+            "source": "compact",
+        },
+    )
+    participant_driver._write_private(  # noqa: SLF001
+        participant_driver._vendor_activity_path(private_root),  # noqa: SLF001
+        {
+            "schema_version": 1,
+            "provider": "claude",
+            "session_id": selected_session_id,
+            "source": "UserPromptSubmit",
+        },
+    )
+    state = {
+        "vendor_provider": "claude",
+        "expected_vendor_session_id": generated_session_id,
+        "vendor_resume_requested": False,
+        "vendor_session_identity_sha256": None,
+    }
+
+    identity = participant_driver._refresh_vendor_session_binding(  # noqa: SLF001
+        private_root, launch_spec, state
+    )
+
+    assert identity == hashlib.sha256(selected_session_id.encode()).hexdigest()
+    assert state["expected_vendor_session_id"] == selected_session_id
+    assert state["vendor_resume_requested"] is True
+    binding = participant_driver._stored_vendor_binding(  # noqa: SLF001
+        private_root, launch_spec, "claude"
+    )
+    assert binding is not None
+    assert binding["vendor_session_id"] == selected_session_id
+
+
+@pytest.mark.parametrize(
+    "activity_session_id", [None, "11111111-1111-4111-8111-111111111111"]
+)
+def test_claude_refuses_unproven_session_selected_inside_the_owned_tui(
+    tmp_path: Path,
+    activity_session_id: str | None,
+) -> None:
+    private_root = tmp_path / "participant"
+    private_root.mkdir()
+    launch_spec = {
+        "continuity_binding_ref": "vendor-session-slot:primary",
+    }
+    generated_session_id = "11111111-1111-4111-8111-111111111111"
+    selected_session_id = "22222222-2222-4222-8222-222222222222"
+    participant_driver._record_vendor_session_binding(  # noqa: SLF001
+        private_root, launch_spec, "claude", generated_session_id
+    )
+    participant_driver._write_private(  # noqa: SLF001
+        participant_driver._vendor_proof_path(private_root),  # noqa: SLF001
+        {
+            "schema_version": 1,
+            "provider": "claude",
+            "session_id": selected_session_id,
+            "source": "compact",
+        },
+    )
+    if activity_session_id is not None:
+        participant_driver._write_private(  # noqa: SLF001
+            participant_driver._vendor_activity_path(private_root),  # noqa: SLF001
+            {
+                "schema_version": 1,
+                "provider": "claude",
+                "session_id": activity_session_id,
+                "source": "UserPromptSubmit",
+            },
+        )
+    state = {
+        "vendor_provider": "claude",
+        "expected_vendor_session_id": generated_session_id,
+        "vendor_resume_requested": False,
+        "vendor_session_identity_sha256": None,
+    }
+
+    with pytest.raises(
+        participant_driver.DriverError,
+        match="vendor session lifecycle proof differs",
+    ):
+        participant_driver._refresh_vendor_session_binding(  # noqa: SLF001
+            private_root, launch_spec, state
+        )
+
+    binding = participant_driver._stored_vendor_binding(  # noqa: SLF001
+        private_root, launch_spec, "claude"
+    )
+    assert binding is not None
+    assert binding["vendor_session_id"] == generated_session_id
+    assert state["expected_vendor_session_id"] == generated_session_id
+    assert state["vendor_session_identity_sha256"] is None
+
+
 def test_workspace_path_prefers_the_declared_project_directory(
     tmp_path: Path,
 ) -> None:
