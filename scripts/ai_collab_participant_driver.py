@@ -3853,7 +3853,7 @@ async def _safe_tui_close_connected(
 
 def _close_binding(
     payload: Mapping[str, Any]
-) -> tuple[Path, dict[str, Any], dict[str, Any]]:
+) -> tuple[Path, dict[str, Any], dict[str, Any], bool]:
     required = {
         "context",
         "launch_spec",
@@ -3904,12 +3904,24 @@ def _close_binding(
         )
     ):
         raise DriverError("close binding differs")
-    _validate_process_state(state)
-    return private_root, state, _runtime_profile(payload["launch_spec"])
+    process_absent = _owned_process_is_absent(state)
+    if not process_absent:
+        try:
+            _validate_process_state(state)
+        except DriverError as exc:
+            if str(exc) != "owned process is absent":
+                raise
+            process_absent = True
+    return (
+        private_root,
+        state,
+        _runtime_profile(payload["launch_spec"]),
+        process_absent,
+    )
 
 
 def close(payload: Mapping[str, Any]) -> dict[str, Any]:
-    private_root, state, profile = _close_binding(payload)
+    private_root, state, profile, process_absent = _close_binding(payload)
     try:
         vendor_session_identity_sha256 = _refresh_vendor_session_binding(
             private_root, payload["launch_spec"], state
@@ -3921,7 +3933,13 @@ def close(payload: Mapping[str, Any]) -> dict[str, Any]:
     drain_requested = False
     progress_count = 0
     closed = False
-    if state["interaction_mode"] == "tui":
+    if process_absent:
+        # A vendor-side /exit can remove both the process and its iTerm window
+        # before the Harness receives a Scenario close request. The exact
+        # published binding still proves which now-absent process was ours.
+        classification = "idle"
+        closed = True
+    elif state["interaction_mode"] == "tui":
         module = _ensure_iterm_module(private_root)
         classification, drain_requested, progress_count, closed = asyncio.run(
             _safe_tui_close_async(module, state, drain_timeout_ms)
@@ -3984,6 +4002,63 @@ def stop(payload: Mapping[str, Any]) -> dict[str, Any]:
         return {
             "stopped": True,
             "owned_resource_evidence_sha256": state["stop_evidence_sha256"],
+            "vendor_session_identity_sha256": state.get(
+                "vendor_session_identity_sha256"
+            ),
+        }
+    context = payload["context"]
+    runtime_ack = payload["runtime_ready_ack"]
+    presentation_ack = payload["presentation_create_ack"]
+    runtime_binding = (
+        runtime_ack.get("binding") if isinstance(runtime_ack, dict) else None
+    )
+    presentation_binding = (
+        presentation_ack.get("binding")
+        if isinstance(presentation_ack, dict)
+        else None
+    )
+    if (
+        not isinstance(context, dict)
+        or any(
+            state.get(field) != context.get(field)
+            for field in (
+                "scenario_id",
+                "participant_id",
+                "participant_generation",
+            )
+        )
+        or not isinstance(runtime_binding, dict)
+        or runtime_binding.get("runtime_binding_id")
+        != state.get("runtime_binding_id")
+        or (
+            state.get("presentation_instance_id") is None
+            and presentation_ack is not None
+        )
+        or (
+            state.get("presentation_instance_id") is not None
+            and (
+                not isinstance(presentation_binding, dict)
+                or presentation_binding.get("presentation_instance_id")
+                != state.get("presentation_instance_id")
+            )
+        )
+    ):
+        raise DriverError("stop binding differs")
+    if _owned_process_is_absent(state):
+        evidence = digest(
+            {
+                "runtime_binding_id": state["runtime_binding_id"],
+                "presentation_instance_id": state["presentation_instance_id"],
+                "process_absent": True,
+                "termination_mode": "graceful-stop-process-absent",
+            }
+        )
+        state["status"] = "stopped"
+        state["stop_evidence_sha256"] = evidence
+        _write_private(state_path, state)
+        return {
+            "stopped": True,
+            "owned_resource_evidence_sha256": evidence,
             "vendor_session_identity_sha256": state.get(
                 "vendor_session_identity_sha256"
             ),

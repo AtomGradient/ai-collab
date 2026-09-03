@@ -2189,6 +2189,239 @@ def test_repair_gracefully_stops_only_exact_published_binding(tmp_path: Path) ->
     assert participant_driver._state_path(private_root).is_file()  # noqa: SLF001
 
 
+def _ready_published_binding(
+    private_root: Path,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    payload = _repair_payload(private_root)
+    payload["runtime_ready_ack"] = {
+        "binding": {"runtime_binding_id": "runtime-binding-repair"}
+    }
+    payload["presentation_create_ack"] = {
+        "binding": {"presentation_instance_id": "presentation-repair"}
+    }
+    state = {
+        "schema_version": 1,
+        "status": "ready",
+        "scenario_id": payload["context"]["scenario_id"],
+        "participant_id": payload["context"]["participant_id"],
+        "participant_generation": payload["context"]["participant_generation"],
+        "runtime_binding_id": "runtime-binding-repair",
+        "presentation_instance_id": "presentation-repair",
+        "runtime_profile_ref": "runtime-profile.inert",
+        "interaction_mode": "tui",
+        "pid": 43210,
+    }
+    participant_driver._write_private(  # noqa: SLF001
+        participant_driver._state_path(private_root), state  # noqa: SLF001
+    )
+    return payload, state
+
+
+def test_repair_accepts_exact_published_binding_after_vendor_exit(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    private_root = tmp_path / "participant-private"
+    private_root.mkdir(mode=0o700)
+    payload, _state = _ready_published_binding(private_root)
+    monkeypatch.setattr(
+        participant_driver, "_owned_process_is_absent", lambda state: True
+    )
+
+    result = participant_driver.repair(payload)
+
+    assert result["recovered"] is True
+    assert result["recovery_class"] == "exact_binding_stopped"
+    stopped = json.loads(
+        participant_driver._state_path(private_root).read_text(encoding="utf-8")  # noqa: SLF001
+    )
+    assert stopped["status"] == "stopped"
+    assert len(stopped["stop_evidence_sha256"]) == 64
+
+
+def test_close_accepts_exact_published_binding_after_vendor_exit(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    private_root = tmp_path / "participant-private"
+    private_root.mkdir(mode=0o700)
+    payload, _state = _ready_published_binding(private_root)
+    payload.pop("next_participant_generation")
+    payload.pop("degraded")
+    payload["drain_timeout_ms"] = 100
+    monkeypatch.setattr(
+        participant_driver, "_owned_process_is_absent", lambda state: True
+    )
+    monkeypatch.setattr(
+        participant_driver,
+        "_ensure_iterm_module",
+        lambda root: (_ for _ in ()).throw(AssertionError("iTerm was consulted")),
+    )
+
+    result = participant_driver.close(payload)
+
+    assert result["classification"] == "idle"
+    assert result["closed"] is True
+    assert result["action_outcome_known"] is True
+    assert result["drain_requested"] is False
+    assert result["progress_event_count"] == 0
+    stopped = json.loads(
+        participant_driver._state_path(private_root).read_text(encoding="utf-8")  # noqa: SLF001
+    )
+    assert stopped["status"] == "stopped"
+
+
+def test_close_rejects_reused_pid_after_vendor_exit(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    private_root = tmp_path / "participant-private"
+    private_root.mkdir(mode=0o700)
+    payload, _state = _ready_published_binding(private_root)
+    payload.pop("next_participant_generation")
+    payload.pop("degraded")
+    payload["drain_timeout_ms"] = 100
+    monkeypatch.setattr(
+        participant_driver, "_owned_process_is_absent", lambda state: False
+    )
+    monkeypatch.setattr(
+        participant_driver,
+        "_validate_process_state",
+        lambda state: (_ for _ in ()).throw(
+            participant_driver.DriverError("process identity differs")
+        ),
+    )
+
+    with pytest.raises(participant_driver.DriverError, match="process identity differs"):
+        participant_driver.close(payload)
+
+
+def test_close_rejects_mismatched_binding_when_vendor_process_is_absent(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    private_root = tmp_path / "participant-private"
+    private_root.mkdir(mode=0o700)
+    payload, _state = _ready_published_binding(private_root)
+    payload.pop("next_participant_generation")
+    payload.pop("degraded")
+    payload["drain_timeout_ms"] = 100
+    payload["runtime_ready_ack"]["binding"]["runtime_binding_id"] = "other"
+    monkeypatch.setattr(
+        participant_driver, "_owned_process_is_absent", lambda state: True
+    )
+
+    with pytest.raises(participant_driver.DriverError, match="close binding differs"):
+        participant_driver.close(payload)
+
+
+def test_process_permission_ambiguity_is_not_absence(monkeypatch: Any) -> None:
+    def permission_denied(pid: int, signal_number: int) -> None:
+        raise PermissionError
+
+    monkeypatch.setattr(participant_driver.os, "kill", permission_denied)
+
+    absent = participant_driver._owned_process_is_absent(  # noqa: SLF001
+        {"pid": 43210}
+    )
+    assert absent is False
+
+
+def test_stop_closes_a_live_exact_published_binding(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    private_root = tmp_path / "participant-private"
+    private_root.mkdir(mode=0o700)
+    payload, _state = _ready_published_binding(private_root)
+    payload.pop("next_participant_generation")
+    payload.pop("degraded")
+    validated: list[int] = []
+    closed: list[int] = []
+
+    async def close_iterm(module: Any, current: dict[str, Any]) -> int:
+        closed.append(current["pid"])
+        return 43211
+
+    monkeypatch.setattr(
+        participant_driver, "_owned_process_is_absent", lambda state: False
+    )
+    monkeypatch.setattr(
+        participant_driver,
+        "_validate_process_state",
+        lambda state: validated.append(state["pid"]),
+    )
+    monkeypatch.setattr(
+        participant_driver,
+        "_ensure_iterm_module",
+        lambda root: object(),
+    )
+    monkeypatch.setattr(participant_driver, "_iterm_close_async", close_iterm)
+    monkeypatch.setattr(
+        participant_driver, "_wait_process_absent", lambda pid: True
+    )
+    monkeypatch.setattr(
+        participant_driver,
+        "_wait_process_absent_bounded",
+        lambda pid, timeout: True,
+    )
+
+    result = participant_driver.stop(payload)
+
+    assert result["stopped"] is True
+    assert validated == [43210]
+    assert closed == [43210]
+    stopped = json.loads(
+        participant_driver._state_path(private_root).read_text(encoding="utf-8")  # noqa: SLF001
+    )
+    assert stopped["status"] == "stopped"
+
+
+def test_stop_rejects_mismatched_binding_when_vendor_process_is_absent(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    private_root = tmp_path / "participant-private"
+    private_root.mkdir(mode=0o700)
+    payload, _state = _ready_published_binding(private_root)
+    payload.pop("next_participant_generation")
+    payload.pop("degraded")
+    payload["runtime_ready_ack"]["binding"]["runtime_binding_id"] = "other"
+    monkeypatch.setattr(
+        participant_driver, "_owned_process_is_absent", lambda state: True
+    )
+
+    with pytest.raises(participant_driver.DriverError, match="stop binding differs"):
+        participant_driver.stop(payload)
+
+
+def test_stop_absent_evidence_claims_only_process_absence(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    private_root = tmp_path / "participant-private"
+    private_root.mkdir(mode=0o700)
+    payload, _state = _ready_published_binding(private_root)
+    payload.pop("next_participant_generation")
+    payload.pop("degraded")
+    monkeypatch.setattr(
+        participant_driver, "_owned_process_is_absent", lambda state: True
+    )
+    original_digest = participant_driver.digest
+    evidence_payloads: list[dict[str, Any]] = []
+
+    def capture_digest(value: Any) -> str:
+        if isinstance(value, dict) and value.get("termination_mode"):
+            evidence_payloads.append(value)
+        return original_digest(value)
+
+    monkeypatch.setattr(participant_driver, "digest", capture_digest)
+
+    participant_driver.stop(payload)
+
+    assert evidence_payloads == [
+        {
+            "runtime_binding_id": "runtime-binding-repair",
+            "presentation_instance_id": "presentation-repair",
+            "process_absent": True,
+            "termination_mode": "graceful-stop-process-absent",
+        }
+    ]
+
+
 def test_repair_accepts_exact_durable_cleanup_evidence_without_public_binding(
     tmp_path: Path,
 ) -> None:
