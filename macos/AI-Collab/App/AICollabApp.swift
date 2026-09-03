@@ -45,6 +45,7 @@ struct AICollabApp: App {
                 // Rebuild every visible string the moment the language
                 // preference changes — switching is instant, no relaunch.
                 .id(language.effectiveLanguageID)
+                .tint(.brandAccent)
         }
         .windowStyle(.titleBar)
         .commands {

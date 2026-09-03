@@ -551,8 +551,12 @@ def test_degraded_room_shows_a_visible_repair_entry() -> None:
         "repair must not be duplicated back into the Health card"
     )
     assert "Button(S.Preflight.runButton)" in card
-    detail = content.split("private var scenarioDetail", 1)[1].split("private ", 1)[0]
-    assert "healthCard(scenario)" in detail
+    # healthCard is called from workbenchBody (review 20260903-194506-9xgiml
+    # P0's two-column workbench), reached from scenarioDetail either way.
+    workbench = content.split("private func workbenchBody", 1)[1].split(
+        "private var emptyDetailCanvas", 1
+    )[0]
+    assert "healthCard(scenario)" in workbench
     assert "Label(S.Sections.health" in card
     assert "evidenceNavRow(.deliveries, S.Deliveries.rawActivity" in content
 
@@ -595,9 +599,148 @@ def test_evidence_nav_is_a_fixed_column_not_a_scrolling_strip() -> None:
         "policy",
         "resources",
         "inspector",
+        "analytics",
         "highRisk",
     ):
         assert f"evidenceNavRow(.{tab}" in nav
+
+
+def test_workbench_is_two_column_team_primary_with_narrow_fallback() -> None:
+    """codex review 20260903-194506-9xgiml P0: the real first viewport was
+    still the old flat vertical stack (Health tiles, Needs Attention, two
+    large charts, then Team almost below the fold) instead of the agreed
+    58%/42% Team-primary / Health+Attention-secondary two-column workbench.
+    `ViewThatFits` — not an unconstrained `GeometryReader`, which fights a
+    surrounding `ScrollView` for height — picks whichever column
+    arrangement actually fits; its second child is the narrow fallback,
+    Team still first in both."""
+    content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
+    workbench = content.split("private func workbenchBody", 1)[1].split(
+        "private var emptyDetailCanvas", 1
+    )[0]
+    assert "ViewThatFits(in: .horizontal)" in workbench
+    assert "GeometryReader" not in workbench
+    # Two occurrences of each: once in the two-column arrangement, once in
+    # the narrow stacked fallback — both must lead with Team.
+    assert workbench.count("healthCard(scenario)") == 2
+    assert workbench.count("participantsSection") == 2
+    assert workbench.count("collaborationHealthSection") == 2
+    assert workbench.count("needsAttentionSection") == 2
+    two_col, narrow = workbench.split("participantsSection", 2)[1:]
+    assert "collaborationHealthSection" not in two_col.split("VStack", 1)[0]
+    # In the narrow fallback, participantsSection precedes the analytics
+    # tiles — Team stays first even when stacked.
+    assert "collaborationHealthSection" in narrow
+
+
+def test_mission_bar_is_sticky_outside_the_scroll_view() -> None:
+    """codex review 20260903-194506-9xgiml P1: MissionBar was still the
+    ScrollView's first child, so it scrolled away with everything else
+    instead of staying put. It must be a sibling above the ScrollView, not
+    inside it, and must not be styled as another rounded card now that it is
+    a persistent fixed region."""
+    content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
+    detail = content.split("private var scenarioDetail", 1)[1].split(
+        "private func workbenchBody", 1
+    )[0]
+    mission_bar_index = detail.index("missionBar(scenario)")
+    scroll_view_index = detail.index("ScrollView")
+    assert mission_bar_index < scroll_view_index, (
+        "missionBar must appear before the ScrollView, not inside it"
+    )
+    bar = content.split("private func missionBar", 1)[1].split("private func", 1)[0]
+    assert "RoundedRectangle" not in bar
+    assert ".background(.bar)" in bar
+
+
+def test_empty_project_shows_first_use_canvas_not_the_generic_placeholder() -> None:
+    """codex review 20260903-194506-9xgiml P1: a registered project with zero
+    Task Rooms rendered the same generic "select a room" placeholder as
+    "rooms exist, none selected" — indistinguishable states with different
+    next steps. A project with no rooms yet must get its own canvas with the
+    create composer embedded directly, reusing the same fields and
+    `createScenario()` call the room board's own composer already uses."""
+    content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
+    canvas = content.split("private var emptyDetailCanvas", 1)[1].split(
+        "\n    private ", 1
+    )[0]
+    assert "model.selectedProject != nil, model.scenarios.isEmpty" in canvas
+    assert "$model.newScenarioObjective" in canvas
+    assert "$model.newScenarioID" in canvas
+    assert "await model.createScenario()" in canvas
+    assert "ContentUnavailableView(" in canvas, "the generic placeholder stays for the other case"
+
+
+def test_brand_accent_is_applied_at_the_window_root_not_system_blue() -> None:
+    """codex review 20260903-194506-9xgiml P1 visual: the primary action and
+    selected-project material were still plain system blue — the agreed
+    stone/petrol accent was designed but never actually wired up."""
+    app = (APP_ROOT / "AICollabApp.swift").read_text(encoding="utf-8")
+    content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
+    assert ".tint(.brandAccent)" in app
+    assert "static let brandAccent = instrument(" in content
+
+
+def test_delivery_distribution_charts_moved_into_the_evidence_drawer() -> None:
+    """codex review 20260903-194506-9xgiml P1 visual: two large distribution
+    charts used to sit at the top of the first viewport, unconditionally,
+    ahead of the team roster. They belong in Evidence & Diagnostics as their
+    own tab, not the primary workbench."""
+    content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
+    workbench = content.split("private func workbenchBody", 1)[1].split(
+        "private var emptyDetailCanvas", 1
+    )[0]
+    assert "deliveryDistributionSection" not in workbench
+    assert "case .analytics: deliveryDistributionSection" in content
+
+
+def test_needs_attention_header_is_compact_and_neutral_only_when_clear() -> None:
+    """codex review 20260903-194506-9xgiml P1: a healthy room still opened
+    with a prominent orange/headline "Needs attention" + alert-triangle
+    label directly above its own green all-clear line — the icon and the
+    words directly under it disagreed. The alert-styled headline must only
+    render once there is something to actually flag."""
+    content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
+    section = content.split("private var needsAttentionSection", 1)[1].split(
+        "\n    private ", 1
+    )[0]
+    assert "let isClear = model.deliveryAttentionTotals?.isClear ?? false" in section
+    # The alert headline is not unconditional — it lives in an `else` branch
+    # keyed on `isClear`, with the neutral all-clear line in the `if`.
+    assert "if isClear {" in section
+    clear_branch, rest = section.split("if isClear {", 1)[1].split("} else {", 1)
+    assert "Label(S.NeedsAttention.allClear" in clear_branch
+    assert ".foregroundStyle(.secondary)" in clear_branch
+    assert "Label(S.NeedsAttention.sectionTitle" in rest
+    assert ".foregroundStyle(.orange)" in rest
+
+
+def test_participant_activity_line_is_derived_only_from_delivery_metadata() -> None:
+    """codex review 20260903-194506-9xgiml P1: 'Do not invent message
+    semantics; use only observed participant state and delivery metadata as
+    previously agreed.' The projection must read sender/receiver/state off
+    a real DeliveryRecord — never any payload/content field, which
+    DeliveryRecord does not even carry (HarnessModels.swift), so there is
+    nothing to invent from even by accident."""
+    content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
+    models = (APP_ROOT / "HarnessModels.swift").read_text(encoding="utf-8")
+    fn = content.split("private func recentActivityLine", 1)[1].split(
+        "\n    @ViewBuilder", 1
+    )[0]
+    assert "model.deliveries.filter" in fn
+    assert ".sender.participantID" in fn
+    assert ".receiver.participantID" in fn
+    assert "enqueueSequence" in fn
+    for forbidden in ("payload", "content", "message_body", "text"):
+        assert forbidden not in fn.lower()
+    delivery_record = models.split("struct DeliveryRecord", 1)[1].split(
+        "struct ", 1
+    )[0]
+    for forbidden in ("payload", "content", "body"):
+        assert forbidden not in delivery_record.lower()
+    assert "recentActivityLine(for: participant)" in content.split(
+        "private func participantRow", 1
+    )[1].split("private func", 1)[0]
 
 
 def test_destroy_flow_has_one_panel_entry_point_not_a_direct_force_delete() -> None:

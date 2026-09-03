@@ -28,6 +28,18 @@ extension Color {
         )
     }
 
+    /// The product's brand accent — a deliberate stone/petrol green, never
+    /// the system default blue, so the product reads as its own thing
+    /// rather than generic Mac chrome. Applied once via `.tint(_:)` at the
+    /// window root (`AICollabApp.swift`); every `.borderedProminent` button,
+    /// `Toggle`, and default-tinted control inherits it from there. Review
+    /// 20260903-194506-9xgiml: the primary action and selected-row material
+    /// were still plain system blue.
+    static let brandAccent = instrument(
+        light: (0.122, 0.431, 0.388),
+        dark: (0.341, 0.690, 0.635)
+    )
+
     /// Deep petrol: the strongest evidence tier.
     fileprivate static let evidenceStrong = instrument(
         light: (0.165, 0.365, 0.384),
@@ -853,38 +865,108 @@ struct ContentView: View {
 
     // MARK: - Detail: Scenario
 
+    /// review 20260903-194506-9xgiml P0/P1: MissionBar sits outside the
+    /// `ScrollView` so it stays put while everything below scrolls — it was
+    /// still the ScrollView's first child before, so it scrolled away with
+    /// the rest. `workbenchBody` is the actual two-column IA: Team is the
+    /// primary column, Health/Needs Attention the compact secondary one,
+    /// falling back to a single stacked column (Team still first) below the
+    /// width a real two-column layout can hold. Deliveries/Preflight/
+    /// Topology/Policy/Resources/Inspector/Distribution/high-risk stay in
+    /// the collapsed Evidence & Diagnostics drawer, unchanged.
     private var scenarioDetail: some View {
         Group {
             if let scenario = model.selectedScenario {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 16) {
-                        // Phase 1 IA (review 20260903-175908-nyr2wy): mission
-                        // (who/why/next) → health → team → evidence, folded.
-                        // Nothing removed from the pre-redesign order below —
-                        // deliveries/preflight/topology/policy/resources moved
-                        // inside `technicalSection`, now the collapsed
-                        // Evidence & Diagnostics drawer, with their own
-                        // internals untouched.
-                        missionBar(scenario)
-                        healthCard(scenario)
-                        collaborationHealthSection
-                        needsAttentionSection
-                        deliveryDistributionSection
-                        participantsSection
-                        technicalSection(scenario)
+                VStack(alignment: .leading, spacing: 0) {
+                    missionBar(scenario)
+                    Divider()
+                    ScrollView {
+                        workbenchBody(scenario)
+                            .padding(20)
                     }
-                    .padding(20)
-                }
-                .task(id: scenario.id) {
-                    await model.monitorDeliveries(for: scenario.id)
+                    .task(id: scenario.id) {
+                        await model.monitorDeliveries(for: scenario.id)
+                    }
                 }
             } else {
-                ContentUnavailableView(
-                    S.Rooms.selectTitle,
-                    systemImage: "square.stack.3d.up",
-                    description: Text(S.Rooms.selectDescription)
-                )
+                emptyDetailCanvas
             }
+        }
+    }
+
+    /// `ViewThatFits` rather than a `GeometryReader` breakpoint: it sizes to
+    /// whichever child actually fits, so it never fights the surrounding
+    /// `ScrollView` for height the way an unconstrained `GeometryReader`
+    /// would. The left column's `minWidth` is what decides the breakpoint —
+    /// below it, the two-column arrangement no longer fits and this falls
+    /// straight to the stacked one, Team still first.
+    @ViewBuilder
+    private func workbenchBody(_ scenario: ScenarioRecord) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: 20) {
+                    VStack(alignment: .leading, spacing: 16) {
+                        healthCard(scenario)
+                        participantsSection
+                    }
+                    .frame(minWidth: 440, maxWidth: .infinity, alignment: .leading)
+                    VStack(alignment: .leading, spacing: 16) {
+                        collaborationHealthSection
+                        needsAttentionSection
+                    }
+                    .frame(width: 300, alignment: .leading)
+                }
+                VStack(alignment: .leading, spacing: 16) {
+                    healthCard(scenario)
+                    participantsSection
+                    collaborationHealthSection
+                    needsAttentionSection
+                }
+            }
+            technicalSection(scenario)
+        }
+    }
+
+    /// review 20260903-194506-9xgiml P1: a project with no Task Rooms yet
+    /// used to fall to the same generic "select a room" placeholder as
+    /// "you have rooms, pick one" — indistinguishable states with different
+    /// next steps. This is the Artifact's first-use canvas: the create
+    /// composer embedded in the canvas itself, not a modal, using the exact
+    /// same fields and `createScenario()` call the room board's own composer
+    /// already uses.
+    @ViewBuilder
+    private var emptyDetailCanvas: some View {
+        if model.selectedProject != nil, model.scenarios.isEmpty {
+            VStack(alignment: .leading, spacing: 18) {
+                Label(S.Rooms.firstUseTitle, systemImage: "sparkles")
+                    .font(.title2.bold())
+                Text(S.Rooms.firstUseBody)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                VStack(alignment: .leading, spacing: 8) {
+                    TextField(S.Rooms.objectivePlaceholder, text: $model.newScenarioObjective)
+                    TextField(S.Rooms.identityPlaceholder, text: $model.newScenarioID)
+                        .onSubmit {
+                            guard !model.isBusy else { return }
+                            Task { await model.createScenario() }
+                        }
+                    Button(S.Rooms.createButton) { Task { await model.createScenario() } }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(model.isBusy)
+                    validationBanner(for: .scenarioCreate)
+                }
+                .frame(maxWidth: 360, alignment: .leading)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+            .multilineTextAlignment(.leading)
+            .padding(40)
+        } else {
+            ContentUnavailableView(
+                S.Rooms.selectTitle,
+                systemImage: "square.stack.3d.up",
+                description: Text(S.Rooms.selectDescription)
+            )
         }
     }
 
@@ -894,6 +976,13 @@ struct ContentView: View {
     /// its own (no extra background/border): `objectiveSection` already owns
     /// one, and stacking a second around it is exactly the "cards inside
     /// cards" the review flagged elsewhere.
+    /// A quiet persistent surface, not a floating card — review
+    /// 20260903-194506-9xgiml P1 visual: the rounded, inset
+    /// `.background(...opacity(0.04)...)` treatment read as one more oversized
+    /// card, especially now that this sits outside the scrolling content as
+    /// its own fixed region. `.bar` is the same native material the sidebar's
+    /// bottom status row already uses; the `Divider()` `scenarioDetail` draws
+    /// right below this is what actually separates it from the scroll area.
     private func missionBar(_ scenario: ScenarioRecord) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             scenarioHeader(scenario)
@@ -903,8 +992,8 @@ struct ContentView: View {
             Divider()
             objectiveSection(scenario)
         }
-        .padding(14)
-        .background(.secondary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
+        .padding(16)
+        .background(.bar)
     }
 
     private func objectiveSection(_ scenario: ScenarioRecord) -> some View {
@@ -1159,6 +1248,11 @@ struct ContentView: View {
                         label: HarnessViewModel.humanState(participant.observedState)
                     )
                 }
+                if let activity = recentActivityLine(for: participant) {
+                    Text(activity)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 if let runtimeProfileRef = participant.runtimeProfileRef {
                     Text(runtimeProfileRef)
                         .font(.caption)
@@ -1191,6 +1285,27 @@ struct ContentView: View {
             Spacer()
             participantActions(participant)
         }
+    }
+
+    /// Honest "status + recent activity" (review 20260903-194506-9xgiml P1):
+    /// derived only from `model.deliveries` — sender, receiver, and state —
+    /// never from message content, which the client does not have. Picks
+    /// the highest `enqueueSequence` delivery this participant is party to,
+    /// not just whichever happens to sort first in the array, since nothing
+    /// guarantees `model.deliveries`' own ordering.
+    private func recentActivityLine(for participant: ParticipantRecord) -> String? {
+        let related = model.deliveries.filter {
+            $0.sender.participantID == participant.id
+                || $0.receiver.participantID == participant.id
+        }
+        guard let latest = related.max(by: { $0.enqueueSequence < $1.enqueueSequence })
+        else { return nil }
+        if latest.sender.participantID == participant.id {
+            return S.Colleagues.recentActivitySent(latest.receiver.participantID)
+        }
+        return S.Colleagues.recentActivityReceived(
+            latest.sender.participantID, S.Delivery.stateLabel(latest.state)
+        )
     }
 
     @ViewBuilder
@@ -1278,7 +1393,7 @@ struct ContentView: View {
     /// nobody asked for. A single selection replaces all five of the old
     /// per-section `show*` bools.
     private enum EvidenceTab: Hashable {
-        case deliveries, preflight, topology, policy, resources, inspector, highRisk
+        case deliveries, preflight, topology, policy, resources, inspector, highRisk, analytics
     }
     @State private var evidenceTab: EvidenceTab = .deliveries
 
@@ -1609,17 +1724,30 @@ struct ContentView: View {
             .padding(.vertical, 6)
     }
 
+    /// review 20260903-194506-9xgiml P1: the section header used to draw a
+    /// prominent alert triangle unconditionally, so a perfectly healthy room
+    /// still opened with "⚠ Needs attention" directly above a green
+    /// all-clear line — contradictory hierarchy where the icon disagreed
+    /// with the words right under it. Clear now renders as one compact,
+    /// neutral line; the alert-styled headline only appears once there is
+    /// something to actually flag.
     private var needsAttentionSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Label(S.NeedsAttention.sectionTitle, systemImage: "exclamationmark.triangle.fill")
-                .font(.headline)
+        let isClear = model.deliveryAttentionTotals?.isClear ?? false
+        return VStack(alignment: .leading, spacing: 8) {
+            if isClear {
+                Label(S.NeedsAttention.allClear, systemImage: "checkmark.circle.fill")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            } else {
+                Label(S.NeedsAttention.sectionTitle, systemImage: "exclamationmark.triangle.fill")
+                    .font(.headline)
+                    .foregroundStyle(.orange)
+            }
             // The all-clear is a room-wide claim, so it is decided from the
             // collection summary. `model.deliveryAttention` is one bounded
             // page and can only ever supply examples.
-            if let totals = model.deliveryAttentionTotals, totals.isClear {
-                Label(S.NeedsAttention.allClear, systemImage: "checkmark.circle.fill")
-                    .font(.callout)
-                    .foregroundStyle(.green)
+            if isClear {
+                EmptyView()
             } else if let totals = model.deliveryAttentionTotals {
                 // One line per category, never a sum: a delivery whose
                 // repeated last attempt failed is counted in both, and the
@@ -1957,6 +2085,7 @@ struct ContentView: View {
                     case .policy: policySection
                     case .resources: resourcesSection
                     case .inspector: inspectorSection
+                    case .analytics: deliveryDistributionSection
                     case .highRisk: highRiskSection(scenario)
                     }
                 }
@@ -1994,6 +2123,7 @@ struct ContentView: View {
             evidenceNavRow(.policy, S.Policy.sectionTitle, "shared.with.you")
             evidenceNavRow(.resources, S.Sections.resources, "cpu")
             evidenceNavRow(.inspector, S.Inspector.sectionTitle, "terminal")
+            evidenceNavRow(.analytics, S.DeliveryDistribution.tabTitle, "chart.bar")
             evidenceNavRow(.highRisk, S.Risk.sectionTitle, "exclamationmark.triangle", tint: .red)
         }
         .frame(width: 140, alignment: .leading)

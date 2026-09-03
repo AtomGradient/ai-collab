@@ -170,6 +170,19 @@ enum S {
                 "注册项目、创建任务房间，然后和你的 AI 同事在房间里开工。"
             )
         }
+        /// The detail pane's own first-use canvas (review
+        /// 20260903-194506-9xgiml P1): a registered project with zero rooms
+        /// yet, distinct from "rooms exist, none selected".
+        static var firstUseTitle: String {
+            t("Create your first task room", "创建你的第一个任务房间")
+        }
+        static var firstUseBody: String {
+            t(
+                "Give it a name and, if you already know it, an objective — "
+                    + "you can add or revise the objective later.",
+                "给它起个名字，如果已经想好目标也可以先填——目标随时可以之后补充或修订。"
+            )
+        }
     }
 
     enum Objective {
@@ -403,6 +416,18 @@ enum S {
         static var recreateHandoff: String { t("Recreate + Handoff", "重建并交接") }
         static var replaceWith: String { t("Replace with", "替换为") }
         static var repairRequired: String { t("repair required", "需要修复") }
+        /// Honest recent-activity line (review 20260903-194506-9xgiml P1):
+        /// only sender/receiver/state from a real delivery, never message
+        /// content the client does not have.
+        static func recentActivitySent(_ receiverID: String) -> String {
+            t("Recently: sent \(receiverID) a message", "最近活动：向 \(receiverID) 发送了消息")
+        }
+        static func recentActivityReceived(_ senderID: String, _ stateLabel: String) -> String {
+            t(
+                "Recently: \(stateLabel.lowercased()) a message from \(senderID)",
+                "最近活动：收到 \(senderID) 的消息（\(stateLabel)）"
+            )
+        }
         static func runningCount(_ count: Int) -> String {
             t("\(count) running", "\(count) 位工作中")
         }
@@ -618,6 +643,10 @@ enum S {
     }
 
     enum DeliveryDistribution {
+        /// Evidence & Diagnostics nav row label (review 20260903-194506-
+        /// 9xgiml P1 visual): the two distribution charts moved out of the
+        /// first viewport into the drawer's own tab.
+        static var tabTitle: String { t("Analytics", "统计") }
         static var finalState: String { t("Delivery final state", "投递最终状态") }
         static var messageKind: String { t("Message kind", "消息类型") }
         static var noSettled: String {
