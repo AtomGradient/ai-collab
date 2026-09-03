@@ -908,6 +908,211 @@ def test_foreground_job_rejects_same_group_non_descendant(monkeypatch: Any) -> N
         raise AssertionError("same-group non-descendant foreground job was accepted")
 
 
+def test_foreground_job_accepts_absent_stale_job_pid_when_owned_group_is_foreground(
+    monkeypatch: Any,
+) -> None:
+    def unavailable(pid: int) -> dict[str, int]:
+        raise participant_driver.DriverError("owned process relationship is unavailable")
+
+    def absent(pid: int, signal_number: int) -> None:
+        assert pid == 3999
+        assert signal_number == 0
+        raise ProcessLookupError
+
+    monkeypatch.setattr(participant_driver, "_process_relationship", unavailable)
+    monkeypatch.setattr(participant_driver.os, "kill", absent)
+    monkeypatch.setattr(
+        participant_driver,
+        "_process_observation",
+        lambda pid: {
+            "pid": pid,
+            "pgid": 3001,
+            "ps": "/opt/homebrew/bin/claude",
+            "identity_sha256": "a" * 64,
+        },
+    )
+    monkeypatch.setattr(
+        participant_driver, "_terminal_foreground_process_group", lambda pid: 3001
+    )
+
+    participant_driver._validate_owned_foreground_job(  # noqa: SLF001
+        3999,
+        {
+            "pid": 3001,
+            "pgid": 3001,
+            "process_identity_sha256": "a" * 64,
+        },
+    )
+
+
+def test_foreground_job_rejects_unrelated_live_job_pid(monkeypatch: Any) -> None:
+    monkeypatch.setattr(
+        participant_driver,
+        "_process_relationship",
+        lambda pid: (_ for _ in ()).throw(
+            participant_driver.DriverError(
+                "owned process relationship is unavailable"
+            )
+        ),
+    )
+    monkeypatch.setattr(participant_driver.os, "kill", lambda pid, signal_number: None)
+    monkeypatch.setattr(
+        participant_driver,
+        "_process_observation",
+        lambda pid: (_ for _ in ()).throw(
+            AssertionError("live jobPid must fail before root fallback")
+        ),
+    )
+
+    with pytest.raises(
+        participant_driver.DriverError,
+        match="^owned process relationship is unavailable$",
+    ):
+        participant_driver._validate_owned_foreground_job(  # noqa: SLF001
+            3999,
+            {
+                "pid": 3001,
+                "pgid": 3001,
+                "process_identity_sha256": "a" * 64,
+            },
+        )
+
+
+def test_foreground_job_rejects_stale_job_pid_after_root_identity_drift(
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(
+        participant_driver,
+        "_process_relationship",
+        lambda pid: (_ for _ in ()).throw(
+            participant_driver.DriverError(
+                "owned process relationship is unavailable"
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        participant_driver.os,
+        "kill",
+        lambda pid, signal_number: (_ for _ in ()).throw(ProcessLookupError()),
+    )
+    monkeypatch.setattr(
+        participant_driver,
+        "_process_observation",
+        lambda pid: {
+            "pid": pid,
+            "pgid": 3001,
+            "ps": "/opt/homebrew/bin/claude",
+            "identity_sha256": "b" * 64,
+        },
+    )
+    monkeypatch.setattr(
+        participant_driver, "_terminal_foreground_process_group", lambda pid: 3001
+    )
+
+    with pytest.raises(
+        participant_driver.DriverError,
+        match="^owned foreground process group drifted$",
+    ):
+        participant_driver._validate_owned_foreground_job(  # noqa: SLF001
+            3999,
+            {
+                "pid": 3001,
+                "pgid": 3001,
+                "process_identity_sha256": "a" * 64,
+            },
+        )
+
+
+def test_foreground_job_rejects_stale_job_pid_after_root_group_drift(
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(
+        participant_driver,
+        "_process_relationship",
+        lambda pid: (_ for _ in ()).throw(
+            participant_driver.DriverError(
+                "owned process relationship is unavailable"
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        participant_driver.os,
+        "kill",
+        lambda pid, signal_number: (_ for _ in ()).throw(ProcessLookupError()),
+    )
+    monkeypatch.setattr(
+        participant_driver,
+        "_process_observation",
+        lambda pid: {
+            "pid": pid,
+            "pgid": 4001,
+            "ps": "/opt/homebrew/bin/claude",
+            "identity_sha256": "a" * 64,
+        },
+    )
+    monkeypatch.setattr(
+        participant_driver, "_terminal_foreground_process_group", lambda pid: 3001
+    )
+
+    with pytest.raises(
+        participant_driver.DriverError,
+        match="^owned foreground process group drifted$",
+    ):
+        participant_driver._validate_owned_foreground_job(  # noqa: SLF001
+            3999,
+            {
+                "pid": 3001,
+                "pgid": 3001,
+                "process_identity_sha256": "a" * 64,
+            },
+        )
+
+
+def test_foreground_job_rejects_absent_stale_job_pid_for_another_foreground_group(
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(
+        participant_driver,
+        "_process_relationship",
+        lambda pid: (_ for _ in ()).throw(
+            participant_driver.DriverError(
+                "owned process relationship is unavailable"
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        participant_driver.os,
+        "kill",
+        lambda pid, signal_number: (_ for _ in ()).throw(ProcessLookupError()),
+    )
+    monkeypatch.setattr(
+        participant_driver,
+        "_process_observation",
+        lambda pid: {
+            "pid": pid,
+            "pgid": 3001,
+            "ps": "/opt/homebrew/bin/claude",
+            "identity_sha256": "a" * 64,
+        },
+    )
+    monkeypatch.setattr(
+        participant_driver, "_terminal_foreground_process_group", lambda pid: 4001
+    )
+
+    with pytest.raises(
+        participant_driver.DriverError,
+        match="owned foreground process group drifted",
+    ):
+        participant_driver._validate_owned_foreground_job(  # noqa: SLF001
+            3999,
+            {
+                "pid": 3001,
+                "pgid": 3001,
+                "process_identity_sha256": "a" * 64,
+            },
+        )
+
+
 class _JobPidSession:
     async def async_get_variable(self, name: str) -> str:
         assert name == "jobPid"

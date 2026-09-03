@@ -1931,6 +1931,30 @@ def _process_relationship(pid: int) -> dict[str, int]:
     return {"parent_pid": parent_pid, "process_group_id": process_group_id}
 
 
+def _terminal_foreground_process_group(pid: int) -> int:
+    try:
+        completed = subprocess.run(
+            ("/bin/ps", "-p", str(pid), "-o", "tpgid="),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise DriverError("terminal foreground process group is unavailable") from exc
+    fields = completed.stdout.split()
+    if completed.returncode != 0 or len(fields) != 1:
+        raise DriverError("terminal foreground process group is unavailable")
+    try:
+        process_group_id = int(fields[0])
+    except ValueError as exc:
+        raise DriverError("terminal foreground process group is invalid") from exc
+    if process_group_id < 2:
+        raise DriverError("terminal foreground process group is invalid")
+    return process_group_id
+
+
 def _validate_owned_foreground_job(job_pid: int, state: Mapping[str, Any]) -> None:
     """Require the live iTerm foreground job to belong to the bound process chain."""
 
@@ -1949,7 +1973,27 @@ def _validate_owned_foreground_job(job_pid: int, state: Mapping[str, Any]) -> No
         if current_pid < 2 or current_pid in seen:
             break
         seen.add(current_pid)
-        relationship = _process_relationship(current_pid)
+        try:
+            relationship = _process_relationship(current_pid)
+        except DriverError as exc:
+            if str(exc) != "owned process relationship is unavailable":
+                raise
+            try:
+                os.kill(current_pid, 0)
+            except ProcessLookupError:
+                pass
+            except OSError:
+                raise exc
+            else:
+                raise exc
+            root = _process_observation(root_pid)
+            if (
+                root["identity_sha256"] != state.get("process_identity_sha256")
+                or root["pgid"] != owned_pgid
+                or _terminal_foreground_process_group(root_pid) != owned_pgid
+            ):
+                raise DriverError("owned foreground process group drifted") from exc
+            return
         if relationship["process_group_id"] != owned_pgid:
             raise DriverError("owned foreground process group drifted")
         if current_pid == root_pid:
