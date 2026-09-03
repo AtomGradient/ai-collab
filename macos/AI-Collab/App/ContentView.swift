@@ -2086,11 +2086,18 @@ private struct DeliveryKindDistributionPanel: View {
             Text(S.DeliveryDistribution.messageKind)
                 .font(.subheadline.weight(.semibold))
             ForEach(kinds) { kind in
+                // A message with no declared kind is called out as an absence,
+                // in the same ochre this screen already uses for "settled
+                // without evidence". It used to be painted `.green`, which is
+                // this screen's healthy colour everywhere else — so the one row
+                // singled out as a quality signal read as the good one. Raw
+                // system colours also bypass the theme-aware instrument palette
+                // the rest of the chart is drawn from.
                 let generic = kind.id == "collaboration.message"
                 HStack(spacing: 8) {
                     Text(S.DeliveryDistribution.kind(kind.id))
                         .font(.caption.weight(generic ? .semibold : .regular))
-                        .foregroundStyle(generic ? .green : .secondary)
+                        .foregroundStyle(generic ? Color.evidenceAbsent : .secondary)
                         .frame(width: 104, alignment: .trailing)
                         .lineLimit(1)
                     GeometryReader { proxy in
@@ -2101,7 +2108,7 @@ private struct DeliveryKindDistributionPanel: View {
                             RoundedRectangle(cornerRadius: 3)
                                 .fill(.quaternary)
                             RoundedRectangle(cornerRadius: 3)
-                                .fill(generic ? Color.green : Color.evidenceStrong)
+                                .fill(generic ? Color.evidenceAbsent : Color.evidenceStrong)
                                 .frame(width: proxy.size.width * fraction)
                         }
                     }
@@ -2109,7 +2116,7 @@ private struct DeliveryKindDistributionPanel: View {
                     Text(String(kind.count))
                         .font(.caption.weight(.semibold))
                         .monospacedDigit()
-                        .foregroundStyle(generic ? .green : .primary)
+                        .foregroundStyle(generic ? Color.evidenceAbsent : .primary)
                         .frame(width: 28, alignment: .trailing)
                 }
                 .frame(minHeight: 18)

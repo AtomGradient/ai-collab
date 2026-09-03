@@ -180,6 +180,24 @@ def test_app_offers_a_read_when_the_room_reads_as_inconsistent() -> None:
         assert stale not in strings
 
 
+def test_message_kind_callout_uses_the_instrument_palette_not_healthy_green() -> None:
+    """Green is this screen's healthy colour; the callout is not a compliment.
+
+    `generic msg` is the one row deliberately emphasised as a quality
+    signal. Drawing it in `.green` put it in the same colour as TEAM READY,
+    DEGRADED 0 and the all-clear check, and bypassed the theme-aware
+    instrument palette the rest of the chart uses.
+    """
+    content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
+
+    assert "generic ? Color.evidenceAbsent : Color.evidenceStrong" in content
+    for healthy in (
+        "generic ? .green :",
+        "generic ? Color.green :",
+    ):
+        assert healthy not in content
+
+
 def test_app_exposes_participant_replace_without_detach() -> None:
     content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
     view_model = (APP_ROOT / "HarnessViewModel.swift").read_text(encoding="utf-8")
