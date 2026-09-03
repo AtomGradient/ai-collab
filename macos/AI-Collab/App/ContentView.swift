@@ -1346,11 +1346,34 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 8) {
             Label(S.NeedsAttention.sectionTitle, systemImage: "exclamationmark.triangle.fill")
                 .font(.headline)
-            if model.deliveryAttention.isEmpty {
+            // The all-clear is a room-wide claim, so it is decided from the
+            // collection summary. `model.deliveryAttention` is one bounded
+            // page and can only ever supply examples.
+            if let totals = model.deliveryAttentionTotals, totals.isClear {
                 Label(S.NeedsAttention.allClear, systemImage: "checkmark.circle.fill")
                     .font(.callout)
                     .foregroundStyle(.green)
-            } else {
+            } else if let totals = model.deliveryAttentionTotals {
+                Text(
+                    S.NeedsAttention.roomTotals(
+                        degraded: totals.degraded, retried: totals.retried
+                    )
+                )
+                .font(.callout)
+                .foregroundStyle(.orange)
+                if model.deliveryAttention.isEmpty {
+                    Text(
+                        S.NeedsAttention.noExamplesOnPage(
+                            DeliveryCollectionRecord.rawActivityLimit
+                        )
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                } else {
+                    Text(S.NeedsAttention.examplesHeading)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 ForEach(model.deliveryAttention) { item in
                     HStack(alignment: .top, spacing: 8) {
                         Image(systemName: "exclamationmark.circle.fill")
@@ -1367,6 +1390,12 @@ struct ContentView: View {
                         }
                     }
                 }
+            } else {
+                // No collection summary means the question is unanswered.
+                // Never render an all-clear from an absent measurement.
+                Label(S.NeedsAttention.unavailable, systemImage: "questionmark.circle")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
             }
         }
         .padding(10)

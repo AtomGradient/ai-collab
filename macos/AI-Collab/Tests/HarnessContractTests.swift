@@ -257,6 +257,59 @@ final class HarnessContractTests: XCTestCase {
         XCTAssertEqual(attention.first?.id, "delivery-6")
     }
 
+    /// The room-wide all-clear must never be decided from the loaded page.
+    /// `delivery.list` returns a bounded page beside a collection summary, so
+    /// a page with no visible problem says nothing about the other rows.
+    func testAttentionTotalsComeFromTheCollectionNotTheLoadedPage() throws {
+        func totals(_ overrides: [String: Any]) throws -> DeliveryAttentionTotals {
+            var raw = m2DeliverySummaryFixture
+            for (key, value) in overrides { raw[key] = value }
+            return DeliveryAttentionTotals(
+                summary: try XCTUnwrap(DeliverySummaryRecord(raw))
+            )
+        }
+
+        XCTAssertTrue(try totals([:]).isClear)
+
+        let degradedOnly = try totals(["degraded_total": 3])
+        XCTAssertEqual(degradedOnly.degraded, 3)
+        XCTAssertEqual(degradedOnly.retried, 0)
+        XCTAssertFalse(degradedOnly.isClear)
+
+        let retriedOnly = try totals(["first_attempt_total": 66])
+        XCTAssertEqual(retriedOnly.degraded, 0)
+        XCTAssertEqual(retriedOnly.retried, 3)
+        XCTAssertFalse(retriedOnly.isClear)
+
+        let both = try totals(["degraded_total": 2, "first_attempt_total": 65])
+        XCTAssertEqual(both.total, 6)
+        XCTAssertFalse(both.isClear)
+    }
+
+    /// The exact m2 shape that made this visible: 69 deliveries in the room,
+    /// a five-row page holding none of the problems, and a summary that says
+    /// there are four. The page must not be able to produce an all-clear.
+    @MainActor
+    func testAnEmptyAttentionPageCannotClearANonEmptyRoom() throws {
+        var raw = m2DeliverySummaryFixture
+        raw["degraded_total"] = 1
+        raw["first_attempt_total"] = 66
+        let model = HarnessViewModel()
+        model.deliverySummary = try XCTUnwrap(DeliverySummaryRecord(raw))
+        model.deliveries = []
+
+        XCTAssertTrue(model.deliveryAttention.isEmpty, "the page shows no problem")
+        let totals = try XCTUnwrap(model.deliveryAttentionTotals)
+        XCTAssertEqual(totals.total, 4)
+        XCTAssertFalse(totals.isClear, "the room still has four")
+
+        model.deliverySummary = nil
+        XCTAssertNil(
+            model.deliveryAttentionTotals,
+            "an absent summary must read as unanswered, never as all-clear"
+        )
+    }
+
     func testCollaborationHealthUsesCollectionSummaryMetricsIndependently() throws {
         let fixture = m2DeliverySummaryFixture
         func values(

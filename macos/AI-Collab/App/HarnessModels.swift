@@ -837,6 +837,26 @@ struct DeliveryAttentionRecord: Identifiable, Equatable {
     }
 }
 
+/// Room-wide attention counts.
+///
+/// The Host's `delivery_collection.summary` is collection scoped; the
+/// `deliveries` array beside it is only one bounded page. Deciding "nothing
+/// needs attention" from that page would answer a room-wide question with a
+/// sample, so the all-clear is decided here and the page supplies examples
+/// only.
+struct DeliveryAttentionTotals: Equatable {
+    let degraded: Int
+    let retried: Int
+
+    init(summary: DeliverySummaryRecord) {
+        degraded = summary.degradedTotal
+        retried = summary.attemptedTotal - summary.firstAttemptTotal
+    }
+
+    var total: Int { degraded + retried }
+    var isClear: Bool { total == 0 }
+}
+
 struct DeliverySummaryRecord: Equatable {
     let total: Int
     let states: [String: Int]

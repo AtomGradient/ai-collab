@@ -208,6 +208,14 @@ final class HarnessViewModel: ObservableObject {
         )
     }
 
+    /// Room-wide attention counts, or nil while the collection summary is
+    /// unavailable. Never derived from `deliveries`: that is one bounded page.
+    var deliveryAttentionTotals: DeliveryAttentionTotals? {
+        deliverySummary.map(DeliveryAttentionTotals.init(summary:))
+    }
+
+    /// Concrete examples drawn from the loaded page. This is a sample, not the
+    /// set — `deliveryAttentionTotals` owns how many there actually are.
     var deliveryAttention: [DeliveryAttentionRecord] {
         DeliveryAttentionRecord.items(from: deliveries)
     }

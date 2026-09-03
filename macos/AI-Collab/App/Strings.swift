@@ -551,6 +551,34 @@ enum S {
         static var allClear: String {
             t("No delivery needs attention.", "没有需要关注的投递。")
         }
+        /// Stated over the whole collection, never over the loaded page.
+        static func roomTotals(degraded: Int, retried: Int) -> String {
+            let count = degraded + retried
+            let parts = [
+                degraded > 0 ? t("\(degraded) degraded", "\(degraded) 条降级") : nil,
+                retried > 0 ? t("\(retried) retried", "\(retried) 条重试") : nil,
+            ].compactMap { $0 }
+            let breakdown = parts.joined(separator: t(", ", "，"))
+            return t(
+                "\(count) deliver\(count == 1 ? "y" : "ies") need attention — \(breakdown).",
+                "有 \(count) 条投递需要关注——\(breakdown)。"
+            )
+        }
+        static var examplesHeading: String {
+            t("Examples:", "示例：")
+        }
+        static func noExamplesOnPage(_ limit: Int) -> String {
+            t(
+                "None of them are in the \(limit) most recent deliveries.",
+                "它们都不在最近 \(limit) 条投递里。"
+            )
+        }
+        static var unavailable: String {
+            t(
+                "Delivery totals are unavailable — attention cannot be assessed.",
+                "投递总量不可用——无法判断是否需要关注。"
+            )
+        }
         static func reason(_ reason: DeliveryAttentionRecord.Reason) -> String {
             switch reason {
             case let .degraded(detail):
