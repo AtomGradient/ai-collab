@@ -54,13 +54,22 @@ enum PresentationClass: Equatable {
 }
 
 extension ScenarioRecord {
+    /// Covers the full `scenario_observed_state` enum in
+    /// `contracts/scenario_participant_state_v1.schema.json`: provisioning,
+    /// provision_failed, closed, opening, running, degraded, repairing,
+    /// closing, destroying — 9 values, all listed explicitly below rather
+    /// than relying on a fail-closed default to carry one of them. `repairing`
+    /// is a legitimate in-flight state (the Scenario the user just clicked
+    /// Repair on) and must read as `working`, not `attention` — landing it in
+    /// `attention` would make a room the user is actively fixing look like it
+    /// just broke again (review 20260903-183736-clqu6r P1-1).
+    ///
     /// A Scenario has no "success" state at all — `closed` is neutral
-    /// (`inactive`), never a completion the Host actually reports. An
-    /// unrecognized token fails closed to `attention` rather than reading as
-    /// quietly settled.
+    /// (`inactive`), never a completion the Host actually reports. Only a
+    /// token truly outside the contract falls to the `attention` default.
     var presentationClass: PresentationClass {
         switch observedState {
-        case "provisioning", "opening", "closing", "destroying", "running":
+        case "provisioning", "opening", "closing", "destroying", "repairing", "running":
             .working
         case "degraded":
             .attention
@@ -75,6 +84,14 @@ extension ScenarioRecord {
 }
 
 extension ParticipantRecord {
+    /// Covers the full `participant_observed_state` enum in
+    /// `contracts/scenario_participant_state_v1.schema.json`: detached,
+    /// stopped, starting, ready, stopping, recovering, replacing, destroying,
+    /// degraded — 9 values, all listed explicitly. Note `repairing` is
+    /// **not** in this enum (it is Scenario-only) and `destroying` **is**
+    /// (a Participant being deleted) — review 20260903-183736-clqu6r P1-1
+    /// caught both getting mixed up between the two entities.
+    ///
     /// `ready` means the TUI is running and available — that is the
     /// operating state, so it maps to `working` like every other in-flight
     /// state, never to `success`/`inactive`. A Participant has no standalone
@@ -82,7 +99,7 @@ extension ParticipantRecord {
     /// `degradedReason == "launch_failed"`, so `failed` is unused here.
     var presentationClass: PresentationClass {
         switch observedState {
-        case "starting", "stopping", "recovering", "repairing", "replacing", "ready":
+        case "starting", "stopping", "recovering", "replacing", "destroying", "ready":
             .working
         case "degraded":
             .attention

@@ -1035,17 +1035,25 @@ struct ContentView: View {
 
     // MARK: - Collapsible sections
 
-    @State private var showPreflight = false
-    @State private var showTopology = false
-    @State private var showPolicy = false
-    @State private var showDeliveries = false
-    @State private var showInspector = false
     @State private var editingObjective = false
 
+    /// One evidence domain selected at a time inside the drawer — review
+    /// 20260903-183736-clqu6r P1-4: nesting a `DisclosureGroup` per domain
+    /// inside the outer drawer's own `DisclosureGroup` added a second fold
+    /// nobody asked for. A single selection replaces all five of the old
+    /// per-section `show*` bools.
+    private enum EvidenceTab: Hashable {
+        case deliveries, preflight, topology, policy, resources, inspector, highRisk
+    }
+    @State private var evidenceTab: EvidenceTab = .deliveries
+
+    /// Just the content — no DisclosureGroup, no label. Selection among
+    /// evidence domains is the tab strip's job now; wrapping this in its own
+    /// collapsible would recreate the double-fold review 20260903-183736-
+    /// clqu6r's P1-4 flagged (drawer-inside-drawer).
     private var preflightSection: some View {
-        DisclosureGroup(isExpanded: $showPreflight) {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
                     if let preflight = model.preflight {
                         StateBadge(state: preflight.status)
                         Text(
@@ -1139,22 +1147,11 @@ struct ContentView: View {
                 }
             }
             .padding(.vertical, 6)
-        } label: {
-            HStack {
-                Label(S.Preflight.sectionTitle, systemImage: "checkmark.shield")
-                    .font(.headline)
-                Spacer()
-                if let preflight = model.preflight {
-                    StateBadge(state: preflight.status)
-                }
-            }
-        }
     }
 
     private var topologySection: some View {
-        DisclosureGroup(isExpanded: $showTopology) {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
                     Text(S.Topology.description)
                         .font(.callout)
                         .foregroundStyle(.secondary)
@@ -1202,15 +1199,10 @@ struct ContentView: View {
                 }
             }
             .padding(.vertical, 6)
-        } label: {
-            Label(S.Topology.sectionTitle, systemImage: "macwindow.on.rectangle")
-                .font(.headline)
-        }
     }
 
     private var policySection: some View {
-        DisclosureGroup(isExpanded: $showPolicy) {
-            VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 12) {
                 if let status = model.policyStatus {
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
@@ -1332,22 +1324,9 @@ struct ContentView: View {
                 }
             }
             .padding(.vertical, 6)
-        } label: {
-            HStack {
-                Label(S.Policy.sectionTitle, systemImage: "shared.with.you")
-                    .font(.headline)
-                Spacer()
-                if let status = model.policyStatus {
-                    StateBadge(
-                        state: status.requiresReplan ? "re-plan required" : "current"
-                    )
-                }
-            }
-        }
     }
 
     private var deliveriesSection: some View {
-        DisclosureGroup(isExpanded: $showDeliveries) {
             VStack(alignment: .leading, spacing: 10) {
                 if model.deliveries.isEmpty {
                     Text(S.Deliveries.empty)
@@ -1393,18 +1372,6 @@ struct ContentView: View {
                 }
             }
             .padding(.vertical, 6)
-        } label: {
-            HStack {
-                Label(S.Deliveries.rawActivity, systemImage: "envelope.fill")
-                    .font(.headline)
-                Spacer()
-                if let total = model.deliverySummary?.total, total > 0 {
-                    Text("\(total)")
-                        .font(.caption.bold())
-                        .foregroundStyle(.secondary)
-                }
-            }
-        }
     }
 
     private var needsAttentionSection: some View {
@@ -1451,7 +1418,12 @@ struct ContentView: View {
                             .foregroundStyle(.orange)
                         VStack(alignment: .leading, spacing: 2) {
                             Button(String(item.delivery.id.prefix(12))) {
-                                showDeliveries = true
+                                // Both halves matter: opening only the inner
+                                // tab while the outer drawer stays collapsed
+                                // is invisible to the user — review
+                                // 20260903-183736-clqu6r P1-2.
+                                showTechnical = true
+                                evidenceTab = .deliveries
                             }
                             .buttonStyle(.link)
                             .font(.system(.callout, design: .monospaced).bold())
@@ -1550,28 +1522,22 @@ struct ContentView: View {
     }
 
     private var inspectorSection: some View {
-        DisclosureGroup(isExpanded: $showInspector) {
-            TabView {
-                InspectorText(title: S.Settings.diagnosticsTab, text: model.diagnosticText)
-                    .tabItem { Text(S.Settings.diagnosticsTab) }
-                InspectorText(title: S.Inspector.resources, text: model.resourceText)
-                    .tabItem { Text(S.Inspector.resources) }
-                InspectorText(title: S.Inspector.policy, text: model.policyText)
-                    .tabItem { Text(S.Inspector.policy) }
-                InspectorText(title: S.Inspector.receipt, text: model.receiptText)
-                    .tabItem { Text(S.Inspector.receipt) }
-                InspectorText(title: S.Inspector.resume, text: model.resumeText)
-                    .tabItem { Text(S.Inspector.resume) }
-            }
-            .frame(minHeight: 220)
-        } label: {
-            Label(S.Inspector.sectionTitle, systemImage: "terminal")
-                .font(.headline)
+        TabView {
+            InspectorText(title: S.Settings.diagnosticsTab, text: model.diagnosticText)
+                .tabItem { Text(S.Settings.diagnosticsTab) }
+            InspectorText(title: S.Inspector.resources, text: model.resourceText)
+                .tabItem { Text(S.Inspector.resources) }
+            InspectorText(title: S.Inspector.policy, text: model.policyText)
+                .tabItem { Text(S.Inspector.policy) }
+            InspectorText(title: S.Inspector.receipt, text: model.receiptText)
+                .tabItem { Text(S.Inspector.receipt) }
+            InspectorText(title: S.Inspector.resume, text: model.resumeText)
+                .tabItem { Text(S.Inspector.resume) }
         }
+        .frame(minHeight: 220)
     }
 
     private func highRiskSection(_ scenario: ScenarioRecord) -> some View {
-        DisclosureGroup {
             VStack(alignment: .leading, spacing: 10) {
                 Text(S.Risk.hostConfirmNote)
                     .font(.callout)
@@ -1626,11 +1592,6 @@ struct ContentView: View {
                 }
             }
             .padding(.vertical, 6)
-        } label: {
-            Label(S.Risk.sectionTitle, systemImage: "exclamationmark.triangle")
-                .font(.headline)
-                .foregroundStyle(.red)
-        }
     }
 
     // MARK: - Workspace preparation rows
@@ -1767,14 +1728,19 @@ struct ContentView: View {
     /// point 7).
     private func technicalSection(_ scenario: ScenarioRecord) -> some View {
         DisclosureGroup(isExpanded: $showTechnical) {
-            VStack(alignment: .leading, spacing: 16) {
-                deliveriesSection
-                preflightSection
-                topologySection
-                policySection
-                resourcesSection
-                inspectorSection
-                highRiskSection(scenario)
+            VStack(alignment: .leading, spacing: 12) {
+                evidenceTabStrip
+                Group {
+                    switch evidenceTab {
+                    case .deliveries: deliveriesSection
+                    case .preflight: preflightSection
+                    case .topology: topologySection
+                    case .policy: policySection
+                    case .resources: resourcesSection
+                    case .inspector: inspectorSection
+                    case .highRisk: highRiskSection(scenario)
+                    }
+                }
             }
             .padding(.top, 8)
         } label: {
@@ -1791,6 +1757,40 @@ struct ContentView: View {
         }
         .padding(10)
         .background(.secondary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    /// The seven evidence domains, one row, exactly one visible at a time —
+    /// this replaces the drawer-of-drawers review 20260903-183736-clqu6r
+    /// P1-4 flagged. Every domain stays a single click from the drawer being
+    /// open, never nested behind its own fold.
+    private var evidenceTabStrip: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 4) {
+                evidenceTabButton(.deliveries, S.Deliveries.rawActivity)
+                evidenceTabButton(.preflight, S.Preflight.sectionTitle)
+                evidenceTabButton(.topology, S.Topology.sectionTitle)
+                evidenceTabButton(.policy, S.Policy.sectionTitle)
+                evidenceTabButton(.resources, S.Sections.resources)
+                evidenceTabButton(.inspector, S.Inspector.sectionTitle)
+                evidenceTabButton(.highRisk, S.Risk.sectionTitle, tint: .red)
+            }
+        }
+    }
+
+    private func evidenceTabButton(
+        _ tab: EvidenceTab, _ title: String, tint: Color = .accentColor
+    ) -> some View {
+        let selected = evidenceTab == tab
+        return Button(title) { evidenceTab = tab }
+            .buttonStyle(.plain)
+            .font(.caption.weight(selected ? .bold : .regular))
+            .foregroundStyle(selected ? tint : Color.secondary)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 5)
+            .background(
+                selected ? tint.opacity(0.12) : Color.clear,
+                in: Capsule()
+            )
     }
 
     /// One line, shown only while the drawer is collapsed, composed from
@@ -2353,8 +2353,14 @@ private struct ScenarioRoomCard: View {
 
     /// Entity-aware (`ScenarioRecord.presentationClass`), not a local re-guess
     /// of the same five-way split `StateBadge` already does globally.
+    /// Not `presentationClass == .working`: that class also covers
+    /// provisioning/opening/closing/destroying/repairing, and the live pulse
+    /// must mean exactly "running" — a closing or destroying room pulsing
+    /// green reads as a lie next to its own orange/blue badge (review
+    /// 20260903-183736-clqu6r P1-3). Those transitional states are already
+    /// carried by the badge; the dot adds nothing by also claiming them.
     private var isLive: Bool {
-        scenario.presentationClass == .working
+        scenario.observedState == "running"
     }
 
     private var needsAttention: Bool {
