@@ -5553,13 +5553,18 @@ class ScenarioStore:
             self._check_participant_fence(
                 record, participant_generation, participant_state_revision
             )
-            if (
-                scenario["desired_state"] != "running"
-                or scenario["observed_state"] != "degraded"
-                or scenario.get("degraded", {}).get("reason")
-                not in {"participant_fault", "participant_restore_incomplete"}
-                or scenario.get("active_operation_id") is not None
-            ):
+            resumable_degradation = (
+                scenario["desired_state"] in {"closed", "running"}
+                and scenario["observed_state"] == "degraded"
+                and scenario.get("degraded", {}).get("reason")
+                in {
+                    "cleanup_pending",
+                    "participant_fault",
+                    "participant_restore_incomplete",
+                }
+                and scenario.get("active_operation_id") is None
+            )
+            if not resumable_degradation:
                 raise StoreError(
                     "participant.invalid-transition",
                     "participant recovery requires a resumable degraded Scenario",
@@ -5736,17 +5741,41 @@ class ScenarioStore:
             operation["state"] = "succeeded"
             operation["mutation_state"] = "committed"
             participants, _ = self._participant_maps(item)
-            if (
+            no_participant_faults = not any(
+                participant["observed_state"] == "degraded"
+                for participant in participants.values()
+            )
+            running_recovered = (
                 scenario["desired_state"] == "running"
                 and scenario["observed_state"] == "degraded"
                 and scenario.get("degraded", {}).get("reason")
                 in {"participant_fault", "participant_restore_incomplete"}
-                and not any(
-                    participant["observed_state"] == "degraded"
+                and no_participant_faults
+            )
+            closed_recovered = (
+                scenario["desired_state"] == "closed"
+                and scenario["observed_state"] == "degraded"
+                and scenario.get("degraded", {}).get("reason")
+                in {
+                    "cleanup_pending",
+                    "participant_fault",
+                    "participant_restore_incomplete",
+                }
+                and all(
+                    participant["observed_state"] in {"stopped", "detached"}
+                    and participant.get("runtime_binding_id") is None
+                    and participant.get("presentation_binding_id") is None
                     for participant in participants.values()
                 )
-            ):
-                scenario["observed_state"] = "running"
+                and all(
+                    lease["status"] == "released"
+                    for lease in self._resource_leases(item).values()
+                )
+            )
+            if running_recovered or closed_recovered:
+                scenario["observed_state"] = (
+                    "running" if running_recovered else "closed"
+                )
                 scenario["degraded"] = None
                 scenario["state_revision"] += 1
                 scenario["journal_head_sequence"] = state[

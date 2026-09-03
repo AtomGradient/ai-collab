@@ -5036,6 +5036,135 @@ def test_scenario_repair_keeps_closed_participant_fault_resumable(
         assert resumed["degraded"]["repair_action"] == "participant.recover"
 
 
+def test_closed_incomplete_close_recovers_participant_in_one_step(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    with running_host(state_root) as (_, client, driver):
+        opened, ready = _start_ready_participant(client)
+        driver.close_mode = "timeout"
+        with pytest.raises(HarnessClientError):
+            client.close_scenario(
+                project_instance_id=PROJECT_ID,
+                scenario_id=SCENARIO_ID,
+                scenario_generation=opened["scenario_generation"],
+                scenario_state_revision=opened["state_revision"],
+                drain_timeout_ms=25,
+                request_id="closed-recover-close",
+            )
+
+        scenario = client.scenario_status(
+            project_instance_id=PROJECT_ID, scenario_id=SCENARIO_ID
+        )["scenario"]
+        participant = client.list_participants(
+            project_instance_id=PROJECT_ID, scenario_id=SCENARIO_ID
+        )["participants"][0]
+        assert scenario["desired_state"] == "closed"
+        assert scenario["degraded"]["reason"] == "cleanup_pending"
+        assert participant["degraded"]["repair_action"] == "participant.recover"
+
+        recovered = client.recover_participant(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            participant_id=PARTICIPANT_ID,
+            scenario_generation=scenario["scenario_generation"],
+            scenario_state_revision=scenario["state_revision"],
+            participant_generation=participant["participant_generation"],
+            participant_state_revision=participant["state_revision"],
+            request_id="closed-recover-participant",
+        )["participant"]
+
+        assert (
+            recovered["participant_generation"]
+            == ready["participant_generation"] + 1
+        )
+        assert recovered["observed_state"] == "stopped"
+        final = client.scenario_status(
+            project_instance_id=PROJECT_ID, scenario_id=SCENARIO_ID
+        )["scenario"]
+        assert final["observed_state"] == "closed"
+        assert final["degraded"] is None
+        assert driver.repair_calls == [ready["participant_generation"]]
+        resources = client.list_resources(
+            project_instance_id=PROJECT_ID, scenario_id=SCENARIO_ID
+        )["resources"]
+        assert resources
+        assert all(resource["status"] == "released" for resource in resources)
+
+        resumed = client.open_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=final["scenario_generation"],
+            scenario_state_revision=final["state_revision"],
+            request_id="closed-recover-resume",
+        )
+        assert resumed["scenario"]["observed_state"] == "running"
+        assert resumed["scenario"]["degraded"] is None
+        assert resumed["resume_summary"]["target_count"] == 0
+        assert resumed["resume_summary"]["reports"] == []
+
+
+def test_closed_participant_recovery_does_not_hide_an_unreleased_lease(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    with running_host(state_root) as (host, client, driver):
+        opened, _ = _start_ready_participant(client)
+        driver.close_mode = "timeout"
+        with pytest.raises(HarnessClientError):
+            client.close_scenario(
+                project_instance_id=PROJECT_ID,
+                scenario_id=SCENARIO_ID,
+                scenario_generation=opened["scenario_generation"],
+                scenario_state_revision=opened["state_revision"],
+                drain_timeout_ms=25,
+                request_id="closed-recover-stale-lease-close",
+            )
+
+        with host.store._lock:  # noqa: SLF001 - durable edge fixture
+            durable = host.store._read_state()  # noqa: SLF001
+            item = next(iter(durable["scenarios"].values()))
+            lease = next(iter(item["resource_leases"].values()))
+            stale_lease = json.loads(json.dumps(lease))
+            stale_lease["lease_id"] = "lease-stale-previous-binding"
+            stale_lease["lease_revision"] += 1
+            stale_lease["holder"]["runtime_binding_id"] = "runtime-binding-previous"
+            stale_lease["status"] = "stale"
+            stale_lease["stale_reason"] = "binding_changed"
+            stale_lease["release_evidence_sha256"] = None
+            item["resource_leases"][stale_lease["lease_id"]] = stale_lease
+            durable["state_revision"] += 1
+            host.store._write_state(durable)  # noqa: SLF001
+
+        scenario = client.scenario_status(
+            project_instance_id=PROJECT_ID, scenario_id=SCENARIO_ID
+        )["scenario"]
+        participant = client.list_participants(
+            project_instance_id=PROJECT_ID, scenario_id=SCENARIO_ID
+        )["participants"][0]
+        recovered = client.recover_participant(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            participant_id=PARTICIPANT_ID,
+            scenario_generation=scenario["scenario_generation"],
+            scenario_state_revision=scenario["state_revision"],
+            participant_generation=participant["participant_generation"],
+            participant_state_revision=participant["state_revision"],
+            request_id="closed-recover-stale-lease-participant",
+        )["participant"]
+
+        assert recovered["observed_state"] == "stopped"
+        final = client.scenario_status(
+            project_instance_id=PROJECT_ID, scenario_id=SCENARIO_ID
+        )["scenario"]
+        assert final["observed_state"] == "degraded"
+        assert final["degraded"]["reason"] == "cleanup_pending"
+        resources = client.list_resources(
+            project_instance_id=PROJECT_ID, scenario_id=SCENARIO_ID
+        )["resources"]
+        assert any(resource["status"] != "released" for resource in resources)
+
+
 def test_scenario_repair_keeps_destroyed_participant_fault_non_resumable(
     tmp_path: Path,
 ) -> None:
