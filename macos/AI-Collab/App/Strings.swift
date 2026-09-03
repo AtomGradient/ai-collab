@@ -22,13 +22,6 @@ enum S {
     // MARK: Common actions
 
     /// The one live next step, shown as the Scenario's primary action.
-    enum Flow {
-        static var nextStep: String { t("Next step", "下一步") }
-        static var attention: String { t("Needs you", "需要你处理") }
-        static var inProgress: String { t("In progress", "进行中") }
-        static var ready: String { t("Room is ready", "房间已就绪") }
-    }
-
     enum Common {
         static var cancel: String { t("Cancel", "取消") }
         static var retry: String { t("Retry", "重试") }
@@ -101,7 +94,6 @@ enum S {
                 "检测到 \(count) 处仓库变化"
             )
         }
-        static var applyUpdate: String { t("Apply project update", "应用项目更新") }
         static var checkUpdates: String { t("Check Project Updates", "检查项目更新") }
         static var applyDetectedUpdate: String {
             t("Apply Detected Project Update", "应用检测到的项目更新")
@@ -233,6 +225,13 @@ enum S {
         static func revision(_ value: Int) -> String { t("rev \(value)", "修订 \(value)") }
         static var acceptanceCriteria: String {
             t("Acceptance criteria", "验收标准")
+        }
+        /// The compact mission header's one acceptance-criteria line
+        /// (review 20260903-203219-kq79nn P1 visual) — label and value
+        /// composed together since the punctuation between them differs
+        /// per language.
+        static func acceptanceLine(_ criteria: String) -> String {
+            t("Acceptance criteria: \(criteria)", "验收标准：\(criteria)")
         }
         static var objectivePlaceholder: String {
             t("Revised objective", "修订后的目标")
@@ -1480,15 +1479,9 @@ enum S {
             t("Invite AI colleagues into the room.", "请 AI 同事进房间。")
         }
         static var addAction: String { t("Add AI Colleague", "添加 AI 同事") }
-        static var resumeSay: String {
-            t("The room is closed — resume it to continue.", "房间在休会中——恢复后继续。")
-        }
         static var resumeAction: String { t("Resume Room", "恢复房间") }
         static var configurePolicyAction: String {
             t("Apply Collaboration Rules", "应用协作规则")
-        }
-        static var startSay: String {
-            t("Colleagues are in place — start them working.", "同事已就位，开工。")
         }
         static var startAction: String { t("Start All", "全部启动") }
         static var focusSay: String {
@@ -1498,26 +1491,11 @@ enum S {
             )
         }
         static var focusAction: String { t("Focus Colleague Window", "聚焦同事窗口") }
-        static func attendSay(_ stateLabel: String) -> String {
-            t(
-                "The room needs you: \(stateLabel). Run the checks below for the repair.",
-                "房间需要处理：\(stateLabel)。请运行下方的检查以获得修复方式。"
-            )
-        }
-        static func workingSay(_ stateLabel: String) -> String {
-            t("\(stateLabel)…", "\(stateLabel)…")
-        }
 
         static var checkingWorkspace: String {
             t("Checking the workspace", "正在检查工作区")
         }
 
-        static var inconsistentSay: String {
-            t(
-                "The room's state and its workspace evidence disagree.",
-                "房间状态与工作区证据不一致。"
-            )
-        }
         /// A read, never a lifecycle mutation — it has no Host precondition to
         /// violate, so the one blocked state that used to offer nothing can
         /// still offer the step its own copy names.

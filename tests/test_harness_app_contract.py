@@ -533,15 +533,19 @@ def test_degraded_room_shows_a_visible_repair_entry() -> None:
     always-visible surface, not only inside the collapsed technical fold.
 
     Phase 1 redesign (review 20260903-183736-clqu6r) moved the one canonical
-    Repair control from the Health card into the mission bar's header row,
-    which is unconditionally visible for every Scenario — a strictly more
-    always-visible surface than the Health card, which only renders at all
-    while degraded/provision_failed. Health card keeps the explanatory
-    sentence and Run Preflight, not a second Repair button.
+    Repair control into the mission bar's own header row (folded directly
+    into `missionBar` as of review 20260903-203219-kq79nn's compact-header
+    pass — there is no separate `scenarioHeader` function anymore), which is
+    unconditionally visible for every Scenario — a strictly more always-
+    visible surface than the Health card, which only renders at all while
+    degraded/provision_failed. Health card keeps the explanatory sentence
+    and Run Preflight, not a second Repair button.
     """
 
     content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
-    header = content.split("private func scenarioHeader", 1)[1].split("private ", 1)[0]
+    header = content.split("private func missionBar", 1)[1].split(
+        "private func objectiveInline", 1
+    )[0]
     assert '["provision_failed", "degraded"].contains(scenario.observedState)' in header
     assert "Button(S.Risk.repairScenario)" in header
     assert "highRiskIntent = .repairScenario" in header
@@ -661,6 +665,86 @@ def test_progress_panel_merges_timeline_metrics_and_attention() -> None:
     )[0]
     for label in ("S.Stage.setup", "S.Stage.staffing", "S.Stage.running", "S.Stage.closed"):
         assert label in stage
+
+
+def test_current_stage_checks_workspace_and_staffing_evidence_before_closed() -> None:
+    """codex review 20260903-203219-kq79nn P1: `observed_state == "closed"`
+    alone marked a brand-new room (also closed through prepare-workspace and
+    add-colleague, per GuidanceRailTests) as every stage complete. Evidence
+    order must be workspace readiness, then whether any interactive
+    colleague exists, and only then closed/closing — not a bare switch on
+    `observedState` alone."""
+    content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
+    fn = content.split("private func currentStage", 1)[1].split(
+        "\n    private func stageTimeline", 1
+    )[0]
+    workspace_check = fn.index("model.workspaceEvidence == .present")
+    staffing_check = fn.index("model.participants.contains(where: \\.isInteractive)")
+    closed_check = fn.index('["closed", "closing"].contains(scenario.observedState)')
+    assert workspace_check < staffing_check < closed_check, (
+        "must check workspace evidence, then staffing, before ever reading closed as done"
+    )
+
+
+def test_project_row_has_no_nested_interactive_control() -> None:
+    """codex review 20260903-203219-kq79nn P1: a `Button` inside another
+    `Button`'s own label has ambiguous activation/accessibility semantics.
+    The whole project row is a `Button` (selects the project); the
+    reconciliation status line inside it must be plain text, with the apply
+    action reachable only through the row's context menu."""
+    content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
+    # Bounded by the row's own `.buttonStyle(.plain)`, which comes right
+    # after the row Button's label closure and before its context menu.
+    row = content.split("ForEach(model.projects)", 1)[1].split(".buttonStyle(.plain)", 1)[0]
+    # Count actual construction sites — `Button(` (label-string form) or
+    # `Button {` (trailing-closure form) — not just the word "Button", which
+    # also appears in this same row's own explanatory comment prose.
+    button_sites = len(re.findall(r"Button\(|Button \{", row))
+    assert button_sites == 1, "the row itself must be the only Button before its context menu"
+    menu = content.split(".buttonStyle(.plain)", 1)[1].split(".contextMenu {", 1)[1].split(
+        "\n                }\n            }\n        }", 1
+    )[0]
+    assert "S.Projects.applyDetectedUpdate" in menu
+
+
+def test_evidence_bar_is_a_bounded_bottom_safe_area_inset() -> None:
+    """codex review 20260903-203219-kq79nn P1 visual: Evidence & Diagnostics
+    must be the Artifact's bottom bar — a `.safeAreaInset(edge: .bottom)`
+    sibling on the same ScrollView the mission bar already pins to `.top`
+    with, collapsed to one slim row by default, with its expanded content
+    explicitly height-bounded and independently scrollable so opening it can
+    never consume the window."""
+    content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
+    detail = content.split("private var scenarioDetail", 1)[1].split(
+        "private func workbenchBody", 1
+    )[0]
+    assert ".safeAreaInset(edge: .bottom" in detail
+    assert "evidenceBar(scenario)" in detail
+    assert "technicalSection" not in content, "renamed to evidenceBar, not left as a dead alias"
+    bar = content.split("private func evidenceBar", 1)[1].split(
+        "\n    private var evidenceNav", 1
+    )[0]
+    assert "showTechnical.toggle()" in bar
+    assert ".frame(maxHeight: 320)" in bar
+    assert "ScrollView {" in bar
+
+
+def test_progress_metrics_are_exactly_four_not_five() -> None:
+    """codex review 20260903-203219-kq79nn P1 visual: the Artifact's progress
+    card has exactly four tiles (team ready, requests closed, first-attempt
+    delivery, degraded) in a true 2×2 — five tiles in a fixed two-column
+    grid wraps into an orphan fifth. End-to-end evidence relocated to the
+    Analytics tab rather than dropped."""
+    content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
+    grid = content.split("private var collaborationHealthSection", 1)[1].split(
+        "\n    private func healthColor", 1
+    )[0]
+    assert grid.count("CollaborationHealthMetricTile(") == 4
+    assert "S.CollaborationHealth.endToEndEvidence" not in grid
+    distribution = content.split("private var deliveryDistributionSection", 1)[1].split(
+        "\n    private var inspectorSection", 1
+    )[0]
+    assert "S.CollaborationHealth.endToEndEvidence" in distribution
 
 
 def test_mission_bar_is_sticky_outside_the_scroll_view() -> None:
