@@ -707,26 +707,37 @@ def test_project_row_has_no_nested_interactive_control() -> None:
     assert "S.Projects.applyDetectedUpdate" in menu
 
 
-def test_evidence_bar_is_a_bounded_bottom_safe_area_inset() -> None:
+def test_evidence_uses_primary_column_slack_with_a_pinned_bottom_disclosure() -> None:
     """codex review 20260903-203219-kq79nn P1 visual: Evidence & Diagnostics
     must be the Artifact's bottom bar — a `.safeAreaInset(edge: .bottom)`
-    sibling on the same ScrollView the mission bar already pins to `.top`
-    with, collapsed to one slim row by default, with its expanded content
-    explicitly height-bounded and independently scrollable so opening it can
-    never consume the window."""
+    sibling on the same ScrollView the mission bar already pins to `.top`.
+    Follow-up from the real m2 screenshot: only the disclosure stays pinned;
+    expanded evidence uses the sparse primary column below Team instead of a
+    full-width lower band that preserves a large empty rectangle above it."""
     content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
+    assert "@State private var showTechnical = true" in content
     detail = content.split("private var scenarioDetail", 1)[1].split(
         "private func workbenchBody", 1
     )[0]
     assert ".safeAreaInset(edge: .bottom" in detail
     assert "evidenceBar(scenario)" in detail
     assert "technicalSection" not in content, "renamed to evidenceBar, not left as a dead alias"
+    workbench = content.split("private func workbenchBody", 1)[1].split(
+        "private var emptyDetailCanvas", 1
+    )[0]
+    assert workbench.count("if showTechnical") == 2
+    assert workbench.count("evidencePane(scenario)") == 2
+    pane = content.split("private func evidencePane", 1)[1].split(
+        "\n    private func evidenceBar", 1
+    )[0]
+    assert "ScrollView {" in pane
+    assert ".frame(minHeight: 280, maxHeight: .infinity" in pane
     bar = content.split("private func evidenceBar", 1)[1].split(
         "\n    private var evidenceNav", 1
     )[0]
     assert "showTechnical.toggle()" in bar
-    assert ".frame(maxHeight: 320)" in bar
-    assert "ScrollView {" in bar
+    assert "ScrollView {" not in bar
+    assert "case .deliveries" not in bar
 
 
 def test_progress_metrics_are_exactly_four_not_five() -> None:

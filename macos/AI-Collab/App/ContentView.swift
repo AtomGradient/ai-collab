@@ -874,18 +874,30 @@ struct ContentView: View {
                 // the unified title bar. `safeAreaInset` is the documented
                 // pattern for a pinned header that stays correctly below the
                 // title bar while the content beneath it scrolls.
-                ScrollView {
-                    workbenchBody(scenario)
-                        .padding(20)
-                }
-                .safeAreaInset(edge: .top, spacing: 0) {
-                    VStack(spacing: 0) {
-                        missionBar(scenario)
-                        Divider()
+                //
+                // The outer `GeometryReader` gives the overview a stable
+                // minimum height. In expanded diagnostics mode the evidence
+                // pane lives inside the primary column and absorbs that
+                // height; it is not a second full-width drawer below a short
+                // team card, which left most of the primary column blank.
+                GeometryReader { geo in
+                    ScrollView {
+                        workbenchBody(scenario)
+                            .frame(
+                                minHeight: max(geo.size.height - 190, 0),
+                                alignment: .top
+                            )
+                            .padding(20)
                     }
-                }
-                .safeAreaInset(edge: .bottom, spacing: 0) {
-                    evidenceBar(scenario)
+                    .safeAreaInset(edge: .top, spacing: 0) {
+                        VStack(spacing: 0) {
+                            missionBar(scenario)
+                            Divider()
+                        }
+                    }
+                    .safeAreaInset(edge: .bottom, spacing: 0) {
+                        evidenceBar(scenario)
+                    }
                 }
                 .task(id: scenario.id) {
                     await model.monitorDeliveries(for: scenario.id)
@@ -904,24 +916,34 @@ struct ContentView: View {
     /// straight to the stacked one, Team still first.
     @ViewBuilder
     private func workbenchBody(_ scenario: ScenarioRecord) -> some View {
-        // Evidence & Diagnostics is a bottom `.safeAreaInset` on the
-        // enclosing ScrollView now (`evidenceBar`, called from
-        // `scenarioDetail`), not a call here — nothing left to scroll past
-        // it for.
+        // The bottom inset remains the stable disclosure control. Expanded
+        // evidence belongs in the primary column, where a sparse team leaves
+        // usable space while the progress panel remains visible alongside it.
         ViewThatFits(in: .horizontal) {
+            // The secondary panel can fill the row. In expanded mode the
+            // evidence pane does the same in the primary column, directly
+            // below the naturally sized team roster.
             HStack(alignment: .top, spacing: 20) {
                 VStack(alignment: .leading, spacing: 16) {
                     healthCard(scenario)
                     participantsSection
+                    if showTechnical {
+                        evidencePane(scenario)
+                    }
                 }
-                .frame(minWidth: 340, maxWidth: .infinity, alignment: .leading)
+                .frame(minWidth: 340, maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 progressPanel(scenario)
-                    .frame(width: 280, alignment: .leading)
+                    .frame(width: 280)
+                    .frame(maxHeight: .infinity, alignment: .top)
             }
+            .frame(maxHeight: .infinity, alignment: .top)
             VStack(alignment: .leading, spacing: 16) {
                 healthCard(scenario)
                 participantsSection
                 progressPanel(scenario)
+                if showTechnical {
+                    evidencePane(scenario)
+                }
             }
         }
     }
@@ -1897,6 +1919,11 @@ struct ContentView: View {
             needsAttentionSection
         }
         .padding(14)
+        // Stretch before painting the background, not after, so the card
+        // surface itself reaches down to match the team column's height
+        // instead of stopping at its own short content (same fix as
+        // `participantsSection`'s GroupBox, same user-reported gap).
+        .frame(maxHeight: .infinity, alignment: .top)
         .background(.secondary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
     }
 
@@ -2329,48 +2356,46 @@ struct ContentView: View {
 
     // MARK: - Technical fold (machine view, complete and collapsed)
 
-    @State private var showTechnical = false
+    @State private var showTechnical = true
 
-    /// The Artifact's actual bottom bar (review 20260903-203219-kq79nn P1
-    /// visual): a `.safeAreaInset(edge: .bottom)` sibling on the same
-    /// ScrollView the mission bar already pins to `.top` with — that
-    /// technique is now proven correct on this exact screen, so this reuses
-    /// it rather than the `DisclosureGroup` that used to leave the drawer
-    /// scrolling inline with everything else. Collapsed is one slim row,
-    /// always the bottom-most line of the window; expanded content grows
-    /// upward from it and is explicitly height-bounded with its own
-    /// `ScrollView` so opening the drawer can never consume the window the
-    /// way an unbounded inline expansion could. Every section's own body is
-    /// still untouched, only where it is called from changed. Expanding
-    /// never happens automatically on a fault — see `needsAttentionSection`'s
-    /// links, which are the only things that open it (review
-    /// 20260903-181141-6gjonu point 7).
-    private func evidenceBar(_ scenario: ScenarioRecord) -> some View {
-        VStack(spacing: 0) {
-            if showTechnical {
-                HStack(alignment: .top, spacing: 12) {
-                    evidenceNav
-                    Divider()
-                    ScrollView {
-                        Group {
-                            switch evidenceTab {
-                            case .deliveries: deliveriesSection
-                            case .preflight: preflightSection
-                            case .topology: topologySection
-                            case .policy: policySection
-                            case .resources: resourcesSection
-                            case .inspector: inspectorSection
-                            case .analytics: deliveryDistributionSection
-                            case .highRisk: highRiskSection(scenario)
-                            }
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
+    /// Expanded diagnostics use the otherwise empty part of the primary
+    /// column instead of reserving a second full-width horizontal band below
+    /// the overview. The body scrolls independently and absorbs the column's
+    /// remaining height without pushing the progress panel away.
+    private func evidencePane(_ scenario: ScenarioRecord) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            evidenceNav
+            Divider()
+            ScrollView {
+                Group {
+                    switch evidenceTab {
+                    case .deliveries: deliveriesSection
+                    case .preflight: preflightSection
+                    case .topology: topologySection
+                    case .policy: policySection
+                    case .resources: resourcesSection
+                    case .inspector: inspectorSection
+                    case .analytics: deliveryDistributionSection
+                    case .highRisk: highRiskSection(scenario)
                     }
                 }
-                .padding(12)
-                .frame(maxHeight: 320)
-                Divider()
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
+        }
+        .padding(12)
+        .frame(minHeight: 280, maxHeight: .infinity, alignment: .top)
+        .background(.bar, in: RoundedRectangle(cornerRadius: 8))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(.separator.opacity(0.6), lineWidth: 1)
+        }
+    }
+
+    /// The Artifact's persistent bottom disclosure. Only the control stays
+    /// pinned; `evidencePane` renders the expanded workspace in the main
+    /// layout so opening it cannot create a large unused region under Team.
+    private func evidenceBar(_: ScenarioRecord) -> some View {
+        VStack(spacing: 0) {
             Button {
                 showTechnical.toggle()
             } label: {
