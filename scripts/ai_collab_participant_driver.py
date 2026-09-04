@@ -1693,9 +1693,13 @@ def _runtime_environment(
 ) -> dict[str, str]:
     _validate_participant_client(participant_client)
     executable = Path(_runtime_argv(launch_spec)[0])
+    # The participant's own generation-private directory comes first so a
+    # bare ``ai-ping`` inside this TUI resolves to that generation's wrapper
+    # and never to another generation's or to the product entry point.
     search_path = os.pathsep.join(
         dict.fromkeys(
             (
+                *(() if private_root is None else (str(private_root),)),
                 str(PINGAGENT_BIN),
                 str(executable.parent),
                 "/usr/local/bin",
@@ -2643,6 +2647,22 @@ async def _wait_startup_ready(
         await asyncio.sleep(STARTUP_POLL_SECONDS)
 
 
+def _launcher_script(
+    environment: Mapping[str, str], workspace_path: Path, command: str
+) -> str:
+    """Render the zsh launcher iTerm2 runs for one participant generation."""
+
+    return (
+        "#!/bin/zsh -f\nset -eu\numask 077\n"
+        + "".join(
+            f"export {key}={shlex.quote(value)}\n"
+            for key, value in environment.items()
+        )
+        + f"cd -- {shlex.quote(str(workspace_path))}\n"
+        + f"exec {command}\n"
+    )
+
+
 async def _iterm_start_async(
     module: Any,
     private_root: Path,
@@ -2682,13 +2702,7 @@ async def _iterm_start_async(
             launch_spec, participant_client, private_root
         )
         launcher.write_text(
-            "#!/bin/zsh -f\nset -eu\numask 077\n"
-            + "".join(
-                f"export {key}={shlex.quote(value)}\n"
-                for key, value in environment.items()
-            )
-            + f"cd -- {shlex.quote(str(workspace_path))}\n"
-            + f"exec {command}\n",
+            _launcher_script(environment, workspace_path, command),
             encoding="utf-8",
         )
         os.chmod(launcher, 0o700)
@@ -3490,7 +3504,6 @@ def _delivery_notification(
     message_kind: str,
     message_path: Path,
     reply_to_delivery_id: str | None,
-    participant_ping: Path,
 ) -> str:
     sender = record["target"]["sender"]["participant_id"]
     short_kind = message_kind.removeprefix("collaboration.")
@@ -3513,15 +3526,16 @@ def _delivery_notification(
         )
     if message_kind in terminal_kinds:
         return f"{prefix} | 请 Read {path} 并按其中说明处理；此消息无需回执"
-    ping_command = shlex.quote(str(participant_ping))
     reply_kind = (
         " --kind review-response"
         if message_kind == "collaboration.review-request"
         else ""
     )
+    # ``ai-ping`` resolves through the TUI's PATH to this generation's own
+    # wrapper (see _runtime_environment); no absolute path is shown.
     return (
         f"{prefix} | 请 Read {path} 并按其中说明处理；处理完用 "
-        f"{ping_command} {sender}{reply_kind} --reply-to {delivery_id} "
+        f"ai-ping {sender}{reply_kind} --reply-to {delivery_id} "
         "--file <你的回复.md>"
     )
 
@@ -3701,7 +3715,6 @@ def _delivery_message_text(
     message: str,
     token: str,
     reply_to_delivery_id: str | None,
-    participant_ping: Path,
 ) -> str:
     sender = record["target"]["sender"]["participant_id"]
     receiver = record["target"]["receiver"]["participant_id"]
@@ -3743,7 +3756,7 @@ def _delivery_message_text(
         )
         instructions.append(
             "需要回复时使用："
-            f"{shlex.quote(str(participant_ping))} {sender} --kind {reply_kind} "
+            f"ai-ping {sender} --kind {reply_kind} "
             f"--reply-to {delivery_id} --file <你的回复.md>"
         )
     instructions.append(
@@ -3760,7 +3773,6 @@ def _write_delivery_message(
     message: str,
     token: str,
     reply_to_delivery_id: str | None,
-    participant_ping: Path,
 ) -> Path:
     path = _delivery_message_path(workspace_path, record)
     temporary = path.parent / f".{path.name}.{os.getpid()}.{secrets.token_hex(5)}.tmp"
@@ -3774,7 +3786,6 @@ def _write_delivery_message(
                     message,
                     token,
                     reply_to_delivery_id,
-                    participant_ping,
                 )
             )
             stream.flush()
@@ -3915,7 +3926,6 @@ def deliver(payload: Mapping[str, Any]) -> dict[str, Any]:
         raise DriverError("typed delivery payload is invalid")
     module = _ensure_iterm_module(private_root)
     asyncio.run(_validate_exact_session_async(module, state))
-    participant_ping = _participant_ping_path(private_root)
     _ensure_delivery_mailbox_ignored(workspace_path)
     message_path = _write_delivery_message(
         workspace_path,
@@ -3924,7 +3934,6 @@ def deliver(payload: Mapping[str, Any]) -> dict[str, Any]:
         message,
         token,
         reply_to_delivery_id,
-        participant_ping,
     )
     transport = _pingagent_deliver(
         state,
@@ -3934,7 +3943,6 @@ def deliver(payload: Mapping[str, Any]) -> dict[str, Any]:
             message_kind,
             message_path.relative_to(workspace_path),
             reply_to_delivery_id,
-            participant_ping,
         ),
     )
     private_state = _read_private(_state_path(private_root))

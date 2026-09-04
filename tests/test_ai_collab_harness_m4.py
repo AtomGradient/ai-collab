@@ -8,6 +8,7 @@ import asyncio
 import copy
 import hashlib
 import json
+import os
 import re
 import shlex
 import shutil
@@ -1278,6 +1279,81 @@ def test_generic_runtime_environment_includes_scoped_client_and_proxy_only(
         collaboration_context
     )
     assert "CODEX_THREAD_ID" not in environment
+
+def test_runtime_environment_puts_the_generation_wrapper_first(
+    tmp_path: Path, monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(
+        participant_driver,
+        "_runtime_argv",
+        lambda launch_spec: ("/owner/runtime/bin/launcher", "--flag"),
+    )
+    context = tmp_path / "participant-context.json"
+    context.write_text("{}\n", encoding="utf-8")
+    context.chmod(0o600)
+    client_pythonpath = tmp_path / "client-pythonpath"
+    client_pythonpath.mkdir(mode=0o700)
+    collaboration_context = tmp_path / "participant-collaboration.json"
+    collaboration_context.write_text("{}\n", encoding="utf-8")
+    collaboration_context.chmod(0o600)
+    participant_client = {
+        "context_path": str(context),
+        "client_executable": str(Path(sys.executable).resolve()),
+        "client_pythonpath": str(client_pythonpath),
+        "collaboration_context_path": str(collaboration_context),
+    }
+    participants = tmp_path / "Application Support" / "AI Collab" / "participants"
+    older = participants / "digest" / "generation-2"
+    current = participants / "digest" / "generation-3"
+    for root in (older, current):
+        root.mkdir(parents=True, mode=0o700)
+
+    environment = participant_driver._runtime_environment(  # noqa: SLF001
+        {}, participant_client, current
+    )
+    search_path = environment["PATH"].split(os.pathsep)
+    # This generation's own directory comes first, then the product entry
+    # point; no other generation's directory is reachable from this TUI.
+    assert search_path[0] == str(current)
+    assert search_path[1] == str(participant_driver.PINGAGENT_BIN)
+    assert str(older) not in search_path
+    assert search_path.count(str(current)) == 1
+
+    previous = participant_driver._runtime_environment(  # noqa: SLF001
+        {}, participant_client, older
+    )
+    assert previous["PATH"].split(os.pathsep)[0] == str(older)
+    assert str(current) not in previous["PATH"].split(os.pathsep)
+
+    # Callers without a private root keep the product entry point first.
+    generic = participant_driver._runtime_environment(  # noqa: SLF001
+        {}, participant_client
+    )
+    assert generic["PATH"].split(os.pathsep)[0] == str(
+        participant_driver.PINGAGENT_BIN
+    )
+
+    # The launcher quotes the space-bearing PATH and workspace so the TUI's
+    # zsh receives exactly these values.
+    workspace = tmp_path / "Scenarios" / "workspace-demo" / "bundle" / "my project"
+    script = participant_driver._launcher_script(  # noqa: SLF001
+        environment, workspace, "exec-me --flag"
+    )
+    lines = script.splitlines()
+    assert lines[:3] == ["#!/bin/zsh -f", "set -eu", "umask 077"]
+    exports: dict[str, str] = {}
+    for line in lines:
+        if not line.startswith("export "):
+            continue
+        key, _, quoted = line.removeprefix("export ").partition("=")
+        values = shlex.split(quoted)
+        assert len(values) == 1
+        exports[key] = values[0]
+    assert exports["PATH"] == environment["PATH"]
+    assert exports["PATH"].startswith(str(current) + os.pathsep)
+    assert shlex.split(lines[-2]) == ["cd", "--", str(workspace)]
+    assert lines[-1] == "exec exec-me --flag"
+
 
 
 def test_authorize_sender_returns_only_redacted_owned_chain_evidence(
@@ -3409,7 +3485,6 @@ def test_delivery_notification_does_not_create_terminal_reply_loops() -> None:
             "receiver": {"participant_id": "analyst"},
         },
     }
-    participant_ping = Path("/private/participant generation/ai-ping")
     message_path = Path(".ai-mailbox/inbox/analyst/delivery-terminal.md")
     for message_kind in (
         "collaboration.request",
@@ -3422,7 +3497,6 @@ def test_delivery_notification_does_not_create_terminal_reply_loops() -> None:
             message_kind,
             message_path,
             None,
-            participant_ping,
         )
         assert request.startswith(
             "[ai-collab 收信] from=reviewer "
@@ -3433,7 +3507,7 @@ def test_delivery_notification_does_not_create_terminal_reply_loops() -> None:
         assert "AI Collaboration Harness typed delivery" not in request
         assert "AI_COLLAB_CONSUMED" not in request
         assert (
-            "'/private/participant generation/ai-ping' reviewer "
+            "处理完用 ai-ping reviewer "
             + (
                 "--kind review-response "
                 if message_kind == "collaboration.review-request"
@@ -3441,6 +3515,9 @@ def test_delivery_notification_does_not_create_terminal_reply_loops() -> None:
             )
             + "--reply-to delivery-terminal --file <你的回复.md>"
         ) in request
+        # The wrapper is found through the TUI's PATH; no absolute path leaks.
+        assert "/" not in request.split("处理完用 ")[1]
+        assert "Application Support" not in request
         assert "\n" not in request
 
     for message_kind in (
@@ -3454,7 +3531,6 @@ def test_delivery_notification_does_not_create_terminal_reply_loops() -> None:
             message_kind,
             message_path,
             "delivery-request",
-            participant_ping,
         )
         assert "reply_to=delivery-request" in terminal
         assert "这是对你之前消息(id=delivery-request)的回复" in terminal
@@ -3479,7 +3555,6 @@ def test_delivery_message_moves_long_payload_out_of_tui_notification(
             "receiver": {"participant_id": "analyst2"},
         },
     }
-    participant_ping = private_root / "ai-ping"
     message = "诊断结果语义审核\n" + ("完整正文-0123456789\n" * 2_000)
     token = "e" * 48
 
@@ -3490,14 +3565,12 @@ def test_delivery_message_moves_long_payload_out_of_tui_notification(
         message,
         token,
         None,
-        participant_ping,
     )
     notification = participant_driver._delivery_notification(  # noqa: SLF001
         record,
         "collaboration.review-request",
         message_path.relative_to(workspace_path),
         None,
-        participant_ping,
     )
     persisted = message_path.read_text(encoding="utf-8")
 
@@ -3508,7 +3581,13 @@ def test_delivery_message_moves_long_payload_out_of_tui_notification(
     assert stat.S_IMODE(message_path.stat().st_mode) == 0o600
     assert message in persisted
     assert "kind: review-request" in persisted
-    assert "--kind review-response --reply-to delivery-long" in persisted
+    assert (
+        "需要回复时使用：ai-ping reviewer --kind review-response "
+        "--reply-to delivery-long --file <你的回复.md>"
+    ) in persisted
+    assert str(private_root) not in persisted
+    assert "处理完用 ai-ping reviewer --kind review-response" in notification
+    assert str(private_root) not in notification
     assert f"consumption_token: {token}" in persisted
     assert f"AI_COLLAB_CONSUMED:{token}" not in persisted
     assert "前缀 `AI_COLLAB_CONSUMED:`" in persisted
