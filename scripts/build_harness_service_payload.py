@@ -67,6 +67,13 @@ IMMUTABILITY_PROBE_IMPORTS = (
     "asyncio, ensurepip, hashlib, json, pathlib, plistlib, re, subprocess, "
     "urllib.request, uuid, venv"
 )
+# Every optimization level a launch may request looks for its own bytecode
+# variant before ``site`` runs, so all of them ship.
+PRECOMPILE_OPTIMIZATION_LEVELS = [0, 1, 2]
+IMMUTABILITY_PROBE_FLAGS = (("-I",), ("-I", "-O"), ("-I", "-OO"))
+# ``co_filename`` in shipped bytecode is relative to this name, never the
+# build machine's output directory.
+SHIPPED_PATH_PREFIX = "HarnessService"
 _MACHO_MAGICS = (
     b"\xcf\xfa\xed\xfe",
     b"\xce\xfa\xed\xfe",
@@ -238,13 +245,16 @@ def _write_bytecode_guard(runtime: Path) -> Path:
     return guard
 
 
-def _precompile_tree(root: Path) -> None:
+def _precompile_tree(root: Path, destination: Path) -> None:
     """Ship hash-validated bytecode so the interpreter never needs to write any.
 
     Modules imported before ``site`` runs (encodings, io, os, ...) are not
     covered by the guard; shipping their bytecode is what keeps the first
     interpreter start from writing into the bundle.  Unchecked-hash bytecode
-    is used regardless of source mtimes, which copying changes.
+    is used regardless of source mtimes, which copying changes.  All
+    optimization levels ship because ``-O``/``-OO`` look for their own
+    variant, and ``co_filename`` is recorded relative to the payload so the
+    output is identical wherever it was built.
     """
 
     if not root.is_dir():
@@ -253,7 +263,10 @@ def _precompile_tree(root: Path) -> None:
         str(root),
         quiet=1,
         rx=PRECOMPILE_EXCLUDE,
+        optimize=PRECOMPILE_OPTIMIZATION_LEVELS,
         invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH,
+        stripdir=str(destination),
+        prependdir=SHIPPED_PATH_PREFIX,
     ):
         raise SystemExit(f"embedded Python precompilation failed under {root}")
 
@@ -274,20 +287,22 @@ def _assert_embedded_python_leaves_payload_untouched(destination: Path) -> None:
     executable = destination / "runtime/bin/python3"
     roots = [destination / "runtime", destination / "python", destination / "scripts"]
     before = {str(root): _tree_snapshot(root) for root in roots}
-    completed = subprocess.run(
-        [str(executable), "-I", "-c", f"import {IMMUTABILITY_PROBE_IMPORTS}"],
-        cwd=destination,
-        env={},
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        check=False,
-        timeout=60,
-    )
-    if completed.returncode != 0:
-        raise SystemExit(
-            "embedded Python immutability probe failed:\n" + completed.stdout.strip()
+    for flags in IMMUTABILITY_PROBE_FLAGS:
+        completed = subprocess.run(
+            [str(executable), *flags, "-c", f"import {IMMUTABILITY_PROBE_IMPORTS}"],
+            cwd=destination,
+            env={},
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+            timeout=60,
         )
+        if completed.returncode != 0:
+            raise SystemExit(
+                "embedded Python immutability probe failed:\n"
+                + completed.stdout.strip()
+            )
     changed: list[str] = []
     for root in roots:
         after = _tree_snapshot(root)
@@ -509,7 +524,7 @@ def build(destination: Path, integration_root: Path | None) -> None:
         python_root,
         destination / "scripts",
     ):
-        _precompile_tree(root)
+        _precompile_tree(root, destination)
     _assert_embedded_python_runs(destination)
     _assert_embedded_python_leaves_payload_untouched(destination)
     manifest = {

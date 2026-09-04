@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import marshal
 import subprocess
 import sys
 import venv
@@ -55,7 +56,7 @@ def test_embedded_payload_copies_pingagent_client_and_transport(
             target.write_text("embedded file\n", encoding="utf-8")
 
     monkeypatch.setattr(module, "_copy", fake_copy)
-    monkeypatch.setattr(module, "_precompile_tree", lambda root: None)
+    monkeypatch.setattr(module, "_precompile_tree", lambda root, destination: None)
     module.build(destination, integration_root)
 
     targets = {target.relative_to(destination.parent) for _, target in copied}
@@ -92,7 +93,7 @@ def _install_fake_copy(module: Any, monkeypatch: Any) -> list[tuple[Path, Path]]
             target.write_text("embedded file\n", encoding="utf-8")
 
     monkeypatch.setattr(module, "_copy", fake_copy)
-    monkeypatch.setattr(module, "_precompile_tree", lambda root: None)
+    monkeypatch.setattr(module, "_precompile_tree", lambda root, destination: None)
     return copied
 
 
@@ -305,14 +306,23 @@ def test_precompiled_bytecode_is_unchecked_hash_and_skips_test_trees(
     (tmp_path / "test").mkdir()
     (tmp_path / "test" / "t.py").write_text("Y = 2\n", encoding="utf-8")
 
-    module._precompile_tree(tmp_path)  # noqa: SLF001
+    module._precompile_tree(tmp_path, tmp_path.parent)  # noqa: SLF001
 
-    pyc = tmp_path / "pkg" / "__pycache__" / f"mod.{sys.implementation.cache_tag}.pyc"
-    assert pyc.is_file()
-    flags = int.from_bytes(pyc.read_bytes()[4:8], "little")
-    assert flags == 0b01  # hash-based, source not checked at import time
+    tag = sys.implementation.cache_tag
+    cache = tmp_path / "pkg" / "__pycache__"
+    for name in (f"mod.{tag}.pyc", f"mod.{tag}.opt-1.pyc", f"mod.{tag}.opt-2.pyc"):
+        pyc = cache / name
+        assert pyc.is_file(), name
+        raw = pyc.read_bytes()
+        flags = int.from_bytes(raw[4:8], "little")
+        assert flags == 0b01  # hash-based, source not checked at import time
+        code = marshal.loads(raw[16:])
+        # Recorded relative to the shipped payload, never the build directory.
+        assert code.co_filename == f"{module.SHIPPED_PATH_PREFIX}/{tmp_path.name}/pkg/mod.py"
+        assert str(tmp_path).encode() not in raw
+        assert b"/Users/" not in raw and b"/tmp/" not in raw and b"/var/" not in raw
     assert not (tmp_path / "test" / "__pycache__").exists()
-    module._precompile_tree(tmp_path / "absent")  # noqa: SLF001
+    module._precompile_tree(tmp_path / "absent", tmp_path.parent)  # noqa: SLF001
 
 
 def test_build_requires_the_pinned_embedded_python(
@@ -345,7 +355,9 @@ def test_immutability_probe_runs_isolated_with_an_empty_environment(
     module._assert_embedded_python_leaves_payload_untouched(service)  # noqa: SLF001
 
     assert log.read_text(encoding="utf-8").splitlines() == [
-        f"unset|unset|-I -c import {module.IMMUTABILITY_PROBE_IMPORTS}"
+        f"unset|unset|-I -c import {module.IMMUTABILITY_PROBE_IMPORTS}",
+        f"unset|unset|-I -O -c import {module.IMMUTABILITY_PROBE_IMPORTS}",
+        f"unset|unset|-I -OO -c import {module.IMMUTABILITY_PROBE_IMPORTS}",
     ]
 
 
