@@ -176,6 +176,8 @@ if [[ -n "${AI_COLLAB_HARNESS_CONTEXT:-}" ]]; then
     exit 1
   fi
   export PYTHONPATH="$HARNESS_PYTHONPATH"
+  export PYTHONDONTWRITEBYTECODE=1
+  export PYTHONNOUSERSITE=1
   exec "$HARNESS_CLIENT" "${HARNESS_ARGS[@]}"
 fi
 

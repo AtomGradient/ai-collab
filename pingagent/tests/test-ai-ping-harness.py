@@ -25,6 +25,8 @@ def _environment(tmp_path: Path) -> tuple[dict[str, str], Path, Path]:
     client = tmp_path / "participant-client"
     client.write_text(
         "#!/bin/sh\n"
+        "[ \"${PYTHONDONTWRITEBYTECODE:-}\" = 1 ] || exit 41\n"
+        "[ \"${PYTHONNOUSERSITE:-}\" = 1 ] || exit 42\n"
         "{\n"
         "  printf 'PYTHONPATH=%s\\n' \"$PYTHONPATH\"\n"
         "  for value in \"$@\"; do printf 'ARG=%s\\n' \"$value\"; done\n"

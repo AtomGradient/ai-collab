@@ -1295,6 +1295,8 @@ def _write_participant_ping(
         "AI_COLLAB_HARNESS_COLLABORATION_CONTEXT": participant_client[
             "collaboration_context_path"
         ],
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONNOUSERSITE": "1",
     }
     path.write_text(
         "#!/bin/zsh -f\nset -eu\numask 077\n"

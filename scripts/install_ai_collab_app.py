@@ -144,59 +144,79 @@ def _repair_unsealed_bytecode(app: Path, state_root: Path) -> Path | None:
     A normal embedded Host sets PYTHONDONTWRITEBYTECODE.  This narrow repair
     exists for an older installation (or a diagnostic invocation of its
     embedded Python) that already wrote ``__pycache__/*.pyc`` into the signed
-    bundle.  The repair is accepted only when removing exactly those caches
-    makes the original App signature valid again.
+    bundle.  The repair is accepted only when removing exactly the files that
+    codesign identifies as additions makes the original App signature valid
+    again.
     """
 
-    try:
-        _run(["/usr/bin/codesign", "--verify", "--deep", "--strict", str(app)])
+    verification = _run(
+        [
+            "/usr/bin/codesign",
+            "--verify",
+            "--deep",
+            "--strict",
+            "--verbose=4",
+            str(app),
+        ],
+        check=False,
+    )
+    if verification.returncode == 0:
         return None
-    except InstallError as initial_failure:
-        service = app / "Contents/Resources/HarnessService"
-        if service.is_symlink() or not service.is_dir():
+    initial_failure = InstallError(
+        verification.stdout.strip() or "installed App signature is invalid"
+    )
+    service = app / "Contents/Resources/HarnessService"
+    if service.is_symlink() or not service.is_dir():
+        raise initial_failure
+    service_root = service.resolve(strict=True)
+    expected_header = f"{app}: a sealed resource is missing or invalid"
+    bytecode: list[Path] = []
+    for line in verification.stdout.splitlines():
+        if not line or line == expected_header:
+            continue
+        if not line.startswith("file added: "):
             raise initial_failure
-        service_root = service.resolve(strict=True)
-        caches = sorted(service.rglob("__pycache__"), key=lambda path: len(path.parts))
-        if not caches:
-            raise initial_failure
-        for cache in caches:
-            if (
-                cache.is_symlink()
-                or not cache.is_dir()
-                or cache.stat().st_uid != os.getuid()
-                or not cache.resolve(strict=True).is_relative_to(service_root)
-            ):
-                raise initial_failure
-            for child in cache.iterdir():
-                if (
-                    child.is_symlink()
-                    or not child.is_file()
-                    or child.suffix != ".pyc"
-                    or child.stat().st_uid != os.getuid()
-                ):
-                    raise initial_failure
-
-        quarantine = _private_installation_directory(state_root) / (
-            f"bytecode-quarantine-{uuid.uuid4().hex}"
-        )
-        quarantine.mkdir(mode=0o700)
-        moved: list[tuple[Path, Path]] = []
+        child = Path(line.removeprefix("file added: "))
         try:
-            for cache in caches:
-                destination = quarantine / cache.relative_to(app)
-                destination.parent.mkdir(parents=True, mode=0o700)
-                os.replace(cache, destination)
-                moved.append((cache, destination))
-            _run(
-                ["/usr/bin/codesign", "--verify", "--deep", "--strict", str(app)]
-            )
-        except BaseException:
-            for cache, destination in reversed(moved):
-                cache.parent.mkdir(parents=True, exist_ok=True)
-                os.replace(destination, cache)
-            shutil.rmtree(quarantine, ignore_errors=True)
+            details = child.lstat()
+            resolved = child.resolve(strict=True)
+        except OSError as exc:
+            raise initial_failure from exc
+        if (
+            not child.is_absolute()
+            or stat.S_ISLNK(details.st_mode)
+            or not stat.S_ISREG(details.st_mode)
+            or child.suffix != ".pyc"
+            or child.parent.name != "__pycache__"
+            or details.st_uid != os.getuid()
+            or not resolved.is_relative_to(service_root)
+        ):
             raise initial_failure
-        return quarantine
+        bytecode.append(child)
+    if not bytecode or len(bytecode) != len(set(bytecode)):
+        raise initial_failure
+
+    quarantine = _private_installation_directory(state_root) / (
+        f"bytecode-quarantine-{uuid.uuid4().hex}"
+    )
+    quarantine.mkdir(mode=0o700)
+    moved: list[tuple[Path, Path]] = []
+    try:
+        for child in sorted(bytecode):
+            destination = quarantine / child.relative_to(app)
+            destination.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+            os.replace(child, destination)
+            moved.append((child, destination))
+        _run(
+            ["/usr/bin/codesign", "--verify", "--deep", "--strict", str(app)]
+        )
+    except BaseException:
+        for child, destination in reversed(moved):
+            child.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(destination, child)
+        shutil.rmtree(quarantine, ignore_errors=True)
+        raise initial_failure
+    return quarantine
 
 
 def _launch_app(app: Path) -> subprocess.Popen[bytes]:

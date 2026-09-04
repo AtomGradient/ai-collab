@@ -3723,7 +3723,8 @@ def test_generation_scoped_ping_survives_fresh_login_shell_environment(
         "#!/bin/zsh -f\n"
         "printf '%s\\n' \"$AI_COLLAB_HARNESS_CONTEXT\" "
         "\"$AI_COLLAB_HARNESS_CLIENT_EXECUTABLE\" "
-        "\"$AI_COLLAB_HARNESS_CLIENT_PYTHONPATH\" \"$@\"\n",
+        "\"$AI_COLLAB_HARNESS_CLIENT_PYTHONPATH\" "
+        "\"$PYTHONDONTWRITEBYTECODE\" \"$PYTHONNOUSERSITE\" \"$@\"\n",
         encoding="utf-8",
     )
     transport.chmod(0o700)
@@ -3752,6 +3753,8 @@ def test_generation_scoped_ping_survives_fresh_login_shell_environment(
         str(context),
         str(client_executable),
         str(client_pythonpath),
+        "1",
+        "1",
         "reviewer",
         "hello",
     ]

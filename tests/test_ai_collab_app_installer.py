@@ -7,6 +7,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -59,24 +60,41 @@ def test_existing_app_quarantines_only_unsealed_python_bytecode(
     cache.mkdir(parents=True)
     bytecode = cache / "host.cpython-312.pyc"
     bytecode.write_bytes(b"cache")
+    second_bytecode = cache / "client.cpython-312.pyc"
+    second_bytecode.write_bytes(b"second-cache")
+    signed_bytecode = cache / "signed.cpython-312.pyc"
+    signed_bytecode.write_bytes(b"signed")
     calls = 0
 
-    def verify(_argv: list[str], *, check: bool = True) -> object:
+    def verify(argv: list[str], *, check: bool = True) -> object:
         nonlocal calls
         calls += 1
         if calls == 1:
-            raise INSTALLER.InstallError("a sealed resource is invalid")
-        return object()
+            return subprocess.CompletedProcess(
+                argv,
+                1,
+                f"{app}: a sealed resource is missing or invalid\n"
+                f"file added: {bytecode}\n"
+                f"file added: {second_bytecode}\n",
+            )
+        return subprocess.CompletedProcess(argv, 0, "")
 
     monkeypatch.setattr(INSTALLER, "_run", verify)
     quarantine = INSTALLER._repair_unsealed_bytecode(app, tmp_path / "state")
 
     assert quarantine is not None
-    assert not cache.exists()
+    assert cache.is_dir()
+    assert signed_bytecode.read_bytes() == b"signed"
+    assert not bytecode.exists()
+    assert not second_bytecode.exists()
     assert (
         quarantine
         / "Contents/Resources/HarnessService/python/ai_collab/__pycache__/host.cpython-312.pyc"
     ).read_bytes() == b"cache"
+    assert (
+        quarantine
+        / "Contents/Resources/HarnessService/python/ai_collab/__pycache__/client.cpython-312.pyc"
+    ).read_bytes() == b"second-cache"
     assert calls == 2
 
 
@@ -89,11 +107,22 @@ def test_existing_app_restores_bytecode_when_signature_still_differs(
     bytecode = cache / "pathlib.cpython-312.pyc"
     bytecode.write_bytes(b"cache")
 
-    def reject(_argv: list[str], *, check: bool = True) -> object:
+    calls = 0
+
+    def reject(argv: list[str], *, check: bool = True) -> object:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return subprocess.CompletedProcess(
+                argv,
+                1,
+                f"{app}: a sealed resource is missing or invalid\n"
+                f"file added: {bytecode}\n",
+            )
         raise INSTALLER.InstallError("a signed resource differs")
 
     monkeypatch.setattr(INSTALLER, "_run", reject)
-    with pytest.raises(INSTALLER.InstallError, match="signed resource differs"):
+    with pytest.raises(INSTALLER.InstallError, match="sealed resource is missing"):
         INSTALLER._repair_unsealed_bytecode(app, tmp_path / "state")
 
     assert bytecode.read_bytes() == b"cache"
@@ -109,11 +138,16 @@ def test_existing_app_does_not_quarantine_non_bytecode_content(
     unexpected = cache / "operator-note.txt"
     unexpected.write_text("keep", encoding="utf-8")
 
-    def reject(_argv: list[str], *, check: bool = True) -> object:
-        raise INSTALLER.InstallError("a sealed resource is invalid")
+    def reject(argv: list[str], *, check: bool = True) -> object:
+        return subprocess.CompletedProcess(
+            argv,
+            1,
+            f"{app}: a sealed resource is missing or invalid\n"
+            f"file added: {unexpected}\n",
+        )
 
     monkeypatch.setattr(INSTALLER, "_run", reject)
-    with pytest.raises(INSTALLER.InstallError, match="sealed resource is invalid"):
+    with pytest.raises(INSTALLER.InstallError, match="sealed resource is missing"):
         INSTALLER._repair_unsealed_bytecode(app, tmp_path / "state")
 
     assert unexpected.read_text(encoding="utf-8") == "keep"
