@@ -3497,6 +3497,7 @@ def test_delivery_notification_does_not_create_terminal_reply_loops() -> None:
             message_kind,
             message_path,
             None,
+            "ai-ping",
         )
         assert request.startswith(
             "[ai-collab 收信] from=reviewer "
@@ -3531,6 +3532,7 @@ def test_delivery_notification_does_not_create_terminal_reply_loops() -> None:
             message_kind,
             message_path,
             "delivery-request",
+            "ai-ping",
         )
         assert "reply_to=delivery-request" in terminal
         assert "这是对你之前消息(id=delivery-request)的回复" in terminal
@@ -3565,12 +3567,14 @@ def test_delivery_message_moves_long_payload_out_of_tui_notification(
         message,
         token,
         None,
+        "ai-ping",
     )
     notification = participant_driver._delivery_notification(  # noqa: SLF001
         record,
         "collaboration.review-request",
         message_path.relative_to(workspace_path),
         None,
+        "ai-ping",
     )
     persisted = message_path.read_text(encoding="utf-8")
 
@@ -3596,6 +3600,107 @@ def test_delivery_message_moves_long_payload_out_of_tui_notification(
     assert "Read .ai-mailbox/inbox/analyst2/delivery-long.md" in notification
     assert str(workspace_path) not in notification
     assert len(notification.encode("utf-8")) < 1_024
+
+
+def test_reattached_legacy_tui_is_told_the_absolute_wrapper_path(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """A TUI launched before the private PATH existed keeps its environment.
+
+    Only a binding whose launch recorded the private-PATH layout gets the bare
+    command; an older binding reattached after an upgrade gets the absolute
+    generation wrapper, in the notification and in the message file.
+    """
+
+    private_root = tmp_path / "participant generation"
+    private_root.mkdir(mode=0o700)
+    scenario_root = tmp_path / "workspace-delivery-legacy"
+    scenario_root.mkdir(mode=0o700)
+    workspace_path = scenario_root / "bundle" / "project"
+    workspace_path.mkdir(parents=True)
+    record = {
+        "delivery_id": "delivery-legacy",
+        "message_id": "message-legacy",
+        "payload_digest": "f" * 64,
+        "target": {
+            "sender": {"participant_id": "reviewer"},
+            "receiver": {"participant_id": "analyst"},
+        },
+        "events": [
+            {
+                "attempt_number": 1,
+                "event": "attempt_started",
+                "transport_attempt_id": "attempt-legacy",
+            }
+        ],
+    }
+    state: dict[str, Any] = {
+        "schema_version": 1,
+        "session_id": "session-legacy",
+        "runtime_profile_ref": "runtime-profile.codex",
+        "workspace_path": str(workspace_path),
+    }
+    notifications: list[str] = []
+    monkeypatch.setattr(
+        participant_driver,
+        "_delivery_state",
+        lambda payload, require_delivered: (private_root, state, record, "a" * 48),
+    )
+    monkeypatch.setattr(participant_driver, "_ensure_iterm_module", lambda _: object())
+
+    async def validate_exact_session(module: Any, current: Any) -> None:
+        return None
+
+    monkeypatch.setattr(
+        participant_driver, "_validate_exact_session_async", validate_exact_session
+    )
+    monkeypatch.setattr(
+        participant_driver,
+        "_pingagent_deliver",
+        lambda current, delivery, notification: (
+            notifications.append(notification) or {"transport_evidence_digest": "b" * 64}
+        ),
+    )
+    monkeypatch.setattr(participant_driver, "_read_private", lambda _: dict(state))
+    monkeypatch.setattr(participant_driver, "_write_private", lambda path, value: None)
+    payload = {
+        "delivery_record": record,
+        "message": "review this",
+        "message_kind": "collaboration.review-request",
+        "consumption_token": "a" * 48,
+        "runtime_ready_ack": {},
+        "presentation_create_ack": {},
+        "private_root": str(private_root),
+        "workspace_path": str(scenario_root),
+        "participant_working_directory": "bundle/project",
+    }
+    message_file = workspace_path / ".ai-mailbox" / "inbox" / "analyst" / "delivery-legacy.md"
+    wrapper = shlex.quote(str(private_root / "ai-ping"))
+
+    # Binding recorded by an older build: no private-PATH marker.
+    participant_driver.deliver(payload)
+    assert (
+        f"处理完用 {wrapper} reviewer --kind review-response "
+        "--reply-to delivery-legacy --file <你的回复.md>"
+    ) in notifications[-1]
+    persisted = message_file.read_text(encoding="utf-8")
+    assert (
+        f"需要回复时使用：{wrapper} reviewer --kind review-response "
+        "--reply-to delivery-legacy --file <你的回复.md>"
+    ) in persisted
+    assert "处理完用 ai-ping " not in notifications[-1]
+
+    # Binding recorded by a launch that put the wrapper first on PATH.
+    state["private_path_first"] = True
+    participant_driver.deliver(payload)
+    assert (
+        "处理完用 ai-ping reviewer --kind review-response "
+        "--reply-to delivery-legacy --file <你的回复.md>"
+    ) in notifications[-1]
+    assert str(private_root) not in notifications[-1]
+    persisted = message_file.read_text(encoding="utf-8")
+    assert "需要回复时使用：ai-ping reviewer --kind review-response" in persisted
+    assert str(private_root) not in persisted
 
 
 def test_driver_delivery_accepts_host_message_limit(

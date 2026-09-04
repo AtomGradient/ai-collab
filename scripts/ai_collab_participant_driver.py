@@ -2209,6 +2209,7 @@ def _headless_start(
         "owner_marker": None,
         "runtime_profile_ref": launch_spec["runtime_profile_ref"],
         "workspace_path": str(workspace_path),
+        "private_path_first": True,
         "accepts_typed_delivery": _runtime_profile(launch_spec)[
             "accepts_typed_delivery"
         ],
@@ -2790,6 +2791,7 @@ async def _iterm_start_async(
             "geometry_by_topology": {topology_fingerprint: geometry},
             "runtime_profile_ref": launch_spec["runtime_profile_ref"],
             "workspace_path": str(workspace_path),
+            "private_path_first": True,
             "accepts_typed_delivery": profile["accepts_typed_delivery"],
             "startup_gate_evidence": startup_gate_evidence,
             "vendor_session_identity_sha256": vendor_session_identity_sha256,
@@ -3499,11 +3501,24 @@ async def _authorize_sender_exact_session(
     raise AssertionError("sender exact-session attempts exhausted")  # pragma: no cover
 
 
+def _delivery_ping_command(state: Mapping[str, Any], private_root: Path) -> str:
+    """Bare ``ai-ping`` only for a TUI whose launch put its wrapper on PATH.
+
+    A TUI created by an older build and reattached after an upgrade keeps its
+    original process environment, so it is told the absolute wrapper path.
+    """
+
+    if state.get("private_path_first") is True:
+        return "ai-ping"
+    return shlex.quote(str(_participant_ping_path(private_root)))
+
+
 def _delivery_notification(
     record: Mapping[str, Any],
     message_kind: str,
     message_path: Path,
     reply_to_delivery_id: str | None,
+    ping_command: str,
 ) -> str:
     sender = record["target"]["sender"]["participant_id"]
     short_kind = message_kind.removeprefix("collaboration.")
@@ -3532,10 +3547,10 @@ def _delivery_notification(
         else ""
     )
     # ``ai-ping`` resolves through the TUI's PATH to this generation's own
-    # wrapper (see _runtime_environment); no absolute path is shown.
+    # wrapper (see _runtime_environment and _delivery_ping_command).
     return (
         f"{prefix} | 请 Read {path} 并按其中说明处理；处理完用 "
-        f"ai-ping {sender}{reply_kind} --reply-to {delivery_id} "
+        f"{ping_command} {sender}{reply_kind} --reply-to {delivery_id} "
         "--file <你的回复.md>"
     )
 
@@ -3715,6 +3730,7 @@ def _delivery_message_text(
     message: str,
     token: str,
     reply_to_delivery_id: str | None,
+    ping_command: str,
 ) -> str:
     sender = record["target"]["sender"]["participant_id"]
     receiver = record["target"]["receiver"]["participant_id"]
@@ -3756,7 +3772,7 @@ def _delivery_message_text(
         )
         instructions.append(
             "需要回复时使用："
-            f"ai-ping {sender} --kind {reply_kind} "
+            f"{ping_command} {sender} --kind {reply_kind} "
             f"--reply-to {delivery_id} --file <你的回复.md>"
         )
     instructions.append(
@@ -3773,6 +3789,7 @@ def _write_delivery_message(
     message: str,
     token: str,
     reply_to_delivery_id: str | None,
+    ping_command: str,
 ) -> Path:
     path = _delivery_message_path(workspace_path, record)
     temporary = path.parent / f".{path.name}.{os.getpid()}.{secrets.token_hex(5)}.tmp"
@@ -3786,6 +3803,7 @@ def _write_delivery_message(
                     message,
                     token,
                     reply_to_delivery_id,
+                    ping_command,
                 )
             )
             stream.flush()
@@ -3927,6 +3945,7 @@ def deliver(payload: Mapping[str, Any]) -> dict[str, Any]:
     module = _ensure_iterm_module(private_root)
     asyncio.run(_validate_exact_session_async(module, state))
     _ensure_delivery_mailbox_ignored(workspace_path)
+    ping_command = _delivery_ping_command(state, private_root)
     message_path = _write_delivery_message(
         workspace_path,
         record,
@@ -3934,6 +3953,7 @@ def deliver(payload: Mapping[str, Any]) -> dict[str, Any]:
         message,
         token,
         reply_to_delivery_id,
+        ping_command,
     )
     transport = _pingagent_deliver(
         state,
@@ -3943,6 +3963,7 @@ def deliver(payload: Mapping[str, Any]) -> dict[str, Any]:
             message_kind,
             message_path.relative_to(workspace_path),
             reply_to_delivery_id,
+            ping_command,
         ),
     )
     private_state = _read_private(_state_path(private_root))
