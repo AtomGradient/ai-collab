@@ -2,104 +2,200 @@ English | [简体中文](README.zh-CN.md)
 
 # AI Collab
 
-Local multi-agent task room harness for macOS. Turn any Git project into
-durable task rooms where AI colleagues work in isolated workspaces and talk
-to each other through a typed, audited Host. The interface speaks English
-and Simplified Chinese (Settings → General → Language) and uses the task
-room vocabulary throughout: a Scenario appears as a **Task Room**, a
-Participant as an **AI Colleague**.
+AI Collab runs multiple AI coding agents on one Git project, on one Mac.
+A native macOS app and a local Host put agent CLIs — Codex, Claude Code, or
+any CLI you add — into task rooms. Each room has its own isolated workspace,
+objective and message journal. Each agent runs in an iTerm2 window the Host
+owns. Agents message each other through the Host; the Host routes, retries
+and journals every message.
 
-Read the story behind it on our blog:
-[AI Collab — open-source multi-AI collaboration](https://www.atomgradient.com/en/blog/ai-collab-open-source-multi-ai-collaboration)
+[![Latest release](https://img.shields.io/github/v/release/AtomGradient/ai-collab?label=release)](https://github.com/AtomGradient/ai-collab/releases/latest)
+![macOS 14+](https://img.shields.io/badge/macOS-14%2B-black)
+![Signed & notarized](https://img.shields.io/badge/Apple-signed%20%26%20notarized-black)
+![License: MIT](https://img.shields.io/badge/license-MIT-green)
+
+![Task room workbench: colleague list, collaboration activity, progress column](docs/images/readme-workbench.png)
+
+*Task room workbench (v2 design). Left: projects and rooms. Center: the
+room's AI colleagues and the deliveries between them, newest first. Right:
+lifecycle stage, four collaboration-health counts, and the needs-attention
+list. The UI ships in English and Simplified Chinese; the captures in this
+README show the Chinese UI.*
+
+Blog post: [AI Collab — open-source multi-AI collaboration](https://www.atomgradient.com/en/blog/ai-collab-open-source-multi-ai-collaboration)
 ([中文](https://www.atomgradient.com/zh/blog/ai-collab-open-source-multi-ai-collaboration))
 
-![The AI Collab App: a running task room with two AI colleagues, its collaboration policy, and the delivery journal](ai-collab.png)
+## Vocabulary
 
-Four AI colleagues across two task rooms messaging each other through the
-Host, without disturbing each other:
+| In the app | Underneath |
+|---|---|
+| Project | A Git root you own. Registration writes nothing into the checkout. |
+| Task room | A Scenario: exact-revision clones of the declared repositories, a bound Python environment, an objective with acceptance criteria, and a delivery journal. Rooms close and reopen. |
+| AI colleague | A Participant: an agent CLI process launched by the Host in an iTerm2 window the Host owns, checked every 5 seconds, and recoverable. |
+| Collaboration activity | Deliveries between colleagues: review request, review response, question, response, pushback, notice, done. Each is routed by the room's policy and journaled from `queued` to `consumed`. |
+| Evidence & Diagnostics | Raw deliveries, preflight checks, window topology, policy, resource leases, inspector JSON, delivery analytics, high-risk actions. Opens as an inspector column. |
 
-![Four colleague TUIs across two task rooms exchanging typed deliveries next to the App](ai-collab-with-tuis.png)
+## What the Host does
+
+- **Single authority.** Identity, workspaces, deliveries, lifecycle,
+  recovery and permissions go through the Host. The app and the CLI
+  (`ai-collab harness …`) call the same Host. Each operation carries a
+  capability proof bound to the Host generation. Destroy, force-stop, break
+  lease and repair require the Host's own single-use native confirmation.
+- **Isolated workspaces.** Preparing a room clones the declared
+  repositories at exact revisions and binds a Python environment, with one
+  progress row per repository. The Host detects drift, repairs while keeping
+  work in progress, and refuses to destroy when preconditions fail.
+- **Agent startup without a person.** Codex and Claude Code profiles are
+  included; other CLIs are added through an overlay file. The Host answers
+  vendor startup prompts (workspace trust, update screens) only when the
+  full screen matches a known pattern inside a Host-verified workspace. An
+  unknown prompt is not answered; the colleague is marked *Needs attention*
+  with the screen as evidence.
+- **Policy-routed deliveries.** A team template (analyst + reviewer, or
+  analyst + reviewer + synthesizer) lists which message kinds each colleague
+  may send to which, and the retry profile. A delivery moves through
+  `queued → delivery_attempted → delivered → consumed`; `consumed` is
+  recorded only when the receiving agent replies with that delivery's
+  consumption token.
+- **State without a clock.** The store keeps no wall-clock time; the journal
+  is ordered by sequence number. Seven JSON-schema contracts in
+  [`contracts/`](contracts/) define IPC, state, policy and delivery,
+  permission confirmation, drivers, gates and workspace environment.
+  627 Python tests and 111 Swift tests run without network access.
+
+## Screens
+
+![Needs-attention state with the Evidence & Diagnostics inspector open on Health Checks](docs/images/readme-attention.png)
+
+*Needs-attention state (v2 design). A colleague failed to launch because an
+iTerm2 permission is missing. The mission bar shows the reason and the
+Repair action; the inspector on the right is open on Health Checks, where
+the blocked check and the pending permission each carry their own action.
+When the room column is narrower than 760 pt — here, because the inspector
+is open — the progress column folds into the list, as shown.*
+
+![Empty room right after creation](docs/images/readme-empty-room.png)
+
+*A room right after creation (v2 design): no colleagues yet, the composer
+row to add one, and the empty activity section stating what will appear
+there.*
+
+![First-use canvas: register a project, create the first room](docs/images/readme-first-use.png)
+
+*A registered project with no rooms (v2 design): the create form sits in
+the canvas, with the next steps listed under it.*
+
+![Four colleague terminal windows across two rooms exchanging deliveries](docs/images/readme-with-tuis.png)
+
+*Colleague windows (screenshot of a running build). Each colleague receives
+a delivery as text — sender, kind, payload, reply instruction, consumption
+token — and sends its own through the `ai-ping` command the Host issued to
+it.*
 
 ## Quick start
 
 1. Download `AICollab.dmg` from [Releases](../../releases), drag it into
-   Applications, and open it. Release builds are signed and notarized.
-2. Install [iTerm2](https://iterm2.com) — agents run in iTerm2 windows the
-   Host owns and recovers. In iTerm2, open Settings -> General -> Magic,
-   enable **Python API**, then restart iTerm2. The equivalent setup commands are:
+   Applications, open it. Builds are signed and notarized; the Host and its
+   Python runtime are inside the bundle.
+2. Install [iTerm2](https://iterm2.com) and enable its Python API
+   (Settings → General → Magic → **Python API**, then restart iTerm2), or run
    `defaults write com.googlecode.iterm2 EnableAPIServer -bool true` and
    `defaults write com.googlecode.iterm2 NoSyncEnableAPIServer -bool true`.
-3. Click **Register Project** and pick any Git directory. Fileless projects and
-   older AI Collab declarations both register directly; registration never
-   writes the selected checkout.
-4. Create a task room and click **Prepare Workspace**. With that explicit
-   action, the Host clones any missing declared repositories, checks out exact
-   revisions, and verifies the isolated Workspace — one live progress row per
-   repository. Credential, network, shallow-clone, branch, and disk failures
-   stay typed and actionable; only transient failures are offered for
-   immediate retry.
-5. Add AI colleagues (Codex and Claude CLI profiles ship in the box). Added
-   the wrong one? Stop it, then delete it from its ⋯ menu.
-6. Click **Resume** — a freshly created room starts out closed, and the
-   collaboration policy can only be previewed or applied while the room is
-   open. Then pick a team template under Collaboration Policy,
-   **Preview Plan** → **Apply Plan**, and click **Start All**. Once your
-   colleagues are working, focus a window and assign the task — from here
-   they can message each other, each through its own Host-issued `ai-ping`
-   command. A centered getting-started card deck walks you through these
-   steps and can be reopened anytime from the toolbar **?**.
+3. **Register Project** — choose a Git directory.
+4. Create a task room, set an objective, click **Prepare Workspace**.
+5. Add colleagues, click **Resume Room**, apply a team template under
+   *Collaboration Policy*. Without a policy, deliveries are refused.
+6. **Start All**. Focus a colleague's window and assign the task. The room's
+   *Collaboration activity* lists each delivery; *Progress* lists what needs
+   a person. The getting-started cards can be reopened from the toolbar **?**.
 
 ## How it works
 
-- The **Host** is the single authority: identity, isolated workspaces, message
-  delivery, lifecycle, recovery, and permissions all go through it. The App
-  and the CLI (`ai-collab harness …`) are two views of the same Host.
-- A simple Git root needs no project files. Teams that need stable multi-repo
-  intent can commit `.aicollab/project.yaml`; it contains semantic project
-  intent, not AICollab runtime or adapter pins. Historical
-  `project_descriptor.yaml` / `repo_manifest.yaml` checkouts remain readable
-  but are no longer generated or rewritten.
-- The Host stores a resolved runtime contract privately and copies the complete
-  snapshot into every new Scenario. On launch, project
-  selection, post-provision, or manual refresh, the App detects missing,
-  undeclared, and drifted repositories. Semantic changes wait for the visible
-  **Apply project update** action. Tool-owned compatibility pins refresh
-  automatically, while an App upgrade can never rewrite an existing
-  Scenario's self-contained contract.
-- See [Project intent and zero-touch onboarding](docs/project-intent.md) for
-  the tracked intent schema and upgrade behavior.
-- Each Scenario gets exact-revision clones of the declared repositories plus a
-  bound Python environment, with drift detection, WIP-preserving repair, and
-  fail-closed destroy.
+```
+                 you
+                  │
+   ┌──────────────┴──────────────┐
+   │  AICollab.app (SwiftUI)     │      ai-collab harness … (CLI)
+   └──────────────┬──────────────┘                 │
+                  │  typed IPC · capability proofs · native confirmations
+   ┌──────────────┴──────────────────────────────────────────────┐
+   │  Host                                                       │
+   │  projects · rooms · colleagues · policy routing ·           │
+   │  delivery journal · supervision (5 s) · recovery · permissions │
+   └───┬──────────────────┬──────────────────────┬───────────────┘
+       │                  │                      │
+  isolated workspaces   iTerm2 windows        store
+  exact-revision clones (Host-owned)          sequence-ordered journal
+  bound Python env      one per colleague     no wall clock
+
+   colleague ──ai-ping──▶ Host ──delivery──▶ colleague
+                    (routed, retried, journaled, consumption-acked)
+```
+
+- The Host stores the resolved runtime contract and copies a snapshot into
+  each new room; an app upgrade does not rewrite an existing room's
+  contract. Missing, undeclared and drifted repositories are detected on
+  launch, on selection and after provisioning; semantic changes wait for
+  **Apply project update**.
+- A Git root needs no project file. For a multi-repository contract, commit
+  `.aicollab/project.yaml` (team intent, no runtime pins). See
+  [Project intent and zero-touch onboarding](docs/project-intent.md).
+- [PingAgent](pingagent/) is the same message-passing idea without the Host:
+  a filesystem mailbox plus iTerm2 injection between two agent panes. It is
+  in this repository and is used to develop it: a Codex session and a Claude
+  session review each other's commits through it.
 
 ## Customize
 
-- **Agent launch flags / other CLIs**: write whole-profile rows to
+- **Other agent CLIs / launch flags**: add profile rows to
   `~/Library/Application Support/AI Collab/runtime_profiles.overlay.json`.
-  Rows replace shipped profiles by `profile_id` or add new ones, and are
-  validated as strictly as the shipped registry. (The shipped Codex/Claude
-  profiles bypass approval prompts on purpose — unattended collaboration.)
-- **Adapters**: a config with the same name in
+  Rows replace shipped profiles by `profile_id` or add new ones, validated
+  like the shipped registry. The shipped Codex and Claude profiles bypass
+  approval prompts.
+- **Team policies**: `ai_collab_team_policies.json` holds the shipped team
+  templates, roles, route rules and retry profiles.
+- **Adapters**: a file with the same name in
   `~/Library/Application Support/AI Collab/` replaces the bundled one
   (`ai_collab_harness_adapter.json`, `ai_collab_participant_driver.json`,
   `ai_collab_security_adapter.json`). Paths inside a config resolve relative
-  to the config's own directory only — that confinement is what keeps the
-  Host from being pointed at arbitrary programs.
-- **Your own project adapter**: the machine-readable contracts live in
-  `contracts/`; `scripts/ai_collab_project_adapter.py` is a complete
-  reference implementation.
+  to the config's directory only.
+- **Project adapters**: contracts in [`contracts/`](contracts/);
+  [`scripts/ai_collab_project_adapter.py`](scripts/ai_collab_project_adapter.py)
+  is the reference implementation.
+
+## Repository layout
+
+| Path | Contents |
+|---|---|
+| `src/ai_collab/` | Host, store, workspace, participant, delivery and policy engines; the `ai-collab` CLI |
+| `macos/AI-Collab/` | SwiftUI app (`xcodegen` project), Swift tests, embedded Host service payload |
+| `contracts/` | Seven JSON-schema contracts shared by Host, app, drivers and adapters |
+| `pingagent/` | PingAgent: messaging between agents in iTerm2 panes; usable on its own |
+| `scripts/` | Participant driver, project adapter, preflight, build / install / notarize tooling |
+| `tests/` | Python suite, including the app-contract tests that pin UI decisions to source |
+| `docs/` | Project intent schema, design notes, README images |
 
 ## Build from source
 
 Python 3.11+; Xcode command-line tools, `xcodegen`, and a codesigning
-identity for the App:
+identity for the app.
 
 ```bash
 git clone https://github.com/AtomGradient/ai-collab.git && cd ai-collab
 python3 -m venv .venv && .venv/bin/python -m pip install -e '.[dev]'
 .venv/bin/python -m pytest                          # full suite, no network
-.venv/bin/python scripts/build_ai_collab_app.py \
+cd macos/AI-Collab && xcodegen generate && xcodebuild -scheme AICollab -destination 'platform=macOS' test
+cd ../.. && .venv/bin/python scripts/build_ai_collab_app.py \
   --output /tmp/AICollab.app --dmg /tmp/AICollab.dmg
 ```
+
+## Next
+
+- A "last active N s ago" line per colleague from the runtime heartbeat the
+  Host already records in resource leases.
+- Native list selection in the project and room columns that follows the
+  system accent colour.
+- Objective and acceptance-criteria revision history in the room header.
 
 MIT licensed. macOS only.
