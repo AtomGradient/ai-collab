@@ -8,8 +8,11 @@
 from __future__ import annotations
 
 import argparse
+import compileall
 import json
 import os
+import py_compile
+import re
 import shutil
 import stat
 import subprocess
@@ -53,6 +56,17 @@ VENDORED_SITE_PACKAGES = (
 # reference would make the payload depend on the build machine's package
 # manager and fail hardened-runtime library validation on end-user machines.
 _FOREIGN_PREFIXES = ("/opt/homebrew/", "/usr/local/")
+# The embedded interpreter is pinned so every build ships the same runtime
+# regardless of which machine produced it.
+EMBEDDED_PYTHON_VERSION = (3, 14)
+# Executed by ``site`` on every interpreter start, including ``-I`` and
+# sanitized environments, so no launch path can write into the signed bundle.
+BYTECODE_GUARD_NAME = "aicollab-no-bytecode.pth"
+PRECOMPILE_EXCLUDE = re.compile(r"/(test|tests|idlelib)(/|$)")
+IMMUTABILITY_PROBE_IMPORTS = (
+    "asyncio, ensurepip, hashlib, json, pathlib, plistlib, re, subprocess, "
+    "urllib.request, uuid, venv"
+)
 _MACHO_MAGICS = (
     b"\xcf\xfa\xed\xfe",
     b"\xce\xfa\xed\xfe",
@@ -210,6 +224,83 @@ def _relocate_runtime(runtime: Path) -> None:
         raise SystemExit(f"embedded runtime still references foreign libraries: {listing}")
 
 
+def _embedded_lib(runtime: Path) -> Path:
+    return runtime / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}"
+
+
+def _write_bytecode_guard(runtime: Path) -> Path:
+    """Refuse bytecode writes on every interpreter start, ``-I`` included."""
+
+    site_packages = _embedded_lib(runtime) / "site-packages"
+    site_packages.mkdir(parents=True, exist_ok=True)
+    guard = site_packages / BYTECODE_GUARD_NAME
+    guard.write_text("import sys; sys.dont_write_bytecode = True\n", encoding="utf-8")
+    return guard
+
+
+def _precompile_tree(root: Path) -> None:
+    """Ship hash-validated bytecode so the interpreter never needs to write any.
+
+    Modules imported before ``site`` runs (encodings, io, os, ...) are not
+    covered by the guard; shipping their bytecode is what keeps the first
+    interpreter start from writing into the bundle.  Unchecked-hash bytecode
+    is used regardless of source mtimes, which copying changes.
+    """
+
+    if not root.is_dir():
+        return
+    if not compileall.compile_dir(
+        str(root),
+        quiet=1,
+        rx=PRECOMPILE_EXCLUDE,
+        invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH,
+    ):
+        raise SystemExit(f"embedded Python precompilation failed under {root}")
+
+
+def _tree_snapshot(root: Path) -> dict[str, tuple[int, int]]:
+    snapshot: dict[str, tuple[int, int]] = {}
+    for dirpath, _, files in os.walk(root):
+        for name in files:
+            path = Path(dirpath) / name
+            details = path.lstat()
+            snapshot[str(path.relative_to(root))] = (details.st_size, details.st_mtime_ns)
+    return snapshot
+
+
+def _assert_embedded_python_leaves_payload_untouched(destination: Path) -> None:
+    """Start the embedded interpreter the worst way and prove nothing changed."""
+
+    executable = destination / "runtime/bin/python3"
+    roots = [destination / "runtime", destination / "python", destination / "scripts"]
+    before = {str(root): _tree_snapshot(root) for root in roots}
+    completed = subprocess.run(
+        [str(executable), "-I", "-c", f"import {IMMUTABILITY_PROBE_IMPORTS}"],
+        cwd=destination,
+        env={},
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    if completed.returncode != 0:
+        raise SystemExit(
+            "embedded Python immutability probe failed:\n" + completed.stdout.strip()
+        )
+    changed: list[str] = []
+    for root in roots:
+        after = _tree_snapshot(root)
+        previous = before[str(root)]
+        for key in sorted(set(previous) | set(after)):
+            if previous.get(key) != after.get(key):
+                changed.append(str(root.relative_to(destination) / key))
+    if changed:
+        raise SystemExit(
+            "embedded Python wrote into the payload:\n" + "\n".join(changed[:40])
+        )
+
+
 def _assert_embedded_python_runs(destination: Path) -> None:
     runtime = destination / "runtime"
     python_root = destination / "python"
@@ -279,6 +370,13 @@ def _copy(source: Path, destination: Path) -> None:
 
 def build(destination: Path, integration_root: Path | None) -> None:
     destination = destination.resolve()
+    if sys.version_info[:2] != EMBEDDED_PYTHON_VERSION:
+        pinned = ".".join(str(part) for part in EMBEDDED_PYTHON_VERSION)
+        running = f"{sys.version_info.major}.{sys.version_info.minor}"
+        raise SystemExit(
+            f"the embedded runtime is pinned to Python {pinned}; "
+            f"build with that interpreter (running {running})"
+        )
     if destination.exists():
         raise SystemExit("destination already exists; use a fresh build directory")
     if integration_root is not None:
@@ -405,7 +503,15 @@ def build(destination: Path, integration_root: Path | None) -> None:
     if not executable.exists() and not executable.is_symlink():
         executable.symlink_to(versioned_executable.name)
     executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
+    _write_bytecode_guard(destination / "runtime")
+    for root in (
+        _embedded_lib(destination / "runtime"),
+        python_root,
+        destination / "scripts",
+    ):
+        _precompile_tree(root)
     _assert_embedded_python_runs(destination)
+    _assert_embedded_python_leaves_payload_untouched(destination)
     manifest = {
         "schema_version": 1,
         "python_version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",

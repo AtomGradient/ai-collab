@@ -178,7 +178,7 @@ it.*
 
 ## Build from source
 
-Python 3.11+; Xcode command-line tools, `xcodegen`, and a codesigning
+Python 3.14 (the embedded runtime is pinned to 3.14; the build refuses another version); Xcode command-line tools, `xcodegen`, and a codesigning
 identity for the app.
 
 ```bash

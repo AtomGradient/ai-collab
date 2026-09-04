@@ -5,6 +5,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
+import sys
+import venv
 from pathlib import Path
 from typing import Any
 
@@ -52,6 +55,7 @@ def test_embedded_payload_copies_pingagent_client_and_transport(
             target.write_text("embedded file\n", encoding="utf-8")
 
     monkeypatch.setattr(module, "_copy", fake_copy)
+    monkeypatch.setattr(module, "_precompile_tree", lambda root: None)
     module.build(destination, integration_root)
 
     targets = {target.relative_to(destination.parent) for _, target in copied}
@@ -88,6 +92,7 @@ def _install_fake_copy(module: Any, monkeypatch: Any) -> list[tuple[Path, Path]]
             target.write_text("embedded file\n", encoding="utf-8")
 
     monkeypatch.setattr(module, "_copy", fake_copy)
+    monkeypatch.setattr(module, "_precompile_tree", lambda root: None)
     return copied
 
 
@@ -253,3 +258,114 @@ def test_public_leak_assertion_rejects_internal_words_in_shipped_files(
     )
     with pytest.raises(SystemExit):
         module._assert_no_integration_content(destination)
+
+
+def test_bytecode_guard_blocks_writes_under_isolated_mode_with_empty_environment(
+    tmp_path: Path,
+) -> None:
+    module = _module()
+    runtime = tmp_path / "runtime"
+    venv.EnvBuilder(with_pip=False, symlinks=True).create(runtime)
+    probe_dir = tmp_path / "probe"
+    probe_dir.mkdir()
+    (probe_dir / "probe_module.py").write_text("VALUE = 1\n", encoding="utf-8")
+    argv = [
+        str(runtime / "bin" / "python"),
+        "-I",
+        "-c",
+        f"import sys; sys.path.insert(0, {str(probe_dir)!r}); "
+        "import probe_module; print(sys.dont_write_bytecode, probe_module.VALUE)",
+    ]
+
+    # Control: without the guard an isolated start with an empty environment
+    # writes bytecode next to the module.
+    control = subprocess.run(argv, env={}, capture_output=True, text=True, check=False)
+    assert control.returncode == 0, control.stderr
+    assert control.stdout.split() == ["False", "1"]
+    assert (probe_dir / "__pycache__").is_dir()
+    for path in (probe_dir / "__pycache__").iterdir():
+        path.unlink()
+    (probe_dir / "__pycache__").rmdir()
+
+    guard = module._write_bytecode_guard(runtime)  # noqa: SLF001
+    assert guard.name == module.BYTECODE_GUARD_NAME
+    assert guard.parent.name == "site-packages"
+    guarded = subprocess.run(argv, env={}, capture_output=True, text=True, check=False)
+    assert guarded.returncode == 0, guarded.stderr
+    assert guarded.stdout.split() == ["True", "1"]
+    assert not (probe_dir / "__pycache__").exists()
+
+
+def test_precompiled_bytecode_is_unchecked_hash_and_skips_test_trees(
+    tmp_path: Path,
+) -> None:
+    module = _module()
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "mod.py").write_text("X = 1\n", encoding="utf-8")
+    (tmp_path / "test").mkdir()
+    (tmp_path / "test" / "t.py").write_text("Y = 2\n", encoding="utf-8")
+
+    module._precompile_tree(tmp_path)  # noqa: SLF001
+
+    pyc = tmp_path / "pkg" / "__pycache__" / f"mod.{sys.implementation.cache_tag}.pyc"
+    assert pyc.is_file()
+    flags = int.from_bytes(pyc.read_bytes()[4:8], "little")
+    assert flags == 0b01  # hash-based, source not checked at import time
+    assert not (tmp_path / "test" / "__pycache__").exists()
+    module._precompile_tree(tmp_path / "absent")  # noqa: SLF001
+
+
+def test_build_requires_the_pinned_embedded_python(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    module = _module()
+    monkeypatch.setattr(module, "EMBEDDED_PYTHON_VERSION", (3, 99))
+    with pytest.raises(SystemExit, match="pinned to Python 3.99"):
+        module.build(tmp_path / "HarnessService", None)
+
+
+def test_immutability_probe_runs_isolated_with_an_empty_environment(
+    tmp_path: Path,
+) -> None:
+    module = _module()
+    service = tmp_path / "HarnessService"
+    executable = service / "runtime/bin/python3"
+    executable.parent.mkdir(parents=True)
+    (service / "python").mkdir()
+    (service / "scripts").mkdir()
+    log = tmp_path / "probe-calls.txt"
+    executable.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s|%s|%s\\n' \"${{PYTHONHOME:-unset}}\" \"${{PYTHONDONTWRITEBYTECODE:-unset}}\" \"$*\" >> {log}\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o755)
+
+    module._assert_embedded_python_leaves_payload_untouched(service)  # noqa: SLF001
+
+    assert log.read_text(encoding="utf-8").splitlines() == [
+        f"unset|unset|-I -c import {module.IMMUTABILITY_PROBE_IMPORTS}"
+    ]
+
+
+def test_immutability_probe_fails_closed_when_the_interpreter_writes(
+    tmp_path: Path,
+) -> None:
+    module = _module()
+    service = tmp_path / "HarnessService"
+    executable = service / "runtime/bin/python3"
+    executable.parent.mkdir(parents=True)
+    (service / "python").mkdir()
+    (service / "scripts").mkdir()
+    executable.write_text(
+        "#!/bin/sh\n"
+        "mkdir -p \"$(dirname \"$0\")/../lib/__pycache__\"\n"
+        "printf 'x' > \"$(dirname \"$0\")/../lib/__pycache__/stray.pyc\"\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o755)
+
+    with pytest.raises(SystemExit, match="wrote into the payload"):
+        module._assert_embedded_python_leaves_payload_untouched(service)  # noqa: SLF001

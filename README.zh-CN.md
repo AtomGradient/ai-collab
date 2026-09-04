@@ -155,7 +155,7 @@ macOS 应用加一个本地 Host（后台服务），把 Agent CLI —— Codex�
 
 ## 从源码构建
 
-需要 Python 3.11+；构建 App 还需要 Xcode 命令行工具、`xcodegen` 和一个代码
+需要 Python 3.14（内嵌运行时钉在 3.14，其它版本构建会拒绝）；构建 App 还需要 Xcode 命令行工具、`xcodegen` 和一个代码
 签名身份。
 
 ```bash
