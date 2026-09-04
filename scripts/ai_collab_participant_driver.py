@@ -79,6 +79,7 @@ PINGAGENT_TRANSPORT = (
 PINGAGENT_BIN = PINGAGENT_TRANSPORT.parent
 PINGAGENT_CLIENT = PINGAGENT_BIN / "ai-ping"
 CONSUMPTION_TIMEOUT_SECONDS = 240.0
+MAX_DELIVERY_MESSAGE_BYTES = 512 * 1024
 STARTUP_POLL_SECONDS = 0.25
 STARTUP_STABLE_OBSERVATIONS = 4
 STARTUP_GATE_MAX_SECONDS = 240
@@ -2201,6 +2202,7 @@ def _headless_start(
         "session_id": None,
         "owner_marker": None,
         "runtime_profile_ref": launch_spec["runtime_profile_ref"],
+        "workspace_path": str(workspace_path),
         "accepts_typed_delivery": _runtime_profile(launch_spec)[
             "accepts_typed_delivery"
         ],
@@ -2771,6 +2773,7 @@ async def _iterm_start_async(
             "geometry": geometry,
             "geometry_by_topology": {topology_fingerprint: geometry},
             "runtime_profile_ref": launch_spec["runtime_profile_ref"],
+            "workspace_path": str(workspace_path),
             "accepts_typed_delivery": profile["accepts_typed_delivery"],
             "startup_gate_evidence": startup_gate_evidence,
             "vendor_session_identity_sha256": vendor_session_identity_sha256,
@@ -3483,55 +3486,303 @@ async def _authorize_sender_exact_session(
 def _delivery_notification(
     record: Mapping[str, Any],
     message_kind: str,
-    message: str,
-    token: str,
+    message_path: Path,
+    reply_to_delivery_id: str | None,
     participant_ping: Path,
 ) -> str:
     sender = record["target"]["sender"]["participant_id"]
+    short_kind = message_kind.removeprefix("collaboration.")
+    delivery_id = record["delivery_id"]
+    path = shlex.quote(str(message_path))
     terminal_kinds = {
         "collaboration.response",
         "collaboration.review-response",
         "collaboration.notice",
         "collaboration.done",
     }
+    prefix = (
+        f"[ai-collab 收信] from={sender} kind={short_kind} id={delivery_id}"
+    )
+    if reply_to_delivery_id is not None:
+        return (
+            f"{prefix} reply_to={reply_to_delivery_id} | 请 Read {path} "
+            "并按其中说明处理；这是对你之前消息"
+            f"(id={reply_to_delivery_id})的回复"
+        )
     if message_kind in terminal_kinds:
-        handling = (
-            "This delivery is terminal/informational. Consume the payload, but do not "
-            "send a Harness-tracked receipt or acknowledgement. Do not add receipt-only "
-            "prose; if no new work is explicitly requested, emit only the required "
-            "consumption marker.\n"
+        return f"{prefix} | 请 Read {path} 并按其中说明处理；此消息无需回执"
+    ping_command = shlex.quote(str(participant_ping))
+    reply_kind = (
+        " --kind review-response"
+        if message_kind == "collaboration.review-request"
+        else ""
+    )
+    return (
+        f"{prefix} | 请 Read {path} 并按其中说明处理；处理完用 "
+        f"{ping_command} {sender}{reply_kind} --reply-to {delivery_id} "
+        "--file <你的回复.md>"
+    )
+
+
+def _private_delivery_directory(path: Path) -> None:
+    try:
+        path.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    if path.is_symlink() or not path.is_dir():
+        raise DriverError("delivery mailbox path is invalid")
+    details = path.stat()
+    if (
+        details.st_uid != os.getuid()
+        or stat.S_IMODE(details.st_mode) != 0o700
+    ):
+        raise DriverError("delivery mailbox path is invalid")
+
+
+def _delivery_workspace(
+    raw: Any,
+    state: dict[str, Any],
+    private_root: Path,
+    declared: Any = None,
+) -> Path:
+    """Bind delivery storage to the receiver's exact Scenario checkout."""
+
+    if not isinstance(raw, str):
+        raise DriverError("delivery workspace path is invalid")
+    scenario_root = Path(raw)
+    try:
+        details = scenario_root.lstat()
+        resolved = scenario_root.resolve(strict=True)
+    except OSError as exc:
+        raise DriverError("delivery workspace path is invalid") from exc
+    if (
+        not scenario_root.is_absolute()
+        or stat.S_ISLNK(details.st_mode)
+        or not stat.S_ISDIR(details.st_mode)
+        or details.st_uid != os.getuid()
+        or stat.S_IMODE(details.st_mode) != 0o700
+        or resolved != scenario_root
+        or not scenario_root.name.startswith("workspace-")
+    ):
+        raise DriverError("delivery workspace path is invalid")
+    path = _workspace_path(
+        str(scenario_root),
+        _runtime_profile(state),
+        declared,
+    )
+    expected = state.get("workspace_path")
+    if expected is None:
+        pid = state.get("pid")
+        if not isinstance(pid, int) or _process_cwd(pid) != path:
+            raise DriverError("delivery workspace binding differs")
+        state["workspace_path"] = str(path)
+        _write_private(_state_path(private_root), state)
+    elif expected != str(path):
+        raise DriverError("delivery workspace binding differs")
+    return path
+
+
+def _delivery_message_path(
+    workspace_path: Path, record: Mapping[str, Any]
+) -> Path:
+    receiver = record["target"]["receiver"]["participant_id"]
+    delivery_id = record["delivery_id"]
+    if (
+        not isinstance(receiver, str)
+        or re.fullmatch(r"[a-z0-9_-]+", receiver) is None
+        or not isinstance(delivery_id, str)
+        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", delivery_id)
+        is None
+    ):
+        raise DriverError("delivery mailbox identity is invalid")
+    mailbox = workspace_path / ".ai-mailbox"
+    inbox = mailbox / "inbox"
+    receiver_inbox = inbox / receiver
+    for directory in (mailbox, inbox, receiver_inbox):
+        _private_delivery_directory(directory)
+    return receiver_inbox / f"{delivery_id}.md"
+
+
+def _ensure_delivery_mailbox_ignored(workspace_path: Path) -> None:
+    git = shutil.which("git")
+    if git is None:
+        raise DriverError("delivery workspace Git is unavailable")
+
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key in {"PATH", "TMPDIR", "LANG", "LC_ALL", "HOME"}
+    }
+
+    def git_probe(*arguments: str) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.run(
+            (git, "-C", str(workspace_path), *arguments),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=environment,
+            timeout=5,
+            check=False,
         )
-        reply_instruction = ""
+
+    repository = git_probe("rev-parse", "--is-inside-work-tree")
+    if repository.returncode != 0:
+        return
+    if repository.stdout.strip() != b"true":
+        raise DriverError("delivery workspace Git binding differs")
+
+    def check_ignore() -> int:
+        completed = subprocess.run(
+            (
+                git,
+                "-C",
+                str(workspace_path),
+                "check-ignore",
+                "-q",
+                ".ai-mailbox/message",
+            ),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=environment,
+            timeout=5,
+            check=False,
+        )
+        return completed.returncode
+
+    ignored_status = check_ignore()
+    if ignored_status == 0:
+        return
+    if ignored_status != 1:
+        raise DriverError("delivery mailbox ignore state is unavailable")
+    gitignore = workspace_path / ".gitignore"
+    mode = 0o600
+    try:
+        if gitignore.exists() or gitignore.is_symlink():
+            details = gitignore.lstat()
+            if (
+                stat.S_ISLNK(details.st_mode)
+                or not stat.S_ISREG(details.st_mode)
+                or details.st_uid != os.getuid()
+                or stat.S_IMODE(details.st_mode) & 0o022
+            ):
+                raise DriverError("delivery workspace .gitignore is unsafe")
+            mode = stat.S_IMODE(details.st_mode)
+            contents = gitignore.read_bytes()
+        else:
+            contents = b""
+    except OSError as exc:
+        raise DriverError("delivery workspace .gitignore is unavailable") from exc
+    updated = contents
+    if updated and not updated.endswith(b"\n"):
+        updated += b"\n"
+    updated += b".ai-mailbox/\n"
+    temporary = workspace_path / (
+        f"..gitignore.{os.getpid()}.{secrets.token_hex(6)}.tmp"
+    )
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(updated)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, gitignore)
+        os.chmod(gitignore, mode)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    if check_ignore() != 0:
+        raise DriverError("delivery workspace .gitignore does not ignore mailbox")
+
+
+def _delivery_message_text(
+    record: Mapping[str, Any],
+    message_kind: str,
+    message: str,
+    token: str,
+    reply_to_delivery_id: str | None,
+    participant_ping: Path,
+) -> str:
+    sender = record["target"]["sender"]["participant_id"]
+    receiver = record["target"]["receiver"]["participant_id"]
+    delivery_id = record["delivery_id"]
+    short_kind = message_kind.removeprefix("collaboration.")
+    frontmatter = [
+        "---",
+        f"id: {delivery_id}",
+        f"from: {sender}",
+        f"to: {receiver}",
+        f"kind: {short_kind}",
+    ]
+    if reply_to_delivery_id is not None:
+        frontmatter.append(f"reply_to: {reply_to_delivery_id}")
+    frontmatter.extend(
+        (
+            f"payload_digest: {record['payload_digest']}",
+            f"consumption_token: {token}",
+            "---",
+            "",
+        )
+    )
+    terminal_kinds = {
+        "collaboration.response",
+        "collaboration.review-response",
+        "collaboration.notice",
+        "collaboration.done",
+    }
+    instructions = []
+    if message_kind in terminal_kinds:
+        instructions.append(
+            "本消息为回复或通知；除非正文明确要求新工作，否则不要发送仅确认收到的回复。"
+        )
     else:
-        handling = (
-            "Treat the payload as a peer request. Complete or answer it, and send a "
-            "Harness-tracked reply when the work requires one.\n"
-        )
-        ping_command = shlex.quote(str(participant_ping))
         reply_kind = (
             "review-response"
             if message_kind == "collaboration.review-request"
             else "msg"
         )
-        reply_instruction = (
-            f"To send that reply, use: {ping_command} {sender} "
-            f"--kind {reply_kind} --reply-to {record['delivery_id']} <message>."
+        instructions.append(
+            "需要回复时使用："
+            f"{shlex.quote(str(participant_ping))} {sender} --kind {reply_kind} "
+            f"--reply-to {delivery_id} --file <你的回复.md>"
         )
-    return (
-        "[AI Collaboration Harness typed delivery]\n"
-        f"delivery_id: {record['delivery_id']}\n"
-        f"from_participant: {sender}\n"
-        f"message_kind: {message_kind}\n"
-        f"{handling}"
-        "--- payload ---\n"
-        f"{message}\n"
-        "--- end payload ---\n"
-        f"CONSUMPTION TOKEN: {token}\n"
-        "After completing the request, end your response with the exact prefix "
-        "AI_COLLAB_CONSUMED: immediately followed by the token above. "
-        "Do not put whitespace between the prefix and token. "
-        f"{reply_instruction}"
+    instructions.append(
+        "处理后，请在最终回复末尾输出前缀 `AI_COLLAB_CONSUMED:`，"
+        "紧接 frontmatter 中的 consumption_token，中间不要留空白。"
     )
+    return "\n".join((*frontmatter, message, "", *instructions, ""))
+
+
+def _write_delivery_message(
+    workspace_path: Path,
+    record: Mapping[str, Any],
+    message_kind: str,
+    message: str,
+    token: str,
+    reply_to_delivery_id: str | None,
+    participant_ping: Path,
+) -> Path:
+    path = _delivery_message_path(workspace_path, record)
+    temporary = path.parent / f".{path.name}.{os.getpid()}.{secrets.token_hex(5)}.tmp"
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(
+                _delivery_message_text(
+                    record,
+                    message_kind,
+                    message,
+                    token,
+                    reply_to_delivery_id,
+                    participant_ping,
+                )
+            )
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    return path
 
 
 def _pingagent_deliver(
@@ -3617,38 +3868,71 @@ def deliver(payload: Mapping[str, Any]) -> dict[str, Any]:
         "runtime_ready_ack",
         "presentation_create_ack",
         "private_root",
+        "workspace_path",
     }
-    if set(payload) != required:
+    if not required <= set(payload) or set(payload) - required - {
+        "reply_to_delivery_id",
+        "participant_working_directory",
+    }:
         raise DriverError("deliver payload differs")
     private_root, state, record, token = _delivery_state(
         payload, require_delivered=False
     )
+    workspace_path = _delivery_workspace(
+        payload["workspace_path"],
+        state,
+        private_root,
+        payload.get("participant_working_directory"),
+    )
     message = payload["message"]
     message_kind = payload["message_kind"]
+    reply_to_delivery_id = payload.get("reply_to_delivery_id")
     attempt = record["events"][-1]
     if (
         not isinstance(message, str)
         or not message
-        or len(message.encode("utf-8")) > 64 * 1024
+        or len(message.encode("utf-8")) > MAX_DELIVERY_MESSAGE_BYTES
         or not isinstance(message_kind, str)
         or re.fullmatch(
             r"[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*)+", message_kind
         )
         is None
+        or (
+            reply_to_delivery_id is not None
+            and (
+                not isinstance(reply_to_delivery_id, str)
+                or re.fullmatch(
+                    r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}",
+                    reply_to_delivery_id,
+                )
+                is None
+            )
+        )
         or attempt.get("event") != "attempt_started"
     ):
         raise DriverError("typed delivery payload is invalid")
     module = _ensure_iterm_module(private_root)
     asyncio.run(_validate_exact_session_async(module, state))
+    participant_ping = _participant_ping_path(private_root)
+    _ensure_delivery_mailbox_ignored(workspace_path)
+    message_path = _write_delivery_message(
+        workspace_path,
+        record,
+        message_kind,
+        message,
+        token,
+        reply_to_delivery_id,
+        participant_ping,
+    )
     transport = _pingagent_deliver(
         state,
         record,
         _delivery_notification(
             record,
             message_kind,
-            message,
-            token,
-            _participant_ping_path(private_root),
+            message_path.relative_to(workspace_path),
+            reply_to_delivery_id,
+            participant_ping,
         ),
     )
     private_state = _read_private(_state_path(private_root))

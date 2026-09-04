@@ -1190,6 +1190,7 @@ class DeliveryCoordinator:
                 state = self._read_state()
                 item = state["deliveries"][delivery_id]
                 record = item["record"]
+                reply_to_delivery_id = item.get("reply_to_delivery_id")
                 if (
                     record["state"] == "consumed"
                     or record["delivery_degraded_reason"] is not None
@@ -1264,6 +1265,7 @@ class DeliveryCoordinator:
                     delivery_record=public_record,
                     message=message,
                     message_kind=message_kind,
+                    reply_to_delivery_id=reply_to_delivery_id,
                     consumption_token=token,
                 )
                 with self._lock:

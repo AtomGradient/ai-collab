@@ -4618,7 +4618,7 @@ class ScenarioStore:
         participant_generation: int,
         runtime_binding_id: str,
         presentation_binding_id: str | None,
-    ) -> tuple[dict[str, Any], dict[str, Any], Path]:
+    ) -> tuple[dict[str, Any], dict[str, Any], Path, Path]:
         """Resolve one exact ready receiver without exposing its private binding."""
 
         key = self._scenario_key(project_instance_id, scenario_id)
@@ -4652,6 +4652,7 @@ class ScenarioStore:
                     participant_id,
                     participant_generation,
                 ),
+                self.workspace_path(scenario["workspace_binding_id"]),
             )
 
     def add_participant(

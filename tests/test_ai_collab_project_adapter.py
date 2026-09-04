@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import importlib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -269,11 +270,121 @@ def _assert_failed(
     return error
 
 
+def _validate_schema(
+    value: Any,
+    schema: dict[str, Any],
+    root: dict[str, Any],
+    path: str = "$",
+) -> None:
+    reference = schema.get("$ref")
+    if reference is not None:
+        assert isinstance(reference, str) and reference.startswith("#/$defs/")
+        _validate_schema(
+            value,
+            root["$defs"][reference.removeprefix("#/$defs/")],
+            root,
+            path,
+        )
+        return
+    variants = schema.get("oneOf")
+    if variants is not None:
+        matches = 0
+        for variant in variants:
+            try:
+                _validate_schema(value, variant, root, path)
+            except AssertionError:
+                continue
+            matches += 1
+        assert matches == 1
+        return
+    expected_type = schema.get("type")
+    type_map = {
+        "array": list,
+        "boolean": bool,
+        "integer": int,
+        "null": type(None),
+        "object": dict,
+        "string": str,
+    }
+    if expected_type is not None:
+        assert expected_type in type_map
+        assert isinstance(value, type_map[expected_type])
+        if expected_type == "integer":
+            assert not isinstance(value, bool)
+    if "const" in schema:
+        assert value == schema["const"]
+    if "enum" in schema:
+        assert value in schema["enum"]
+    if "pattern" in schema:
+        assert isinstance(value, str) and re.fullmatch(schema["pattern"], value)
+    if "minimum" in schema:
+        assert isinstance(value, int) and value >= schema["minimum"]
+    if isinstance(value, dict):
+        required = schema.get("required", [])
+        missing = [key for key in required if key not in value]
+        assert not missing, f"{path}: missing required properties {missing}"
+        properties = schema.get("properties", {})
+        if schema.get("additionalProperties") is False:
+            assert set(value) <= set(properties)
+        for key, item in value.items():
+            if key in properties:
+                _validate_schema(item, properties[key], root, f"{path}.{key}")
+    if isinstance(value, list) and "items" in schema:
+        for index, item in enumerate(value):
+            _validate_schema(item, schema["items"], root, f"{path}[{index}]")
+        if schema.get("uniqueItems") is True:
+            encoded = [json.dumps(item, sort_keys=True) for item in value]
+            assert len(encoded) == len(set(encoded))
+
+
 def _load_adapter_module() -> ModuleType:
     scripts = str(SCRIPTS)
     if scripts not in sys.path:
         sys.path.insert(0, scripts)
     return importlib.import_module("ai_collab_project_adapter")
+
+
+def test_mailbox_gitignore_is_untouched_when_an_existing_pattern_matches(
+    tmp_path: Path,
+) -> None:
+    adapter = _load_adapter_module()
+    repo = tmp_path / "existing-ignore"
+    _init_repo(repo, "git@example.invalid:existing.git")
+    gitignore = repo / ".gitignore"
+    gitignore.write_bytes(b"# existing\n.ai-*\n")
+    _git(repo, "add", ".gitignore")
+    _git(repo, "commit", "-m", "ignore generated state")
+    before = gitignore.read_bytes()
+
+    assert adapter._ensure_mailbox_gitignore(repo) is False
+    assert gitignore.read_bytes() == before
+    assert _git_output(repo, "status", "--porcelain", "--untracked-files=all") == ""
+
+
+def test_mailbox_gitignore_is_appended_once_when_missing(tmp_path: Path) -> None:
+    adapter = _load_adapter_module()
+    repo = tmp_path / "missing-ignore"
+    _init_repo(repo, "git@example.invalid:missing.git")
+
+    assert adapter._ensure_mailbox_gitignore(repo) is True
+    assert adapter._ensure_mailbox_gitignore(repo) is False
+    assert (repo / ".gitignore").read_text(encoding="utf-8").splitlines() == [
+        ".ai-mailbox/"
+    ]
+    assert subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "check-ignore",
+            "-q",
+            ".ai-mailbox/message",
+        ],
+        check=False,
+    ).returncode == 0
+    assert _git_output(
+        repo, "status", "--porcelain", "--untracked-files=all"
+    ).endswith(".gitignore")
 
 
 def _write_unit_binding_marker(
@@ -1835,7 +1946,10 @@ def test_plan_provision_status_destroy_full_cycle(tmp_path: Path) -> None:
         "plan",
         {
             "operation_id": "wsop-e2e-1",
-            "scenario": {"scenario_id": "scenario-e2e"},
+            "scenario": {
+                "scenario_id": "scenario-e2e",
+                "scenario_generation": 1,
+            },
             "scenario_state_revision": 1,
             "workspace_id": "workspace:e2e",
             "requested_component_ids": [],
@@ -1902,10 +2016,28 @@ def test_plan_provision_status_destroy_full_cycle(tmp_path: Path) -> None:
     receipt = provision_reply["result"]["receipt"]
     journal = provision_reply["result"]["journal"]
     snapshot = provision_reply["result"]["review_snapshot"]
+    contract = json.loads(
+        (ROOT / "contracts" / "workspace_environment_v1.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    _validate_schema(
+        receipt,
+        contract["$defs"]["workspace_environment_receipt"],
+        contract,
+    )
 
     # The receipt declares where participants launch: the provisioned
     # project root checkout, derived from the canonical directory name.
     assert receipt["participant_working_directory"] == f"bundle/{project.name}"
+    checkout = staging / project.name
+    assert (checkout / ".gitignore").read_text(encoding="utf-8").splitlines() == [
+        ".ai-mailbox/"
+    ]
+    assert _git_output(
+        checkout, "status", "--porcelain", "--untracked-files=all"
+    ).endswith(".gitignore")
+    assert receipt["components"][0]["clean_at_provision"] is True
 
     # Workspace layout mirrors the canonical directory name, not any
     # hard-coded project name.
@@ -1952,7 +2084,87 @@ def test_plan_provision_status_destroy_full_cycle(tmp_path: Path) -> None:
     assert status_reply is not None
     observation = status_reply["result"]["observation"]
     assert observation["state"] == "aligned", observation["drift_codes"]
-    assert all(not item["dirty"] for item in observation["components"])
+    dirty_flags = {
+        item["component_id"]: item["dirty"] for item in observation["components"]
+    }
+    assert dirty_flags == {"helper-lib": False, "sampleproject": True}
+
+    mailbox = checkout / ".ai-mailbox"
+    receiver_inbox = mailbox / "inbox" / "reviewer"
+    mailbox.mkdir(mode=0o700)
+    (mailbox / "inbox").mkdir(mode=0o700)
+    receiver_inbox.mkdir(mode=0o700)
+    message_path = receiver_inbox / "delivery-test.md"
+    message_path.write_text("complete message\n", encoding="utf-8")
+    message_path.chmod(0o600)
+    status_with_mail = _git_output(
+        checkout, "status", "--porcelain", "--untracked-files=all"
+    )
+    assert status_with_mail.endswith(".gitignore")
+    assert ".ai-mailbox" not in status_with_mail
+
+    code, mailbox_status_reply, stderr = _call(
+        project,
+        "status",
+        {
+            "operation_id": "status-e2e-mailbox",
+            "bundle_path": str(staging),
+            "plan": plan,
+            "receipt": receipt,
+        },
+    )
+    assert code == 0, stderr
+    assert mailbox_status_reply is not None
+    mailbox_observation = mailbox_status_reply["result"]["observation"]
+    assert mailbox_observation["state"] == "aligned"
+    assert (
+        mailbox_observation["wip_summary_digest"]
+        == observation["wip_summary_digest"]
+    )
+
+    # A room created by an older app may not have the ignore rule yet. Repair
+    # accepts the caller's pre-change WIP fence, installs the rule, and keeps
+    # the mailbox itself intact.
+    (checkout / ".gitignore").unlink()
+    assert ".ai-mailbox" in _git_output(
+        checkout, "status", "--porcelain", "--untracked-files=all"
+    )
+    code, migration_status_reply, stderr = _call(
+        project,
+        "status",
+        {
+            "operation_id": "status-e2e-before-ignore-repair",
+            "bundle_path": str(staging),
+            "plan": plan,
+            "receipt": receipt,
+        },
+    )
+    assert code == 0, stderr
+    assert migration_status_reply is not None
+    migration_observation = migration_status_reply["result"]["observation"]
+
+    code, repair_reply, stderr = _call(
+        project,
+        "repair",
+        {
+            "operation_id": "repair-e2e-mailbox",
+            "bundle_path": str(staging),
+            "plan": plan,
+            "receipt": receipt,
+            "expected_wip_summary_digest": migration_observation[
+                "wip_summary_digest"
+            ],
+        },
+    )
+    assert code == 0, stderr
+    assert repair_reply is not None
+    assert repair_reply["outcome"] == "completed", repair_reply
+    assert message_path.read_text(encoding="utf-8") == "complete message\n"
+    assert (checkout / ".gitignore").read_text(encoding="utf-8").splitlines().count(
+        ".ai-mailbox/"
+    ) == 1
+    receipt = repair_reply["result"]["receipt"]
+    observation = repair_reply["result"]["observation"]
 
     recover_payload = {
         "operation_id": "recover-e2e-repair-base",

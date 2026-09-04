@@ -30,7 +30,7 @@ Blog post: [AI Collab — open-source multi-AI collaboration](https://www.atomgr
 | In the app | Underneath |
 |---|---|
 | Project | A Git root you own. Registration writes nothing into the checkout. |
-| Task room | A Scenario: exact-revision clones of the declared repositories, a bound Python environment, an objective with acceptance criteria, and a delivery journal. Rooms close and reopen. |
+| Task room | A Scenario: exact-revision clones of the declared repositories, a bound Python environment, an objective with acceptance criteria, and Host-managed delivery mail in its working directory. Rooms close and reopen. |
 | AI colleague | A Participant: an agent CLI process launched by the Host in an iTerm2 window the Host owns, checked every 5 seconds, and recoverable. |
 | Collaboration activity | Deliveries between colleagues: review request, review response, question, response, pushback, notice, done. Each is routed by the room's policy and journaled from `queued` to `consumed`. |
 | Evidence & Diagnostics | Raw deliveries, preflight checks, window topology, policy, resource leases, inspector JSON, delivery analytics, high-risk actions. Opens as an inspector column. |

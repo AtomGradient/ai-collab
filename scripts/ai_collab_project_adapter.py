@@ -904,6 +904,95 @@ def _install_guard(repo: Path, remote: str, target_ref: str) -> str:
     )
 
 
+def _ensure_mailbox_gitignore(repo: Path) -> bool:
+    """Ensure the Scenario clone itself ignores Host-delivered room mail."""
+
+    ignored_status, _ = _probe_git(
+        repo, "check-ignore", "-q", ".ai-mailbox/message"
+    )
+    if ignored_status == 0:
+        return False
+    if ignored_status != 1:
+        raise AdapterError("scenario mailbox ignore state is unavailable")
+    gitignore = repo / ".gitignore"
+    mode = 0o600
+    try:
+        if gitignore.exists() or gitignore.is_symlink():
+            details = gitignore.lstat()
+            if (
+                stat.S_ISLNK(details.st_mode)
+                or not stat.S_ISREG(details.st_mode)
+                or details.st_uid != os.getuid()
+                or stat.S_IMODE(details.st_mode) & 0o022
+            ):
+                raise AdapterError("scenario .gitignore is unsafe")
+            mode = stat.S_IMODE(details.st_mode)
+            contents = gitignore.read_bytes()
+        else:
+            contents = b""
+    except OSError as exc:
+        raise AdapterError("scenario .gitignore is unavailable") from exc
+    line = b".ai-mailbox/"
+    updated = contents
+    if updated and not updated.endswith(b"\n"):
+        updated += b"\n"
+    updated += line + b"\n"
+    temporary = repo / f"..gitignore.{os.getpid()}.{secrets.token_hex(6)}.tmp"
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(updated)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, gitignore)
+        os.chmod(gitignore, mode)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    ignored_status, _ = _probe_git(
+        repo, "check-ignore", "-q", ".ai-mailbox/message"
+    )
+    if ignored_status != 0:
+        raise AdapterError("scenario .gitignore does not ignore the mailbox")
+    return True
+
+
+def _ensure_receipt_mailbox_gitignore(
+    bundle: Path, receipt: Mapping[str, Any]
+) -> bool:
+    relative = receipt.get("participant_working_directory")
+    if relative is None:
+        return False
+    if not isinstance(relative, str) or not relative:
+        raise AdapterError("participant working directory differs")
+    parts = Path(relative).parts
+    if (
+        Path(relative).is_absolute()
+        or len(parts) < 2
+        or parts[0] != "bundle"
+        or any(part in {"", ".."} for part in parts)
+    ):
+        raise AdapterError("participant working directory differs")
+    try:
+        checkout = bundle.parent.joinpath(*parts).resolve(strict=True)
+        bundle_root = bundle.resolve(strict=True)
+    except OSError as exc:
+        raise AdapterError("participant working directory is unavailable") from exc
+    if not checkout.is_dir() or not checkout.is_relative_to(bundle_root):
+        raise AdapterError("participant working directory differs")
+    return _ensure_mailbox_gitignore(checkout)
+
+
+def _only_gitignore_status(status: bytes) -> bool:
+    entries = [entry for entry in status.split(b"\0") if entry]
+    return (
+        len(entries) == 1
+        and len(entries[0]) >= 4
+        and entries[0][:2] in {b" M", b"??"}
+        and entries[0][3:] == b".gitignore"
+    )
+
+
 def _component_content(repo: Path) -> str:
     head = _run_git(repo, "rev-parse", "HEAD").decode().strip()
     tree = _run_git(repo, "rev-parse", "HEAD^{tree}").decode().strip()
@@ -978,7 +1067,17 @@ def _materialize_components_unobserved(
         if _run_git(target, "rev-parse", "HEAD").decode().strip() != revision:
             raise AdapterError("scenario exact revision differs")
         guard_digest = _install_guard(target, row["remote"], component["target_ref"])
-        if _run_git(target, "status", "--porcelain=v1", "-z"):
+        mailbox_ignore_added = (
+            _ensure_mailbox_gitignore(target)
+            if component["placement"] == "project_root"
+            else False
+        )
+        status = _run_git(
+            target, "status", "--porcelain=v1", "-z", "--untracked-files=all"
+        )
+        if status and (
+            not mailbox_ignore_added or not _only_gitignore_status(status)
+        ):
             raise AdapterError("scenario clone is not clean")
         content_digest = _component_content(target)
         binding_digest = canonical_json_sha256(
@@ -1005,6 +1104,9 @@ def _materialize_components_unobserved(
                 "guard_digest": guard_digest,
                 "isolated_writable": True,
                 "shared_mutable_storage": False,
+                # The only tolerated status entry is the Host-managed mailbox
+                # ignore rule, which is part of workspace preparation rather
+                # than pre-existing or unowned WIP.
                 "clean_at_provision": True,
             }
         )
@@ -1897,6 +1999,7 @@ def _repair(payload: Mapping[str, Any]) -> dict[str, Any]:
             ) from exc
         try:
             _reject_foreign_destroy_staging(bundle.parent, exact=None)
+            _ensure_receipt_mailbox_gitignore(bundle, marker_receipt)
             replay_observation = _status(
                 {
                     "operation_id": f"{operation_id}-replay-status",
@@ -1906,11 +2009,20 @@ def _repair(payload: Mapping[str, Any]) -> dict[str, Any]:
                 }
             )["observation"]
             replay_marker = _require_owned_workspace_tree(bundle, marker_receipt)
+            replay_evidence = canonical_json_sha256(
+                {
+                    "wip_summary_digest": replay_observation[
+                        "wip_summary_digest"
+                    ],
+                    "expected_wip_summary_digest": expected_wip,
+                }
+            )
             if (
                 canonical_json_sha256(replay_marker)
                 != canonical_json_sha256(marker_value)
                 or replay_observation["state"] != "aligned"
-                or replay_observation["wip_summary_digest"] != expected_wip
+                or replay_evidence
+                != marker_receipt["finalization"]["staging_binding_digest"]
             ):
                 raise AdapterError("repair replay workspace differs")
         except (AdapterError, OSError, KeyError, TypeError, ValueError) as exc:
@@ -1954,6 +2066,29 @@ def _repair(payload: Mapping[str, Any]) -> dict[str, Any]:
         raise AdapterError("workspace repair WIP fence differs")
     if base_receipt["source_wip_before_digest"] != base_receipt["source_wip_after_digest"]:
         raise AdapterError("canonical source WIP fence differs")
+    mailbox_ignore_added = _ensure_receipt_mailbox_gitignore(bundle, base_receipt)
+    if mailbox_ignore_added:
+        preflight = _status(
+            {
+                "operation_id": f"{operation_id}-mailbox-ignore",
+                "bundle_path": str(bundle),
+                "plan": plan,
+                "receipt": base_receipt,
+            }
+        )["observation"]
+        if preflight["state"] != "aligned":
+            raise AdapterError(
+                "workspace mailbox ignore changed repair alignment",
+                code="workspace.repair-outcome-unknown",
+                retryable=True,
+                mutation_state="unknown",
+            )
+    repair_evidence = canonical_json_sha256(
+        {
+            "wip_summary_digest": preflight["wip_summary_digest"],
+            "expected_wip_summary_digest": expected_wip,
+        }
+    )
     fence = {
         "base_receipt_digest": canonical_json_sha256(base_receipt),
         "expected_ready_revision": base_receipt["finalization"][
@@ -1977,10 +2112,10 @@ def _repair(payload: Mapping[str, Any]) -> dict[str, Any]:
     }
     journal["events"] = [
         _event(1, "planned", "coordinator", "workspace.plan-frozen", plan["plan_id"], "committed", _operation_intent(journal)),
-        _event(2, "repair", "workspace", "workspace.repair", base_receipt["workspace_id"], "committed", preflight["ownership_summary_digest"]),
+        _event(2, "repair", "workspace", "workspace.repair", base_receipt["workspace_id"], "committed", repair_evidence),
         _event(3, "verify", "workspace", "workspace.components-verified", plan["plan_id"], "committed", canonical_json_sha256(plan["components"])),
         _event(4, "verify", "environment", "environment.binding-verified", plan["environment"]["environment_id"], "committed", canonical_json_sha256(plan["environment"])),
-        _event(5, "finalize", "coordinator", "workspace.atomic-publish", base_receipt["workspace_id"], "committed", preflight["ownership_summary_digest"]),
+        _event(5, "finalize", "coordinator", "workspace.atomic-publish", base_receipt["workspace_id"], "committed", repair_evidence),
     ]
     receipt = dict(base_receipt)
     receipt.update(
@@ -1995,7 +2130,7 @@ def _repair(payload: Mapping[str, Any]) -> dict[str, Any]:
     )
     receipt["finalization"] = {
         **base_receipt["finalization"],
-        "staging_binding_digest": preflight["ownership_summary_digest"],
+        "staging_binding_digest": repair_evidence,
         "expected_registry_revision": base_receipt["finalization"][
             "committed_ready_revision"
         ],
@@ -2042,14 +2177,24 @@ def _repair(payload: Mapping[str, Any]) -> dict[str, Any]:
         current_marker = _require_owned_workspace_tree(bundle, base_receipt)
         if canonical_json_sha256(current_marker) != canonical_json_sha256(marker_value):
             raise AdapterError("workspace repair binding changed concurrently")
+        current_evidence = canonical_json_sha256(
+            {
+                "wip_summary_digest": current["wip_summary_digest"],
+                "expected_wip_summary_digest": expected_wip,
+            }
+        )
         if (
             current["state"] != "aligned"
-            or current["wip_summary_digest"] != expected_wip
+            or current_evidence != repair_evidence
         ):
             raise AdapterError("workspace repair changed before publication")
     except (AdapterError, OSError, KeyError, TypeError, ValueError) as exc:
         if isinstance(exc, AdapterError) and exc.mutation_state == "unknown":
             raise
+        if mailbox_ignore_added:
+            raise _unknown_repair(
+                exc, "workspace repair changed after mailbox ignore publication"
+            ) from exc
         try:
             # Only classify this as no-effect when the receipt-owned base
             # marker is still exact and no destroy operation appeared while
@@ -2092,9 +2237,15 @@ def _repair(payload: Mapping[str, Any]) -> dict[str, Any]:
             marker_payload
         ):
             raise AdapterError("workspace repair marker publication differs")
+        postflight_evidence = canonical_json_sha256(
+            {
+                "wip_summary_digest": postflight["wip_summary_digest"],
+                "expected_wip_summary_digest": expected_wip,
+            }
+        )
         if (
             postflight["state"] != "aligned"
-            or postflight["wip_summary_digest"] != expected_wip
+            or postflight_evidence != repair_evidence
         ):
             raise AdapterError("workspace repair postflight differs")
     except (AdapterError, OSError, KeyError, TypeError, ValueError) as exc:

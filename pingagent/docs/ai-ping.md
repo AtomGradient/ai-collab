@@ -18,7 +18,11 @@ ai-ping reviewer --kind review-request --file review.md
 ai-ping analyst --kind review-response --reply-to <delivery-id> --file response.md
 ```
 
-sender identity 不来自 `<to>`、`--from` 或环境变量字符串，而由 Host-issued scoped capability、Unix socket peer PID、exact participant generation 和 Harness-owned descendant process chain 共同核验。Host 持久化 route/envelope 后，`ai-ping` 立即输出紧凑的 `accepted` 结果；调用 shell/Agent 无须等待 receiver 消费。dispatch、delivery/consumption ACK、retry 与 Host restart recovery 独立继续，显式查询/等待走 Host read model。正常 ACK 是机器 receipt，不重新注入 Agent 会话、不触发模型推理，也不要求 Agent 输出“对方已收到”。`--from` 会被拒绝；Harness 中的 `--wait` 也会被拒绝，避免与 legacy“等待业务回复”语义混淆。若 scoped context 存在但无效，命令 fail closed，不回退 legacy mailbox。PingAgent 只是简洁入口和 exact-session transport；policy、route、journal、delivery/consumption state 始终由 Host 持有。
+sender identity 不来自 `<to>`、`--from` 或环境变量字符串，而由 Host-issued scoped capability、Unix socket peer PID、exact participant generation 和 Harness-owned descendant process chain 共同核验。Host 持久化 route/envelope 后，`ai-ping` 立即输出紧凑的 `accepted` 结果；调用 shell/Agent 无须等待 receiver 消费。dispatch、delivery/consumption ACK、retry 与 Host restart recovery 独立继续，显式查询/等待走 Host read model。
+
+接收端的完整正文写入该 Scenario 中 participant 工作目录下的 `.ai-mailbox/inbox/<role>/<delivery-id>.md`。若项目尚未忽略该目录，Workspace adapter 会在 Scenario 克隆的 `.gitignore` 中追加一行 `.ai-mailbox/`；用户注册的原始 checkout 不会被修改。exact-session transport 只向 TUI 注入一行 `[ai-collab 收信] ... 请 Read <path>` 通知。因此长消息不经过 TUI 输入链路，不会因输入长度被截断；文件同时保留 frontmatter、回复命令和 consumption marker。这个 mailbox 仅是 Host 权威投递的正文载体，不使用 legacy watcher、不参与 role 发现，也不改变 Host 对 policy、route、journal、ACK 和 retry 的所有权。
+
+正常 ACK 是机器 receipt，不重新注入 Agent 会话、不触发模型推理，也不要求 Agent 输出“对方已收到”。`--from` 会被拒绝；Harness 中的 `--wait` 也会被拒绝，避免与 legacy“等待业务回复”语义混淆。若 scoped context 存在但无效，命令 fail closed，不回退 legacy mailbox。PingAgent 只是简洁入口和 exact-session transport；policy、route、journal、delivery/consumption state 始终由 Host 持有。
 
 ## 速查（5 个最常用 pattern）
 
@@ -86,7 +90,7 @@ ai-ping claude "..."   ─►   inbox/claude/<id>.md
 
 消息文件 = YAML frontmatter + markdown 正文。frontmatter 至少有 `id` `from` `to` `kind` `created`，回复时还有 `reply_to`。
 
-上图只描述 legacy mailbox 模式。Harness Scenario 模式是 `participant ai-ping → scoped product client → Host policy/delivery → exact-session transport`，不会产生 `.ai-mailbox` 文件。
+上图只描述 legacy mailbox 模式。Harness Scenario 模式是 `participant ai-ping → scoped product client → Host policy/delivery → Scenario 工作目录消息文件 → exact-session 短通知`；目录外形与 legacy mailbox 一致，但不启动 watcher，路由与状态仍由 Host 管理。
 
 ## mailbox 选择规则
 

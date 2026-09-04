@@ -122,6 +122,7 @@ def _presentation_descriptor() -> dict[str, Any]:
 class FakeDeliveryDriver:
     def __init__(self) -> None:
         self.delivery_calls = 0
+        self.delivery_payloads: list[dict[str, Any]] = []
         self.failures_remaining = 0
         self.interrupt_once = False
         self.supervision_sequences: dict[str, int] = {}
@@ -246,6 +247,7 @@ class FakeDeliveryDriver:
             }
         if operation == "deliver":
             self.delivery_calls += 1
+            self.delivery_payloads.append(copy.deepcopy(dict(payload)))
             if self.interrupt_once:
                 self.interrupt_once = False
                 raise KeyboardInterrupt
@@ -1994,6 +1996,41 @@ def test_policy_replan_rebinds_one_missing_member_and_refreshes_live_context(
         ]
 
 
+def test_host_delivery_carries_receipt_working_directory(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    with running_host(state_root) as (host, owner, driver):
+        opened, sender, receiver = _prepare(owner)
+        assert host.participants is not None
+        host.participants._workspace_summary = lambda _project, _scenario: {
+            "receipt": {
+                "participant_working_directory": "bundle/someproject",
+            }
+        }
+        owner.apply_policy(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=1,
+            scenario_state_revision=opened["state_revision"],
+            policy_pack=_policy(sender, receiver),
+        )
+
+        sent = _send(
+            owner,
+            opened,
+            sender,
+            receiver,
+            request_id="send-with-receipt-working-directory",
+            message_id="message-with-receipt-working-directory",
+        )
+        _wait_delivery(owner, sent["deliveries"][0]["delivery_id"])
+
+        payload = driver.delivery_payloads[-1]
+        assert payload["workspace_path"] == str(
+            host.store.workspace_path(opened["workspace_binding_id"])
+        )
+        assert payload["participant_working_directory"] == "bundle/someproject"
+
+
 def test_participants_self_send_and_reply_with_scoped_identity(
     tmp_path: Path,
 ) -> None:
@@ -2047,6 +2084,11 @@ def test_participants_self_send_and_reply_with_scoped_identity(
         original = forward["deliveries"][0]
         assert forward["acceptance"]["outcome"] == "accepted"
         _wait_delivery(owner, original["delivery_id"])
+        assert driver.delivery_payloads[-1]["reply_to_delivery_id"] is None
+        assert driver.delivery_payloads[-1]["workspace_path"] == str(
+            host.store.workspace_path(opened["workspace_binding_id"])
+        )
+        assert "participant_working_directory" not in driver.delivery_payloads[-1]
         reverse = ParticipantHarnessClient(Path(receiver_context)).reply(
             reply_to_delivery_id=original["delivery_id"],
             receiver_participant_id=SENDER_ID,
@@ -2060,6 +2102,10 @@ def test_participants_self_send_and_reply_with_scoped_identity(
         )
         assert reply["target"]["sender"]["participant_id"] == RECEIVER_ID
         assert reply["target"]["receiver"]["participant_id"] == SENDER_ID
+        assert (
+            driver.delivery_payloads[-1]["reply_to_delivery_id"]
+            == original["delivery_id"]
+        )
         durable = json.loads(
             (state_root / "delivery-state.json").read_text(encoding="utf-8")
         )["deliveries"]

@@ -3403,9 +3403,14 @@ def test_root_driver_accepts_only_exact_pingagent_transport_evidence(
 def test_delivery_notification_does_not_create_terminal_reply_loops() -> None:
     record = {
         "delivery_id": "delivery-terminal",
-        "target": {"sender": {"participant_id": "reviewer"}},
+        "payload_digest": "c" * 64,
+        "target": {
+            "sender": {"participant_id": "reviewer"},
+            "receiver": {"participant_id": "analyst"},
+        },
     }
     participant_ping = Path("/private/participant generation/ai-ping")
+    message_path = Path(".ai-mailbox/inbox/analyst/delivery-terminal.md")
     for message_kind in (
         "collaboration.request",
         "collaboration.question",
@@ -3415,20 +3420,28 @@ def test_delivery_notification_does_not_create_terminal_reply_loops() -> None:
         request = participant_driver._delivery_notification(  # noqa: SLF001
             record,
             message_kind,
-            "Review fixed SHA.",
-            "a" * 48,
+            message_path,
+            None,
             participant_ping,
         )
-        assert "Treat the payload as a peer request" in request
+        assert request.startswith(
+            "[ai-collab 收信] from=reviewer "
+            f"kind={message_kind.removeprefix('collaboration.')} "
+            "id=delivery-terminal | 请 Read "
+        )
+        assert "Review fixed SHA." not in request
+        assert "AI Collaboration Harness typed delivery" not in request
+        assert "AI_COLLAB_CONSUMED" not in request
         assert (
             "'/private/participant generation/ai-ping' reviewer "
-            "--kind "
+            + (
+                "--kind review-response "
+                if message_kind == "collaboration.review-request"
+                else ""
+            )
+            + "--reply-to delivery-terminal --file <你的回复.md>"
         ) in request
-        assert "--reply-to delivery-terminal" in request
-        if message_kind == "collaboration.review-request":
-            assert "--kind review-response" in request
-        else:
-            assert "--kind msg" in request
+        assert "\n" not in request
 
     for message_kind in (
         "collaboration.response",
@@ -3439,13 +3452,254 @@ def test_delivery_notification_does_not_create_terminal_reply_loops() -> None:
         terminal = participant_driver._delivery_notification(  # noqa: SLF001
             record,
             message_kind,
-            "P0=0 P1=0",
-            "b" * 48,
+            message_path,
+            "delivery-request",
             participant_ping,
         )
-        assert "terminal/informational" in terminal
-        assert "do not send a Harness-tracked receipt" in terminal
-        assert "ai-ping reviewer" not in terminal
+        assert "reply_to=delivery-request" in terminal
+        assert "这是对你之前消息(id=delivery-request)的回复" in terminal
+        assert "ai-ping" not in terminal
+        assert "\n" not in terminal
+
+
+def test_delivery_message_moves_long_payload_out_of_tui_notification(
+    tmp_path: Path,
+) -> None:
+    private_root = tmp_path / "participant generation"
+    private_root.mkdir(mode=0o700)
+    scenario_root = tmp_path / "workspace-delivery"
+    scenario_root.mkdir(mode=0o700)
+    workspace_path = scenario_root / "bundle" / "project"
+    workspace_path.mkdir(parents=True)
+    record = {
+        "delivery_id": "delivery-long",
+        "payload_digest": "d" * 64,
+        "target": {
+            "sender": {"participant_id": "reviewer"},
+            "receiver": {"participant_id": "analyst2"},
+        },
+    }
+    participant_ping = private_root / "ai-ping"
+    message = "诊断结果语义审核\n" + ("完整正文-0123456789\n" * 2_000)
+    token = "e" * 48
+
+    message_path = participant_driver._write_delivery_message(  # noqa: SLF001
+        workspace_path,
+        record,
+        "collaboration.review-request",
+        message,
+        token,
+        None,
+        participant_ping,
+    )
+    notification = participant_driver._delivery_notification(  # noqa: SLF001
+        record,
+        "collaboration.review-request",
+        message_path.relative_to(workspace_path),
+        None,
+        participant_ping,
+    )
+    persisted = message_path.read_text(encoding="utf-8")
+
+    assert message_path == (
+        workspace_path
+        / ".ai-mailbox/inbox/analyst2/delivery-long.md"
+    )
+    assert stat.S_IMODE(message_path.stat().st_mode) == 0o600
+    assert message in persisted
+    assert "kind: review-request" in persisted
+    assert "--kind review-response --reply-to delivery-long" in persisted
+    assert f"consumption_token: {token}" in persisted
+    assert f"AI_COLLAB_CONSUMED:{token}" not in persisted
+    assert "前缀 `AI_COLLAB_CONSUMED:`" in persisted
+    assert message not in notification
+    assert token not in notification
+    assert "Read .ai-mailbox/inbox/analyst2/delivery-long.md" in notification
+    assert str(workspace_path) not in notification
+    assert len(notification.encode("utf-8")) < 1_024
+
+
+def test_driver_delivery_accepts_host_message_limit(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    private_root = tmp_path / "participant generation"
+    private_root.mkdir(mode=0o700)
+    scenario_root = tmp_path / "workspace-delivery-limit"
+    scenario_root.mkdir(mode=0o700)
+    workspace_path = scenario_root / "bundle" / "project"
+    workspace_path.mkdir(parents=True)
+    record = {
+        "delivery_id": "delivery-limit",
+        "message_id": "message-limit",
+        "payload_digest": "f" * 64,
+        "target": {
+            "sender": {"participant_id": "reviewer"},
+            "receiver": {"participant_id": "analyst"},
+        },
+        "events": [
+            {
+                "attempt_number": 1,
+                "event": "attempt_started",
+                "transport_attempt_id": "attempt-limit",
+            }
+        ],
+    }
+    state = {
+        "schema_version": 1,
+        "session_id": "session-limit",
+        "runtime_profile_ref": "runtime-profile.codex",
+        "workspace_path": str(workspace_path),
+    }
+    monkeypatch.setattr(
+        participant_driver,
+        "_delivery_state",
+        lambda payload, require_delivered: (private_root, state, record, "a" * 48),
+    )
+    monkeypatch.setattr(participant_driver, "_ensure_iterm_module", lambda _: object())
+
+    async def validate_exact_session(module: Any, current: Any) -> None:
+        return None
+
+    monkeypatch.setattr(
+        participant_driver, "_validate_exact_session_async", validate_exact_session
+    )
+    monkeypatch.setattr(
+        participant_driver,
+        "_pingagent_deliver",
+        lambda current, delivery, notification: {
+            "transport_evidence_digest": "b" * 64
+        },
+    )
+    monkeypatch.setattr(participant_driver, "_read_private", lambda _: dict(state))
+    monkeypatch.setattr(participant_driver, "_write_private", lambda path, value: None)
+    payload = {
+        "delivery_record": record,
+        "message": "x" * participant_driver.MAX_DELIVERY_MESSAGE_BYTES,
+        "message_kind": "collaboration.review-request",
+        "consumption_token": "a" * 48,
+        "runtime_ready_ack": {},
+        "presentation_create_ack": {},
+        "private_root": str(private_root),
+        "workspace_path": str(scenario_root),
+        "participant_working_directory": "bundle/project",
+    }
+
+    result = participant_driver.deliver(payload)
+
+    assert result["delivery_ack"]["delivery_id"] == "delivery-limit"
+    assert not (workspace_path / ".gitignore").exists()
+    persisted = participant_driver._delivery_message_path(  # noqa: SLF001
+        workspace_path, record
+    ).read_text(encoding="utf-8")
+    assert "x" * participant_driver.MAX_DELIVERY_MESSAGE_BYTES in persisted
+
+    payload["message"] += "x"
+    with pytest.raises(participant_driver.DriverError, match="payload is invalid"):
+        participant_driver.deliver(payload)
+
+
+def test_delivery_workspace_migrates_only_the_exact_running_directory(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    private_root = tmp_path / "participant-private"
+    private_root.mkdir(mode=0o700)
+    scenario_root = tmp_path / "workspace-existing"
+    scenario_root.mkdir(mode=0o700)
+    workspace_path = scenario_root / "bundle" / "project"
+    workspace_path.mkdir(parents=True)
+    state = {
+        "schema_version": 1,
+        "pid": 1234,
+        "runtime_profile_ref": "runtime-profile.codex",
+    }
+    writes: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        participant_driver, "_process_cwd", lambda pid: workspace_path
+    )
+    monkeypatch.setattr(
+        participant_driver,
+        "_write_private",
+        lambda path, value: writes.append(dict(value)),
+    )
+
+    assert participant_driver._delivery_workspace(  # noqa: SLF001
+        str(scenario_root), state, private_root, "bundle/project"
+    ) == workspace_path
+    assert state["workspace_path"] == str(workspace_path)
+    assert writes[-1]["workspace_path"] == str(workspace_path)
+
+    other = scenario_root / "bundle" / "other"
+    other.mkdir()
+    with pytest.raises(
+        participant_driver.DriverError, match="workspace binding differs"
+    ):
+        participant_driver._delivery_workspace(  # noqa: SLF001
+            str(scenario_root), state, private_root, "bundle/other"
+        )
+
+
+def test_delivery_workspace_uses_the_launch_profile_fallback(tmp_path: Path) -> None:
+    private_root = tmp_path / "participant-private"
+    private_root.mkdir(mode=0o700)
+    scenario_root = tmp_path / "workspace-legacy-receipt"
+    scenario_root.mkdir(mode=0o700)
+    bundle = scenario_root / "bundle"
+    bundle.mkdir(mode=0o700)
+    state = {
+        "schema_version": 1,
+        "runtime_profile_ref": "runtime-profile.codex",
+    }
+    profile = participant_driver._runtime_profile(state)  # noqa: SLF001
+    launch_path = participant_driver._workspace_path(  # noqa: SLF001
+        str(scenario_root), profile
+    )
+    state["workspace_path"] = str(launch_path)
+
+    assert participant_driver._delivery_workspace(  # noqa: SLF001
+        str(scenario_root), state, private_root
+    ) == launch_path == bundle
+
+
+def test_delivery_mailbox_ignore_skips_a_non_repository_directory(
+    tmp_path: Path,
+) -> None:
+    workspace_path = tmp_path / "bundle"
+    workspace_path.mkdir()
+
+    participant_driver._ensure_delivery_mailbox_ignored(workspace_path)  # noqa: SLF001
+
+    assert not (workspace_path / ".gitignore").exists()
+
+
+def test_delivery_driver_adds_the_mailbox_gitignore_once(tmp_path: Path) -> None:
+    scenario_root = tmp_path / "workspace-driver-gitignore"
+    scenario_root.mkdir(mode=0o700)
+    workspace_path = scenario_root / "bundle" / "project"
+    workspace_path.mkdir(parents=True)
+    subprocess.run(
+        ["git", "-c", "init.defaultBranch=main", "init", str(workspace_path)],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    participant_driver._ensure_delivery_mailbox_ignored(workspace_path)  # noqa: SLF001
+    first = (workspace_path / ".gitignore").read_bytes()
+    participant_driver._ensure_delivery_mailbox_ignored(workspace_path)  # noqa: SLF001
+
+    assert first == b".ai-mailbox/\n"
+    assert (workspace_path / ".gitignore").read_bytes() == first
+    assert subprocess.run(
+        [
+            "git",
+            "-C",
+            str(workspace_path),
+            "check-ignore",
+            "-q",
+            ".ai-mailbox/message",
+        ],
+        check=False,
+    ).returncode == 0
 
 
 def test_generation_scoped_ping_survives_fresh_login_shell_environment(

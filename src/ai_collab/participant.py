@@ -1302,31 +1302,40 @@ class ParticipantCoordinator:
         delivery_record: Mapping[str, Any],
         message: str,
         message_kind: str,
+        reply_to_delivery_id: str | None,
         consumption_token: str,
     ) -> dict[str, Any]:
         """Dispatch through the exact receiver runtime/presentation binding."""
 
         target = delivery_record["target"]
         receiver = target["receiver"]
-        _, artifact, private_root = self.store.participant_delivery_input(
-            project_instance_id=project_instance_id,
-            scenario_id=scenario_id,
-            participant_id=receiver["participant_id"],
-            participant_generation=receiver["participant_generation"],
-            runtime_binding_id=target["runtime_binding_id"],
-            presentation_binding_id=target["presentation_binding_id"],
+        _, artifact, private_root, scenario_workspace = (
+            self.store.participant_delivery_input(
+                project_instance_id=project_instance_id,
+                scenario_id=scenario_id,
+                participant_id=receiver["participant_id"],
+                participant_generation=receiver["participant_generation"],
+                runtime_binding_id=target["runtime_binding_id"],
+                presentation_binding_id=target["presentation_binding_id"],
+            )
         )
         self._ensure_private_root(private_root)
+        delivery_workspace = {"workspace_path": str(scenario_workspace)}
+        self._bind_workspace_directory(
+            delivery_workspace, project_instance_id, scenario_id
+        )
         result = self.driver.call(
             "deliver",
             {
                 "delivery_record": copy.deepcopy(delivery_record),
                 "message": message,
                 "message_kind": message_kind,
+                "reply_to_delivery_id": reply_to_delivery_id,
                 "consumption_token": consumption_token,
                 "runtime_ready_ack": artifact["runtime_ready_ack"],
                 "presentation_create_ack": artifact["presentation_create_ack"],
                 "private_root": str(private_root),
+                **delivery_workspace,
             },
         )
         if (
@@ -1356,7 +1365,7 @@ class ParticipantCoordinator:
     ) -> dict[str, Any]:
         """Prove that one local IPC peer is an exact owned descendant."""
 
-        record, artifact, private_root = self.store.participant_delivery_input(
+        record, artifact, private_root, _ = self.store.participant_delivery_input(
             project_instance_id=project_instance_id,
             scenario_id=scenario_id,
             participant_id=participant_id,
@@ -1411,7 +1420,7 @@ class ParticipantCoordinator:
 
         target = delivery_record["target"]
         receiver = target["receiver"]
-        _, artifact, private_root = self.store.participant_delivery_input(
+        _, artifact, private_root, _ = self.store.participant_delivery_input(
             project_instance_id=project_instance_id,
             scenario_id=scenario_id,
             participant_id=receiver["participant_id"],

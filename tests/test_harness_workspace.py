@@ -1598,6 +1598,31 @@ def test_coordinator_publishes_replays_and_observes(tmp_path: Path) -> None:
     assert stat.S_IMODE(coordinator.state_path.stat().st_mode) == 0o600
 
 
+def test_recovery_inventory_is_stable_when_room_mail_changes(tmp_path: Path) -> None:
+    workspace_path = tmp_path / "workspace-mailbox-inventory"
+    workspace_path.mkdir(mode=0o700)
+    bundle = workspace_path / "bundle"
+    bundle.mkdir(mode=0o700)
+    checkout = bundle / "project"
+    checkout.mkdir()
+    before = WorkspaceCoordinator._recovery_inventory(  # noqa: SLF001
+        workspace_path=workspace_path,
+        workspace_id=workspace_path.name,
+    )
+
+    inbox = checkout / ".ai-mailbox" / "inbox" / "reviewer"
+    inbox.mkdir(parents=True)
+    message = inbox / "delivery-test.md"
+    message.write_text("first\n", encoding="utf-8")
+    message.write_text("second\n", encoding="utf-8")
+
+    after = WorkspaceCoordinator._recovery_inventory(  # noqa: SLF001
+        workspace_path=workspace_path,
+        workspace_id=workspace_path.name,
+    )
+    assert after == before
+
+
 def test_retryable_prepare_failure_reuses_the_frozen_plan(tmp_path: Path) -> None:
     store = ScenarioStore(tmp_path / "state")
     store.create_scenario(
