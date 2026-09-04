@@ -593,8 +593,14 @@ enum S {
         static var generationChanged: String {
             t("AI colleague generation changed", "AI 同事已更换代次")
         }
-        static func driftRow(_ id: String, _ policyGeneration: Int, _ current: Int) -> String {
-            t(
+        static func driftRow(_ id: String, _ policyGeneration: Int, _ current: Int?) -> String {
+            guard let current else {
+                return t(
+                    "\(id): policy g\(policyGeneration) → colleague removed",
+                    "\(id)：规则记录第 \(policyGeneration) 代 → 当前已删除"
+                )
+            }
+            return t(
                 "\(id): policy g\(policyGeneration) → current g\(current)",
                 "\(id)：规则记录第 \(policyGeneration) 代 → 当前第 \(current) 代"
             )
@@ -617,6 +623,12 @@ enum S {
         }
         static var planPreview: String { t("Plan preview", "方案预览") }
         static var memberMissing: String { t("missing", "缺席") }
+        static func replacementMember(_ participant: String, fills template: String) -> String {
+            t(
+                "\(participant) (fills \(template))",
+                "\(participant)（顶替 \(template)）"
+            )
+        }
         static func upToAttempts(_ count: Int) -> String {
             t(" · up to \(count) attempts", " · 最多 \(count) 次")
         }

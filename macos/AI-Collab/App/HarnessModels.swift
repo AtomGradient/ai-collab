@@ -615,6 +615,7 @@ struct PolicyTemplateRecord: Identifiable, Equatable {
 
 struct PolicyTeamMember: Identifiable, Equatable {
     let participantID: String
+    let templateParticipantID: String?
     let generation: Int?
     let isPresent: Bool
 
@@ -623,9 +624,12 @@ struct PolicyTeamMember: Identifiable, Equatable {
     init?(_ value: [String: Any]) {
         guard
             let participantID = value["participant_id"] as? String,
-            let isPresent = value["present"] as? Bool
+            let isPresent = value["present"] as? Bool,
+            value["template_participant_id"] == nil
+                || value["template_participant_id"] is String
         else { return nil }
         self.participantID = participantID
+        self.templateParticipantID = value["template_participant_id"] as? String
         self.generation = value["participant_generation"] as? Int
         self.isPresent = isPresent
     }
@@ -700,7 +704,7 @@ struct PolicyPlanRecord: Equatable {
 struct PolicyGenerationDrift: Identifiable, Equatable {
     let participantID: String
     let policyGeneration: Int
-    let currentGeneration: Int
+    let currentGeneration: Int?
 
     var id: String { participantID }
 
@@ -708,11 +712,12 @@ struct PolicyGenerationDrift: Identifiable, Equatable {
         guard
             let participantID = value["participant_id"] as? String,
             let policyGeneration = value["policy_generation"] as? Int,
-            let currentGeneration = value["current_generation"] as? Int
+            let rawCurrentGeneration = value["current_generation"],
+            rawCurrentGeneration is NSNull || rawCurrentGeneration is Int
         else { return nil }
         self.participantID = participantID
         self.policyGeneration = policyGeneration
-        self.currentGeneration = currentGeneration
+        self.currentGeneration = rawCurrentGeneration as? Int
     }
 }
 

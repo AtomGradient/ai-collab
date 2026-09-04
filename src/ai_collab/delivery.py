@@ -415,11 +415,41 @@ class DeliveryCoordinator:
         )
         participant_ids = self.validate_template(template, scenario_id)
         current = {value["participant_id"]: value for value in participants}
+        key = self._key(project_instance_id, scenario_id)
+        with self._lock:
+            previous = copy.deepcopy(self._read_state()["policies"].get(key))
+        policy_version = 1 if previous is None else previous["policy_version"] + 1
+
         team: list[dict[str, Any]] = []
         blockers: list[str] = []
         refs: dict[str, dict[str, Any]] = {}
+        resolved_ids = {
+            participant_id: participant_id
+            for participant_id in participant_ids
+            if participant_id in current
+        }
+        missing_ids = [
+            participant_id
+            for participant_id in participant_ids
+            if participant_id not in current
+        ]
+        replacement_ids = sorted(
+            participant_id
+            for participant_id, record in current.items()
+            if participant_id not in participant_ids
+            and record["interaction_mode"] == "tui"
+        )
+        if (
+            previous is not None
+            and previous["policy_id"] == template["policy_id"]
+            and len(missing_ids) == 1
+            and len(replacement_ids) == 1
+        ):
+            resolved_ids[missing_ids[0]] = replacement_ids[0]
+
         for participant_id in participant_ids:
-            record = current.get(participant_id)
+            resolved_id = resolved_ids.get(participant_id, participant_id)
+            record = current.get(resolved_id)
             if record is None:
                 team.append(
                     {
@@ -432,18 +462,15 @@ class DeliveryCoordinator:
                 continue
             ref = _participant_ref(record)
             refs[participant_id] = ref
-            team.append(
-                {
-                    "participant_id": participant_id,
-                    "participant_generation": ref["participant_generation"],
-                    "present": True,
-                }
-            )
+            member = {
+                "participant_id": resolved_id,
+                "participant_generation": ref["participant_generation"],
+                "present": True,
+            }
+            if resolved_id != participant_id:
+                member["template_participant_id"] = participant_id
+            team.append(member)
 
-        key = self._key(project_instance_id, scenario_id)
-        with self._lock:
-            previous = copy.deepcopy(self._read_state()["policies"].get(key))
-        policy_version = 1 if previous is None else previous["policy_version"] + 1
         if previous is not None and previous["policy_id"] != template["policy_id"]:
             blockers.append("policy.template-conflict")
 

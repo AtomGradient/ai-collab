@@ -2836,6 +2836,10 @@ class HarnessHost:
                             plan_digest=payload["plan_digest"],
                             **common,
                         )
+                if operation == "policy.apply-plan":
+                    self._refresh_participant_collaboration_contexts(
+                        target["project_instance_id"], target["scenario_id"]
+                    )
             elif operation == "policy.apply":
                 if request["fence"]["operation_generation"] != payload["scenario_state_revision"]:
                     raise ProtocolError(
@@ -2851,6 +2855,9 @@ class HarnessHost:
                     scenario_state_revision=payload["scenario_state_revision"],
                     policy_pack=payload["policy_pack"],
                     **common,
+                )
+                self._refresh_participant_collaboration_contexts(
+                    target["project_instance_id"], target["scenario_id"]
                 )
             elif operation == "message.send":
                 if (

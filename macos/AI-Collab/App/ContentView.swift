@@ -2002,7 +2002,13 @@ struct ContentView: View {
                                         : "xmark.circle.fill"
                                 )
                                 .foregroundStyle(member.isPresent ? .green : .red)
-                                Text(member.participantID)
+                                Text(
+                                    member.templateParticipantID.map {
+                                        S.Policy.replacementMember(
+                                            member.participantID, fills: $0
+                                        )
+                                    } ?? member.participantID
+                                )
                                 Spacer()
                                 Text(
                                     member.generation.map { "g\($0)" } ?? S.Policy.memberMissing

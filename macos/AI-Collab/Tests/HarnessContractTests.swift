@@ -114,7 +114,8 @@ final class HarnessContractTests: XCTestCase {
             "policy_pack": ["policy_version": 3],
             "team": [
                 [
-                    "participant_id": "analyst",
+                    "participant_id": "analyst2",
+                    "template_participant_id": "analyst",
                     "participant_generation": 4,
                     "present": true,
                 ],
@@ -134,7 +135,9 @@ final class HarnessContractTests: XCTestCase {
             ]],
         ]))
         XCTAssertEqual(plan.templateID, "team.peer-review")
-        XCTAssertEqual(plan.team.map(\.participantID), ["analyst", "reviewer"])
+        XCTAssertEqual(plan.team.map(\.participantID), ["analyst2", "reviewer"])
+        XCTAssertEqual(plan.team[0].templateParticipantID, "analyst")
+        XCTAssertNil(plan.team[1].templateParticipantID)
         XCTAssertEqual(plan.team[0].generation, 4)
         XCTAssertNil(plan.team[1].generation)
         XCTAssertEqual(plan.routeEffects[0].maxAttempts, 2)
@@ -152,6 +155,21 @@ final class HarnessContractTests: XCTestCase {
         ]))
         XCTAssertTrue(status.requiresReplan)
         XCTAssertEqual(status.generationDrift.first?.participantID, "reviewer")
+
+        let removedStatus = try XCTUnwrap(PolicyStatusRecord([
+            "policy": ["policy_id": "policy.peer-review", "policy_version": 4],
+            "policy_health": [
+                "requires_replan": true,
+                "generation_drift": [[
+                    "participant_id": "analyst",
+                    "policy_generation": 1,
+                    "current_generation": NSNull(),
+                ]],
+            ],
+        ]))
+        XCTAssertTrue(removedStatus.requiresReplan)
+        XCTAssertEqual(removedStatus.generationDrift.first?.participantID, "analyst")
+        XCTAssertNil(removedStatus.generationDrift.first?.currentGeneration)
     }
 
     func testDeliveryCollectionModelContainsOnlyControlPlaneProjection() throws {
