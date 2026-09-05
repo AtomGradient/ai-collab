@@ -1550,9 +1550,10 @@ def test_project_template_plan_apply_and_generation_drift_require_replan(
                 "source": "project-registry",
             }
         )
-        host._scenario_collaboration_templates = (  # type: ignore[method-assign]
-            lambda project_id, scenario_id: {
-                "templates": [copy.deepcopy(template)]
+        host._project_policy_templates = (  # type: ignore[method-assign]
+            lambda project_id: {
+                "templates": [copy.deepcopy(template)],
+                "source": "project-registry",
             }
         )
         opened, sender, receiver = _prepare(client)
@@ -1685,9 +1686,10 @@ def test_policy_plan_reports_missing_declared_participant(tmp_path: Path) -> Non
         host.projects.collaboration_templates = (  # type: ignore[method-assign]
             lambda project_id: {"templates": [copy.deepcopy(template)]}
         )
-        host._scenario_collaboration_templates = (  # type: ignore[method-assign]
-            lambda project_id, scenario_id: {
-                "templates": [copy.deepcopy(template)]
+        host._project_policy_templates = (  # type: ignore[method-assign]
+            lambda project_id: {
+                "templates": [copy.deepcopy(template)],
+                "source": "project-registry",
             }
         )
         opened, _, _ = _prepare(client)
@@ -1713,9 +1715,10 @@ def test_policy_plan_does_not_infer_replacement_without_matching_policy(
         host.projects.collaboration_templates = (  # type: ignore[method-assign]
             lambda project_id: {"templates": [copy.deepcopy(template)]}
         )
-        host._scenario_collaboration_templates = (  # type: ignore[method-assign]
-            lambda project_id, scenario_id: {
-                "templates": [copy.deepcopy(template)]
+        host._project_policy_templates = (  # type: ignore[method-assign]
+            lambda project_id: {
+                "templates": [copy.deepcopy(template)],
+                "source": "project-registry",
             }
         )
         opened, sender, receiver = _prepare(client)
@@ -2777,8 +2780,10 @@ def test_policy_catalog_updates_without_rewriting_scenario_snapshots(
             scenario_state_revision=opened_b["state_revision"],
             template_id=template_v2["template_id"],
         )["policy_plan"]
+        # An explicit enable plans what the list offers — the accepted
+        # catalogue — while the room's own contract snapshot stays frozen.
         assert plan_a["template_snapshot"]["template_digest"] == (
-            canonical_json_sha256(template_v2 if builtin else template_v1)
+            canonical_json_sha256(template_v2)
         )
         assert plan_b["template_snapshot"]["template_digest"] == (
             canonical_json_sha256(template_v2)
@@ -2787,7 +2792,7 @@ def test_policy_catalog_updates_without_rewriting_scenario_snapshots(
             value
             for value in plan_a["policy_pack"]["assignments"]
             if value["participant"]["participant_id"] == RECEIVER_ID
-        )["task_id"] == ("review-v2" if builtin else "review-v1")
+        )["task_id"] == "review-v2"
         assert next(
             value
             for value in plan_b["policy_pack"]["assignments"]
@@ -2813,7 +2818,7 @@ def test_policy_catalog_updates_without_rewriting_scenario_snapshots(
         assert next(
             item for item in reapplied["assignments"]
             if item["participant"]["participant_id"] == RECEIVER_ID
-        )["task_id"] == ("review-v2" if builtin else "review-v1")
+        )["task_id"] == "review-v2"
         assert adapter.collaboration_calls == 0
 
 
@@ -2861,7 +2866,7 @@ def test_policy_apply_plan_replays_before_mutable_template_inputs(
         def mutable_input_was_consulted(*_args: Any, **_kwargs: Any) -> Any:
             raise AssertionError("mutable policy input was consulted before replay")
 
-        host._scenario_collaboration_templates = (  # type: ignore[method-assign]
+        host._project_policy_templates = (  # type: ignore[method-assign]
             mutable_input_was_consulted
         )
         assert host.delivery is not None
@@ -3108,3 +3113,188 @@ def test_collaboration_context_carries_opening_and_note(tmp_path: Path) -> None:
             participant_generation=quiet["participant_generation"],
         )
         assert context["opening"] == "" and context["note"] == ""
+
+
+# Review 20260905-224814-p7vsuu: the room-wide policy is maintained in every
+# room state, the explicit reset is fenced and idempotent, a deletion that
+# finishes on restart still recomputes the routes, and an explicit enable
+# plans the catalogue the list offered.
+
+
+def test_new_closed_room_gets_the_room_wide_policy(tmp_path: Path) -> None:
+    with running_host(tmp_path / "state") as (_, client, _):
+        client.create_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            project_binding_digest=PROJECT_DIGEST,
+        )
+        shown = client.show_policy(project_instance_id=PROJECT_ID, scenario_id=SCENARIO_ID)
+        assert shown["policy"]["policy_id"] == "team.room-open"
+        assert shown["policy"]["route_rules"] == []
+
+
+def test_upgrade_reaches_closed_rooms(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    with running_host(state_root) as (host, client, _):
+        opened, sender, receiver = _prepare(client)
+        client.apply_policy(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=opened["scenario_generation"],
+            scenario_state_revision=opened["state_revision"],
+            policy_pack=_policy(sender, receiver),
+        )
+        for participant in (sender, receiver):
+            client.stop_participant(
+                project_instance_id=PROJECT_ID,
+                scenario_id=SCENARIO_ID,
+                participant_id=participant["participant_id"],
+                scenario_generation=opened["scenario_generation"],
+                scenario_state_revision=opened["state_revision"],
+                participant_generation=participant["participant_generation"],
+                participant_state_revision=participant["state_revision"],
+            )
+        client.close_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=opened["scenario_generation"],
+            scenario_state_revision=opened["state_revision"],
+            drain_timeout_ms=1000,
+        )
+        assert host.delivery is not None
+        with host.delivery._lock:  # noqa: SLF001
+            state = host.delivery._read_state()  # noqa: SLF001
+            state.pop("policy_upgrade", None)
+            host.delivery._write_state(state)  # noqa: SLF001
+
+    with running_host(state_root) as (host, client, _):
+        assert host.delivery is not None
+        assert host.delivery.policy_upgrade_done()
+        shown = client.show_policy(project_instance_id=PROJECT_ID, scenario_id=SCENARIO_ID)
+        assert shown["policy"]["policy_id"] == "team.room-open"
+        assert _pairs(shown["policy"]) == {(SENDER_ID, RECEIVER_ID), (RECEIVER_ID, SENDER_ID)}
+
+
+@pytest.mark.parametrize("stale", ["generation", "revision"])
+def test_reset_default_rejects_a_stale_scenario_fence(tmp_path: Path, stale: str) -> None:
+    with running_host(tmp_path / "state") as (_, client, _):
+        opened, sender, receiver = _prepare(client)
+        client.apply_policy(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=opened["scenario_generation"],
+            scenario_state_revision=opened["state_revision"],
+            policy_pack=_policy(sender, receiver),
+        )
+        with pytest.raises(HarnessClientError):
+            client.reset_default_policy(
+                project_instance_id=PROJECT_ID,
+                scenario_id=SCENARIO_ID,
+                scenario_generation=999 if stale == "generation" else opened["scenario_generation"],
+                scenario_state_revision=999 if stale == "revision" else opened["state_revision"],
+            )
+        shown = client.show_policy(project_instance_id=PROJECT_ID, scenario_id=SCENARIO_ID)
+        assert shown["policy"]["policy_id"] == "policy.edgestudio-dogfood"
+
+
+def test_replayed_noop_reset_keeps_new_project_restrictions(tmp_path: Path) -> None:
+    with running_host(tmp_path / "state") as (_, client, _):
+        opened, sender, receiver = _prepare(client)
+        reset = dict(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=opened["scenario_generation"],
+            scenario_state_revision=opened["state_revision"],
+            request_id="reset-noop",
+        )
+        first = client.reset_default_policy(**reset)
+        assert first["policy"]["policy_id"] == "team.room-open"
+        client.apply_policy(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=opened["scenario_generation"],
+            scenario_state_revision=opened["state_revision"],
+            policy_pack=_policy(sender, receiver),
+        )
+        assert client.reset_default_policy(**reset) == first
+        shown = client.show_policy(project_instance_id=PROJECT_ID, scenario_id=SCENARIO_ID)
+        assert shown["policy"]["policy_id"] == "policy.edgestudio-dogfood"
+
+
+def test_explicit_enable_plans_the_current_project_catalog(tmp_path: Path) -> None:
+    root = tmp_path / "canonical"
+    root.mkdir()
+    version_one = _versioned_policy_template(1)
+    version_two = _versioned_policy_template(2)
+    render_one = _snapshot_project_render(version_one, version=1)
+    render_two = _snapshot_project_render(version_two, version=2)
+    _write_snapshot_project_files(root, version_one)
+    adapter = SnapshotProjectAdapter(root, render_one)
+    with running_snapshot_policy_host(tmp_path / "state", adapter) as (_, client):
+        project = client.register_project(canonical_project_path=str(root))["project"]
+        project_id = project["project_instance_id"]
+        opened = _prepare_snapshot_policy_scenario(
+            client,
+            project_instance_id=project_id,
+            scenario_id="existing-room",
+            project_binding_digest=render_one["render_digest"],
+        )
+        _write_snapshot_project_files(root, version_two)
+        adapter.render = copy.deepcopy(render_two)
+        observed = client.reconcile_project(project_instance_id=project_id)
+        client.accept_project_reconciliation(
+            project_instance_id=project_id,
+            availability_fingerprint=observed["reconciliation"]["availability_fingerprint"],
+        )
+        assert client.list_policy_templates(project_instance_id=project_id)["templates"] == [
+            version_two
+        ]
+        plan = client.plan_policy(
+            project_instance_id=project_id,
+            scenario_id="existing-room",
+            scenario_generation=opened["scenario_generation"],
+            scenario_state_revision=opened["state_revision"],
+            template_id=version_two["template_id"],
+        )["policy_plan"]
+        assert plan["template_snapshot"]["template_digest"] == canonical_json_sha256(version_two)
+
+
+def test_destroy_finished_on_restart_recomputes_the_room_wide_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_root = tmp_path / "state"
+    with running_host(state_root) as (host, client, _):
+        opened, _, receiver = _prepare(client)
+        stopped = client.stop_participant(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            participant_id=RECEIVER_ID,
+            scenario_generation=opened["scenario_generation"],
+            scenario_state_revision=opened["state_revision"],
+            participant_generation=receiver["participant_generation"],
+            participant_state_revision=receiver["state_revision"],
+        )["participant"]
+        original = host.store.finalize_participant_destroy
+
+        def crash(**kwargs: Any) -> None:
+            raise OSError("crash before finalize")
+
+        monkeypatch.setattr(host.store, "finalize_participant_destroy", crash)
+        with pytest.raises(HarnessClientError):
+            client.destroy_participant(
+                project_instance_id=PROJECT_ID,
+                scenario_id=SCENARIO_ID,
+                participant_id=RECEIVER_ID,
+                scenario_generation=opened["scenario_generation"],
+                scenario_state_revision=opened["state_revision"],
+                participant_generation=receiver["participant_generation"],
+                participant_state_revision=stopped["state_revision"],
+            )
+        monkeypatch.setattr(host.store, "finalize_participant_destroy", original)
+
+    with running_host(state_root) as (_, client, _):
+        remaining = client.list_participants(project_instance_id=PROJECT_ID, scenario_id=SCENARIO_ID)
+        assert [item["participant_id"] for item in remaining["participants"]] == [SENDER_ID]
+        shown = client.show_policy(project_instance_id=PROJECT_ID, scenario_id=SCENARIO_ID)
+        assert shown["policy_health"]["requires_replan"] is False
+        assert shown["policy"]["route_rules"] == []

@@ -219,7 +219,6 @@ ROOM_POLICY_SYNC_OPERATIONS = {
     "scenario.open",
     "scenario.start-participants",
     "participant.add",
-    "participant.destroy",
     "participant.replace",
     "participant.start",
     "participant.recover",
@@ -341,26 +340,6 @@ class HarnessHost:
             "source": "project-registry",
         }
 
-    def _scenario_collaboration_templates(
-        self, project_instance_id: str, scenario_id: str
-    ) -> dict[str, Any]:
-        """Offer refreshed built-ins; keep project-authored scenario rules frozen."""
-
-        # Only a project's own policy file is offered; the room-wide default
-        # needs no template and the shipped catalog is not a product choice.
-        snapshot = self.store.scenario_project_contract(
-            project_instance_id, scenario_id
-        )
-        collaboration = (
-            snapshot.get("collaboration") if isinstance(snapshot, dict) else None
-        )
-        if isinstance(collaboration, dict) and collaboration.get("kind") == "project-registry" and (
-            "registry_snapshot" in collaboration
-            or "registry_snapshot_digest" in collaboration
-        ):
-            return self.projects.collaboration_templates_from_render(snapshot)
-        return {"templates": []}
-
     def bind(self) -> None:
         if self._server is not None:
             return
@@ -481,6 +460,11 @@ class HarnessHost:
             self._refresh_participant_collaboration_contexts(
                 pending["project_instance_id"], pending["scenario_id"]
             )
+            # Membership changed here — on the request path and when a
+            # restart finishes an interrupted deletion alike.
+            self._sync_room_policy(
+                pending["project_instance_id"], pending["scenario_id"]
+            )
             return pending["operation_id"], result
 
     def _reconcile_participant_destroy_operations(self) -> None:
@@ -515,6 +499,7 @@ class HarnessHost:
 
         if self.delivery is None or self.delivery.policy_upgrade_done():
             return
+        complete = True
         for scenario in self.store.list_all_scenarios():
             try:
                 self.delivery.reset_to_default_policy(
@@ -524,11 +509,14 @@ class HarnessHost:
                     scenario_id=scenario["scenario_id"],
                 )
             except (DeliveryError, StoreError, OSError):
+                # Not marked done: the next bind reaches this room again.
+                complete = False
                 continue
             self._refresh_participant_collaboration_contexts(
                 scenario["project_instance_id"], scenario["scenario_id"]
             )
-        self.delivery.mark_policy_upgrade_done()
+        if complete:
+            self.delivery.mark_policy_upgrade_done()
 
     def _refresh_participant_collaboration_contexts(
         self, project_instance_id: str, scenario_id: str
@@ -2863,8 +2851,8 @@ class HarnessHost:
                         retryable=True,
                     )
                 else:
-                    templates = self._scenario_collaboration_templates(
-                        target["project_instance_id"], target["scenario_id"]
+                    templates = self._project_policy_templates(
+                        target["project_instance_id"]
                     )["templates"]
                     template = next(
                         (
@@ -2916,6 +2904,8 @@ class HarnessHost:
                 operation_id, result = self.delivery.reset_to_default_policy(
                     request_id=request["request_id"],
                     request_digest=request_digest,
+                    scenario_generation=payload["scenario_generation"],
+                    scenario_state_revision=payload["scenario_state_revision"],
                     **common,
                 )
                 self._refresh_participant_collaboration_contexts(

@@ -5,6 +5,58 @@
 import XCTest
 @testable import AICollab
 
+/// Answers a room creation where the Host refuses one seat.
+private final class ScriptedClient: HarnessCalling, @unchecked Sendable {
+    private let refusing: String
+    private let lock = NSLock()
+    private var log: [String] = []
+
+    init(refusing: String) { self.refusing = refusing }
+
+    func operations() -> [String] {
+        lock.lock(); defer { lock.unlock() }
+        return log
+    }
+
+    func grantProjectDirectoryAccess(_ url: URL) throws {}
+
+    nonisolated private static func room() -> [String: Any] {
+        [
+            "scenario_id": "room-1", "scenario_generation": 1, "state_revision": 1,
+            "desired_state": "closed", "observed_state": "closed",
+            "workspace_binding_id": "ws-1", "participant_ids": [String](), "objective": "",
+            "objective_history": [[String: Any]](), "playbook": "pairing",
+        ]
+    }
+
+    func call(
+        _ call: HarnessCall,
+        progress: (@Sendable (HarnessProgress) -> Void)?
+    ) async throws -> [String: Any] {
+        lock.withLock { log.append(call.operation) }
+        switch call.operation {
+        case "scenario.create":
+            return ["scenario": Self.room()]
+        case "participant.add":
+            if call.target["participant_id"] as? String == refusing {
+                throw HarnessIPCError.hostRejected(
+                    code: "participant.note-invalid", category: "validation",
+                    message: "note is too long", retryable: false,
+                    mutationState: "not_started", repairAction: nil
+                )
+            }
+            return ["participant": [String: Any]()]
+        case "scenario.list":
+            return ["scenarios": [Self.room()]]
+        default:
+            XCTFail("unexpected operation \(call.operation)")
+            return [:]
+        }
+    }
+
+    func cancelOperation(_ operationID: String) async throws -> [String: Any] { [:] }
+}
+
 /// The v3 new-room form: a pair by default, any names, unique in the room,
 /// and the records the Host now carries for it (playbook, note, room-wide).
 @MainActor
@@ -77,6 +129,58 @@ final class RoomComposerTests: XCTestCase {
                 [RoomSeat(id: UUID(), name: "codex", templateID: claude.id, note: "x")], templates: [claude]
             )
         )
+    }
+
+    func testSeatProblemsCoverNameSyntaxAndNoteLength() {
+        let claude = template("claude", "Claude")
+        let seats = [
+            RoomSeat(id: UUID(), name: "-lead", templateID: claude.id, note: ""),
+            RoomSeat(id: UUID(), name: "a b", templateID: claude.id, note: ""),
+            RoomSeat(id: UUID(), name: "ok.name:1", templateID: claude.id, note: String(repeating: "备", count: 501)),
+            RoomSeat(id: UUID(), name: "fine_2", templateID: claude.id, note: String(repeating: "x", count: 500)),
+        ]
+        XCTAssertEqual(HarnessViewModel.seatProblem(seats[0], among: seats), S.Create.seatNameInvalid("-lead"))
+        XCTAssertEqual(HarnessViewModel.seatProblem(seats[1], among: seats), S.Create.seatNameInvalid("a b"))
+        XCTAssertEqual(HarnessViewModel.seatProblem(seats[2], among: seats), S.Create.seatNoteTooLong("ok.name:1"))
+        XCTAssertNil(HarnessViewModel.seatProblem(seats[3], among: seats))
+        XCTAssertEqual(
+            HarnessViewModel.seatProblem(seats, templates: [claude]),
+            S.Create.seatNameInvalid("-lead"),
+            "every seat is checked before the room is created"
+        )
+    }
+
+    /// A seat the Host refuses after the room exists must not hide the room:
+    /// the person sees the room with the colleagues that were created and
+    /// the refusal, and adds the missing one from the room's own row.
+    func testASeatRefusedAfterCreationExposesTheRoom() async throws {
+        let client = ScriptedClient(refusing: "codex")
+        let model = HarnessViewModel(client: client)
+        model.projects = [
+            try XCTUnwrap(ProjectRecord([
+                "project_instance_id": "proj-1",
+                "project_key": "edge-studio",
+                "project_binding_digest": String(repeating: "a", count: 64),
+                "product_contract_version": "3",
+            ]))
+        ]
+        model.selectedProjectID = "proj-1"
+        let claude = template("claude", "Claude")
+        model.templates = [claude]
+        model.newScenarioID = "room-1"
+        model.newRoomSeats = [
+            RoomSeat(id: UUID(), name: "claude", templateID: claude.id, note: ""),
+            RoomSeat(id: UUID(), name: "codex", templateID: claude.id, note: ""),
+        ]
+        model.isComposingRoom = true
+
+        await model.createScenario()
+
+        XCTAssertEqual(client.operations(), ["scenario.create", "participant.add", "participant.add", "scenario.list"])
+        XCTAssertEqual(model.scenarios.map(\.id), ["room-1"])
+        XCTAssertEqual(model.selectedScenarioID, "room-1")
+        XCTAssertFalse(model.isComposingRoom)
+        XCTAssertNotNil(model.validationMessage(for: .scenarioCreate))
     }
 
     func testSuggestedColleagueNameFollowsTheCLIAndTheRoom() {

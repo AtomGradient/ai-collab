@@ -922,28 +922,38 @@ final class HarnessViewModel: ObservableObject {
             else { throw HarnessIPCError.invalidReply }
             // Seats become colleagues right away; nothing starts until the
             // person prepares the workspace and clicks Start All.
-            for seat in seats {
-                guard let template = self.templates.first(where: { $0.id == seat.templateID }) else {
-                    continue
-                }
-                _ = try await self.client.call(
-                    HarnessCall(
-                        operation: "participant.add",
-                        target: self.participantTarget(
-                            projectID: project.id,
-                            scenarioID: scenarioID,
-                            participantID: seat.name
-                        ),
-                        fence: ["operation_generation": 0, "participant_generation": 0],
-                        payload: [
-                            "scenario_generation": created.generation,
-                            "scenario_state_revision": created.stateRevision,
-                            "launch_spec": template.launchSpec,
-                            "presentation_driver_id": template.presentationDriverID ?? NSNull(),
-                            "note": seat.note,
-                        ]
+            do {
+                for seat in seats {
+                    guard let template = self.templates.first(where: { $0.id == seat.templateID }) else {
+                        continue
+                    }
+                    _ = try await self.client.call(
+                        HarnessCall(
+                            operation: "participant.add",
+                            target: self.participantTarget(
+                                projectID: project.id,
+                                scenarioID: scenarioID,
+                                participantID: seat.name
+                            ),
+                            fence: ["operation_generation": 0, "participant_generation": 0],
+                            payload: [
+                                "scenario_generation": created.generation,
+                                "scenario_state_revision": created.stateRevision,
+                                "launch_spec": template.launchSpec,
+                                "presentation_driver_id": template.presentationDriverID ?? NSNull(),
+                                "note": seat.note,
+                            ]
+                        )
                     )
-                )
+                }
+            } catch {
+                // The room and the seats before this one exist. Show them —
+                // the missing colleague is added from the room's own row —
+                // instead of hiding a half-made room behind the form.
+                try? await self.reloadScenarios()
+                self.selectedScenarioID = scenarioID
+                self.isComposingRoom = false
+                throw error
             }
             try await self.reloadScenarios()
             self.selectedScenarioID = scenarioID
@@ -988,13 +998,37 @@ final class HarnessViewModel: ObservableObject {
         return seats
     }
 
+    /// The Host's name rule: a letter or digit, then letters, digits, `.`,
+    /// `_`, `:` or `-`.
+    static func isValidColleagueName(_ name: String) -> Bool {
+        name.range(of: "^[A-Za-z0-9][A-Za-z0-9._:-]*$", options: .regularExpression) != nil
+    }
+
+    static let maxNoteCharacters = 500
+
+    /// What is wrong with one seat as written, or nil.
+    static func seatProblem(_ seat: RoomSeat, among seats: [RoomSeat]) -> String? {
+        let name = seat.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if name.isEmpty { return S.Create.seatNeedsName }
+        if !isValidColleagueName(name) { return S.Create.seatNameInvalid(name) }
+        let sameName = seats.filter {
+            $0.name.trimmingCharacters(in: .whitespacesAndNewlines) == name
+        }
+        if sameName.count > 1, sameName.first?.id != seat.id {
+            return S.Create.seatNameTaken(name)
+        }
+        if seat.note.trimmingCharacters(in: .whitespacesAndNewlines).count > maxNoteCharacters {
+            return S.Create.seatNoteTooLong(name)
+        }
+        return nil
+    }
+
     /// Why the seats cannot be created as written, or nil when they can.
+    /// Every seat is checked before the room exists, so a bad later seat
+    /// never leaves a half-made room.
     static func seatProblem(_ seats: [RoomSeat], templates: [ParticipantTemplate]) -> String? {
-        var seen: Set<String> = []
         for seat in seats {
-            if seat.name.isEmpty { return S.Create.seatNeedsName }
-            if seen.contains(seat.name) { return S.Create.seatNameTaken(seat.name) }
-            seen.insert(seat.name)
+            if let problem = seatProblem(seat, among: seats) { return problem }
             if seat.templateID == nil || !templates.contains(where: { $0.id == seat.templateID }) {
                 return S.Create.seatNeedsCLI(seat.name)
             }
@@ -1016,15 +1050,7 @@ final class HarnessViewModel: ObservableObject {
 
     /// The one line shown under a seat that cannot be created as written.
     func seatRowProblem(_ seat: RoomSeat) -> String? {
-        let name = seat.name.trimmingCharacters(in: .whitespacesAndNewlines)
-        if name.isEmpty { return S.Create.seatNeedsName }
-        let sameName = newRoomSeats.filter {
-            $0.name.trimmingCharacters(in: .whitespacesAndNewlines) == name
-        }
-        if sameName.count > 1, sameName.first?.id != seat.id {
-            return S.Create.seatNameTaken(name)
-        }
-        return nil
+        Self.seatProblem(seat, among: newRoomSeats)
     }
 
     /// The Host's environment probe said this CLI is not on the Mac.

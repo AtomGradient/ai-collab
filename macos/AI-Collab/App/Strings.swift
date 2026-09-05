@@ -161,6 +161,15 @@ enum S {
         static func seatNeedsCLI(_ name: String) -> String {
             t("Choose a CLI for \(name).", "为 \(name) 选择一个 CLI。")
         }
+        static func seatNameInvalid(_ name: String) -> String {
+            t(
+                "“\(name)” is not a valid name: start with a letter or digit, then letters, digits, . _ : -",
+                "「\(name)」不能用作名字：以字母或数字开头，之后只能是字母、数字和 . _ : -"
+            )
+        }
+        static func seatNoteTooLong(_ name: String) -> String {
+            t("\(name)'s note is over 500 characters.", "\(name) 的备注超过 500 字。")
+        }
         static func cliMissing(_ cli: String) -> String {
             t(
                 "\(cli) is not installed on this Mac — the room can still be created; "

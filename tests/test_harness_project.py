@@ -509,9 +509,6 @@ def test_builtin_catalog_refresh_is_not_offered_to_rooms_and_snapshot_stays_froz
         assert host.projects.collaboration_templates(project_id) == {
             "templates": [version_two]
         }
-        assert host._scenario_collaboration_templates(  # noqa: SLF001
-            project_id, "scenario-v1"
-        ) == {"templates": []}
         assert client.list_policy_templates(project_instance_id=project_id) == {
             "templates": [],
             "source": "builtin",
@@ -524,17 +521,10 @@ def test_builtin_catalog_refresh_is_not_offered_to_rooms_and_snapshot_stays_froz
             project_binding_digest=current["project_binding_digest"],
             request_id="create-v2",
         )
-        assert host._scenario_collaboration_templates(  # noqa: SLF001
-            project_id, "scenario-v2"
-        ) == {"templates": []}
-
         project_root.rmdir()
         assert host.projects.collaboration_templates(project_id) == {
             "templates": [version_two]
         }
-        assert host._scenario_collaboration_templates(  # noqa: SLF001
-            project_id, "scenario-v1"
-        ) == {"templates": []}
 
 
 def test_registration_is_idempotent_and_rejects_request_reuse(tmp_path: Path) -> None:

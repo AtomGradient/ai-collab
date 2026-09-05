@@ -206,12 +206,16 @@ class DeliveryCoordinator:
         scenario_generation: int,
         scenario_state_revision: int,
         policy_pack: Mapping[str, Any],
+        require_active: bool = True,
     ) -> tuple[str, dict[str, Any]]:
         scenario, participants = self.store.delivery_snapshot(
             project_instance_id, scenario_id
         )
         self._check_scenario_fence(
-            scenario, scenario_generation, scenario_state_revision
+            scenario,
+            scenario_generation,
+            scenario_state_revision,
+            require_active=require_active,
         )
         pack = copy.deepcopy(dict(policy_pack))
         self._validate_policy(pack, scenario_id, participants)
@@ -339,6 +343,7 @@ class DeliveryCoordinator:
             scenario_generation=scenario["scenario_generation"],
             scenario_state_revision=scenario["state_revision"],
             policy_pack=target,
+            require_active=False,
         )
         return True
 
@@ -360,42 +365,68 @@ class DeliveryCoordinator:
         request_digest: str | None,
         project_instance_id: str,
         scenario_id: str,
+        scenario_generation: int | None = None,
+        scenario_state_revision: int | None = None,
     ) -> tuple[str, dict[str, Any]]:
-        """Replace whatever policy a room has with the room-wide default."""
+        """Replace whatever policy a room has with the room-wide default.
+
+        A caller that names the room's generation and revision is fenced on
+        them; the Host's own upgrade passes none and acts on the room as is.
+        """
 
         scenario, participants = self.store.delivery_snapshot(
             project_instance_id, scenario_id
         )
+        if scenario_generation is None:
+            scenario_generation = scenario["scenario_generation"]
+        if scenario_state_revision is None:
+            scenario_state_revision = scenario["state_revision"]
+        self._check_scenario_fence(
+            scenario, scenario_generation, scenario_state_revision, require_active=False
+        )
+        digest = request_digest or canonical_json_sha256({"policy_upgrade": request_id})
         key = self._key(project_instance_id, scenario_id)
         with self._lock:
             state = self._read_state()
-            replay = self._previous_request(state, request_id, request_digest or "")
+            replay = self._previous_request(state, request_id, digest)
             if replay is not None:
                 return replay
             current = copy.deepcopy(state["policies"].get(key))
-        if current is not None and current["policy_id"] == DEFAULT_POLICY_ID:
-            self.sync_default_policy(
-                project_instance_id=project_instance_id, scenario_id=scenario_id
+        if current is None or current["policy_id"] != DEFAULT_POLICY_ID:
+            return self.apply_policy(
+                request_id=request_id,
+                request_digest=digest,
+                project_instance_id=project_instance_id,
+                scenario_id=scenario_id,
+                scenario_generation=scenario_generation,
+                scenario_state_revision=scenario_state_revision,
+                policy_pack=self.default_policy_pack(
+                    scenario_id=scenario_id, participants=participants, policy_version=1
+                ),
+                require_active=False,
             )
-            operation_id, shown = self.show_policy(
-                project_instance_id=project_instance_id, scenario_id=scenario_id
-            )
-            return operation_id, {
-                "policy": shown["policy"],
-                "policy_snapshot": shown["policy_snapshot"],
+        # Already room-wide: bring it up to date and record the request, so
+        # a replay of this request id stays a no-op whatever came after it.
+        self.sync_default_policy(
+            project_instance_id=project_instance_id, scenario_id=scenario_id
+        )
+        with self._lock:
+            state = self._read_state()
+            replay = self._previous_request(state, request_id, digest)
+            if replay is not None:
+                return replay
+            pack = copy.deepcopy(state["policies"][key])
+            result = {"policy": pack, "policy_snapshot": _policy_snapshot(pack)}
+            operation_id = f"policy-{uuid.uuid4().hex}"
+            state["requests"][request_id] = {
+                "request_digest": digest,
+                "operation_id": operation_id,
+                "delivery_ids": [],
+                "result": result,
             }
-        target = self.default_policy_pack(
-            scenario_id=scenario_id, participants=participants, policy_version=1
-        )
-        return self.apply_policy(
-            request_id=request_id,
-            request_digest=request_digest or canonical_json_sha256({"policy_upgrade": request_id}),
-            project_instance_id=project_instance_id,
-            scenario_id=scenario_id,
-            scenario_generation=scenario["scenario_generation"],
-            scenario_state_revision=scenario["state_revision"],
-            policy_pack=target,
-        )
+            state["state_revision"] += 1
+            self._write_state(state)
+            return operation_id, copy.deepcopy(result)
 
     def show_policy(
         self, *, project_instance_id: str, scenario_id: str
@@ -2058,14 +2089,20 @@ class DeliveryCoordinator:
 
     @staticmethod
     def _check_scenario_fence(
-        scenario: Mapping[str, Any], generation: int, revision: int
+        scenario: Mapping[str, Any],
+        generation: int,
+        revision: int,
+        *,
+        require_active: bool = True,
     ) -> None:
         if (
             scenario["scenario_generation"] != generation
             or scenario["state_revision"] != revision
         ):
             raise DeliveryError("delivery.stale-fence", "Scenario fence differs", True)
-        if scenario["observed_state"] not in {"running", "degraded"}:
+        # Sending needs a running room; keeping the room-wide policy current
+        # does not — a closed room's colleagues still change.
+        if require_active and scenario["observed_state"] not in {"running", "degraded"}:
             raise DeliveryError("delivery.inactive-scenario", "Scenario is not active")
 
     @staticmethod
