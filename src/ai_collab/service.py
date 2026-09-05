@@ -10,7 +10,6 @@ import argparse
 import json
 import os
 import signal
-import subprocess
 import sys
 import threading
 from collections.abc import Sequence
@@ -23,12 +22,6 @@ from .project import ProjectError
 from .security import SecurityError
 from .store import StoreError
 from .workspace import WorkspaceError
-from .pingagent_commands import (
-    CommandLinkError,
-    app_bundle_for,
-    install_commands,
-    verify_product_bundle,
-)
 
 
 def default_state_root() -> Path:
@@ -69,26 +62,6 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _refresh_pingagent_commands(state_root: Path) -> None:
-    """Keep ``~/.local/bin`` pointing at this App; never block the Host on it."""
-
-    app = app_bundle_for(Path(sys.executable).resolve())
-    if app is None:
-        return
-    try:
-        verify_product_bundle(app)
-        install_commands(app, state_root)
-    except (CommandLinkError, OSError, subprocess.TimeoutExpired) as exc:
-        print(
-            json.dumps(
-                {"status": "pingagent-commands-not-linked", "reason": str(exc)},
-                sort_keys=True,
-            ),
-            file=sys.stderr,
-            flush=True,
-        )
-
-
 def run(argv: Sequence[str] | None = None) -> int:
     arguments = build_parser().parse_args(argv)
     state_root = (arguments.state_root or default_state_root()).expanduser().resolve()
@@ -115,7 +88,6 @@ def run(argv: Sequence[str] | None = None) -> int:
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     host.bind()
-    _refresh_pingagent_commands(state_root)
     print(
         json.dumps(
             {

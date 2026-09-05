@@ -32,7 +32,10 @@ struct AICollabApp: App {
             wrappedValue: HarnessViewModel(
                 serviceController: runningTests || unregistering
                     ? nil
-                    : HarnessServiceController()
+                    : HarnessServiceController(),
+                installationController: runningTests || unregistering
+                    ? nil
+                    : PingAgentInstallationController()
             )
         )
     }

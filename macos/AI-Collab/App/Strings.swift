@@ -19,6 +19,20 @@ private func t(_ english: String, _ chinese: String) -> String {
 
 enum S {
 
+    enum Installation {
+        static var needsAttention: String { t("Communication commands need setup.", "通信命令需要完成安装。") }
+        static var repair: String { t("Repair Commands", "修复通信命令") }
+        static var repairing: String { t("Installing communication commands", "正在安装通信命令") }
+        static var repaired: String { t("Communication commands are ready.", "通信命令已就绪。") }
+        static var processFailed: String { t("Command setup did not complete. Retry or reinstall the App.", "通信命令安装未完成，请重试或重新安装 App。") }
+        static var replaceTitle: String { t("Replace conflicting commands?", "替换冲突的命令？") }
+        static var replaceAction: String { t("Preserve Originals and Replace", "保留原件并替换") }
+        static func replaceMessage(_ paths: String) -> String {
+            t("These files will be preserved in AI Collab's installation backups, then replaced with links to this App.\n\n\(paths)",
+              "这些文件会保留在 AI Collab 的安装备份中，然后替换为指向当前 App 的链接。\n\n\(paths)")
+        }
+    }
+
     // MARK: Common actions
 
     /// The one live next step, shown as the Scenario's primary action.
@@ -1391,6 +1405,7 @@ enum S {
     enum Repair {
         static func label(_ action: String) -> String {
             switch action {
+            case "installation.commands.repair": return S.Installation.repair
             case "host.retry": return t("Retry Host", "重试服务连接")
             case "project.register": return t("Register Project Again", "重新注册项目")
             case "scenario.refresh": return t("Refresh Task Room", "刷新任务房间")
@@ -1582,6 +1597,7 @@ enum S {
         /// message (verbatim evidence is better than a wrong translation).
         static func sentence(_ code: String) -> String? {
             switch code {
+            case "installation.commands": return S.Installation.needsAttention
             case "workspace.shallow-source":
                 return t(
                     "A repository's Git history is incomplete.",

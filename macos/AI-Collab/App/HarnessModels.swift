@@ -4,6 +4,43 @@
 
 import Foundation
 
+struct PingAgentCommandEntry: Codable, Equatable, Sendable {
+    let name: String
+    let path: String
+    let kind: String
+    let state: String
+    let replaceable: Bool
+}
+
+struct PingAgentInstallationResult: Codable, Equatable, Sendable {
+    let status: String
+    let bundle: String?
+    let entries: [PingAgentCommandEntry]
+    let conflicts: [PingAgentCommandEntry]
+    let reason: String?
+    let backupDirectory: String?
+
+    enum CodingKeys: String, CodingKey {
+        case status, bundle, entries, conflicts, reason
+        case backupDirectory = "backup_directory"
+    }
+
+    var needsAttention: Bool { !["ready", "skipped"].contains(status) }
+    var canReplace: Bool { !conflicts.isEmpty && conflicts.allSatisfy(\.replaceable) }
+    static let development = Self(
+        status: "skipped", bundle: "unverified", entries: [], conflicts: [],
+        reason: nil, backupDirectory: nil
+    )
+}
+
+struct PingAgentInstallationError: LocalizedError {
+    let result: PingAgentInstallationResult
+    var errorDescription: String? {
+        ([S.Installation.needsAttention] + result.conflicts.map(\.path)
+         + [result.reason, result.backupDirectory].compactMap { $0 }).joined(separator: "\n")
+    }
+}
+
 extension Collection {
     var only: Element? { count == 1 ? first : nil }
 }
@@ -523,7 +560,15 @@ struct ActionableErrorRecord: Equatable {
     }
 
     init(_ error: Error) {
-        if let ipcError = error as? HarnessIPCError, case let .hostRejected(
+        if let installationError = error as? PingAgentInstallationError {
+            self.code = "installation.commands"
+            self.category = "client"
+            self.hostMessage = nil
+            self.localRender = { installationError.localizedDescription }
+            self.retryable = true
+            self.mutationState = "not_started"
+            self.repairAction = "installation.commands.repair"
+        } else if let ipcError = error as? HarnessIPCError, case let .hostRejected(
             code, category, message, retryable, mutationState, repairAction
         ) = ipcError {
             self.code = code

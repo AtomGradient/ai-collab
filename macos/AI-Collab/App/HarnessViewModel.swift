@@ -131,6 +131,11 @@ final class HarnessViewModel: ObservableObject {
     @Published var operationCanCancel = false
     @Published var errorMessage: String?
     @Published var actionableError: ActionableErrorRecord?
+    @Published private(set) var commandInstallationIssue: PingAgentInstallationResult?
+    @Published var pendingCommandReplacement: PingAgentInstallationResult?
+    var commandInstallationError: ActionableErrorRecord? {
+        commandInstallationIssue.map { ActionableErrorRecord(PingAgentInstallationError(result: $0)) }
+    }
     /// Confirms a completed mutation. Cleared automatically; see `noteSuccess`.
     @Published private var successBuilder: (() -> String)?
     var successMessage: String? { successBuilder?() }
@@ -171,6 +176,7 @@ final class HarnessViewModel: ObservableObject {
 
     let client: any HarnessCalling
     private let serviceController: HarnessServiceController?
+    private let installationController: PingAgentInstallationController?
     /// Internal so progress-session behavior tests can stage a live session.
     var activeProgressSessionID: UUID?
     private var successToken: UUID?
@@ -178,10 +184,12 @@ final class HarnessViewModel: ObservableObject {
     init(
         client: any HarnessCalling = HarnessIPCClient(),
         serviceController: HarnessServiceController? = nil,
+        installationController: PingAgentInstallationController? = nil,
         readyMomentDefaults: UserDefaults = .standard
     ) {
         self.client = client
         self.serviceController = serviceController
+        self.installationController = installationController
         self.readyMomentDefaults = readyMomentDefaults
     }
 
@@ -407,6 +415,7 @@ final class HarnessViewModel: ObservableObject {
     }
 
     func bootstrap() async {
+        await checkCommandInstallation()
         await performRead {
             if let serviceController = self.serviceController {
                 let serviceStatus = try await serviceController.ensureRegistered()
@@ -434,6 +443,46 @@ final class HarnessViewModel: ObservableObject {
 
     func retryHostService() async {
         await bootstrap()
+    }
+
+    func checkCommandInstallation() async {
+        guard let installationController else { return }
+        do {
+            let result = try await installationController.check()
+            commandInstallationIssue = result.needsAttention ? result : nil
+        } catch {
+            recordCommandInstallationFailure(error)
+        }
+    }
+
+    func repairCommandInstallation() async {
+        await checkCommandInstallation()
+        if let issue = commandInstallationIssue, issue.canReplace {
+            pendingCommandReplacement = issue
+        }
+    }
+
+    func confirmCommandReplacement(_ pending: PingAgentInstallationResult) async {
+        guard pending.canReplace, let installationController else { return }
+        guard !isBusy else { return refuse(.scenarioLifecycle, S.Msg.busy(self.activityText)) }
+        pendingCommandReplacement = nil
+        isBusy = true
+        activityBuilder = { S.Installation.repairing }
+        defer { activityBuilder = nil; isBusy = false }
+        do {
+            let result = try await installationController.reconcile(replacing: pending.conflicts)
+            commandInstallationIssue = result.needsAttention ? result : nil
+            if !result.needsAttention { noteSuccess(S.Installation.repaired) }
+        } catch {
+            recordCommandInstallationFailure(error)
+        }
+    }
+
+    private func recordCommandInstallationFailure(_ error: Error) {
+        commandInstallationIssue = PingAgentInstallationResult(
+            status: "error", bundle: nil, entries: [], conflicts: [],
+            reason: error.localizedDescription, backupDirectory: nil
+        )
     }
 
     func chooseAndRegisterProject() async {
@@ -625,6 +674,8 @@ final class HarnessViewModel: ObservableObject {
 
     func performRepairAction(_ action: String) async {
         switch action {
+        case "installation.commands.repair":
+            await repairCommandInstallation()
         case "host.retry":
             await retryHostService()
         case "project.register":
@@ -795,7 +846,7 @@ final class HarnessViewModel: ObservableObject {
 
     func canPerformRepairAction(_ action: String) -> Bool {
         switch action {
-        case "host.retry", "project.register", "scenario.refresh", "scenario.preflight",
+        case "installation.commands.repair", "host.retry", "project.register", "scenario.refresh", "scenario.preflight",
              "scenario.open",
              "workspace.prepare", "system-settings.automation",
              "presentation.permission-request", "iterm-presentation.launch-target",

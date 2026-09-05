@@ -89,8 +89,12 @@ def test_app_is_vendor_neutral_and_does_not_shell_out() -> None:
     assert "Codex" not in source
     assert "Claude" not in source
     assert "NSTask" not in source
-    # Starting the Host is the App's sole permitted external process.
-    assert "Process()" not in source.replace(
+    # Installation runs the bundled module directly and must work without Host.
+    installation = (APP_ROOT / "PingAgentInstallationController.swift").read_text(encoding="utf-8")
+    assert '"ai_collab.pingagent_commands"' in installation
+    assert 'runtime.appending(path: "bin/python3")' in installation
+    assert "HarnessCall(" not in installation
+    assert "Process()" not in source.replace(installation, "").replace(
         'let process = Process()\n        process.executableURL = URL(filePath: "/bin/launchctl")',
         "",
         1,

@@ -11,6 +11,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import ai_collab.pingagent_commands as commands_module
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -398,17 +399,47 @@ def test_link_commands_points_the_command_directory_at_the_installed_app(
     app = tmp_path / "AI Collab.app"
     bin_dir = app / "Contents" / "Resources" / "PingAgent" / "bin"
     bin_dir.mkdir(parents=True)
-    for command in INSTALLER.install_commands.__globals__["PINGAGENT_COMMANDS"]:
+    for command in commands_module.PINGAGENT_COMMANDS:
         path = bin_dir / command
         path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         path.chmod(0o755)
     commands = tmp_path / "local" / "bin"
-    monkeypatch.setenv("AI_COLLAB_COMMAND_DIRECTORY", str(commands))
+    monkeypatch.setattr(commands_module, "default_command_directory", lambda: commands)
+    monkeypatch.setattr(commands_module, "verify_product_bundle", lambda _app: {"bundle": "verified"})
     monkeypatch.setattr(INSTALLER, "verify_candidate", lambda *_args, **_kwargs: {})
 
     result = INSTALLER.link_commands(app, tmp_path / "state")
 
     assert result["status"] == "linked"
-    assert result["pingagent_commands"]["command_directory"] == str(commands)
+    assert result["commands"]["command_directory"] == str(commands)
     assert (commands / "ai-ping").is_symlink()
     assert (commands / "ai-ping").resolve() == (bin_dir / "ai-ping").resolve()
+
+
+@pytest.mark.parametrize("command_status", ["conflict", "error"])
+def test_command_failure_keeps_successfully_upgraded_app(tmp_path, monkeypatch, command_status):
+    candidate = _app(tmp_path / "candidate.app", "new")
+    target = _app(tmp_path / "install/AI Collab.app", "old")
+    state_root = tmp_path / "state"
+    monkeypatch.setattr(INSTALLER, "DEFAULT_STATE_ROOT", state_root)
+    monkeypatch.setattr(INSTALLER, "verify_candidate", lambda *args, **kwargs: {
+        "service_build_digest": "b" * 64, "team_identifier": "TEAM",
+    })
+    monkeypatch.setattr(INSTALLER, "_copy_to_stage", lambda src, dst: shutil.copytree(src, dst))
+    monkeypatch.setattr(INSTALLER, "_ensure_app_not_running", lambda app: None)
+    monkeypatch.setattr(INSTALLER, "_repair_unsealed_bytecode", lambda *args: None)
+    monkeypatch.setattr(INSTALLER, "_launch_app", lambda app: _Process())
+    monkeypatch.setattr(INSTALLER, "_stop_app", lambda process: None)
+    monkeypatch.setattr(INSTALLER, "_health_check", lambda *args: {"host_generation": 2})
+    def reconcile(*args, **kwargs):
+        assert (target / "marker").read_text() == "new"
+        assert list((state_root / "installation").glob("previous-*.app"))
+        if command_status == "error":
+            raise OSError("disk full")
+        return {"status": "conflict", "conflicts": [{"path": "ai-ping", "kind": "file"}]}
+    monkeypatch.setattr(INSTALLER, "reconcile_commands", reconcile)
+    result = INSTALLER.install(candidate, target, state_root, 1.0)
+    assert result["status"] == "installed"
+    assert result["commands"]["status"] == command_status
+    assert (target / "marker").read_text() == "new"
+    assert (Path(result["previous_version"]) / "marker").read_text() == "old"

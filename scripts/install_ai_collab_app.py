@@ -29,7 +29,8 @@ for _candidate in (_SCRIPT_DIR.parent / "src", _SCRIPT_DIR.parent / "python"):
         break
 from ai_collab.pingagent_commands import (  # noqa: E402
     CommandLinkError,
-    install_commands,
+    failure_result,
+    reconcile_commands,
     remove_commands,
 )
 
@@ -340,7 +341,8 @@ def _private_installation_directory(state_root: Path) -> Path:
     return directory
 
 
-def install(candidate: Path, target: Path, state_root: Path, health_timeout: float) -> dict[str, Any]:
+def install(candidate: Path, target: Path, state_root: Path, health_timeout: float,
+            *, replace: tuple[Path, ...] = ()) -> dict[str, Any]:
     candidate = candidate.expanduser().absolute()
     target_input = target.expanduser().absolute()
     target = target_input.parent.resolve() / target_input.name
@@ -429,13 +431,7 @@ def install(candidate: Path, target: Path, state_root: Path, health_timeout: flo
         previous_path = str(archive)
     else:
         previous_path = None
-    try:
-        commands = install_commands(target, state_root)
-    except CommandLinkError as exc:
-        raise InstallError(
-            f"App installed at {target}, but its PingAgent commands were not "
-            f"linked: {exc}"
-        ) from exc
+    commands = _reconcile_command_result(target, state_root, replace)
     return {
         "status": "installed",
         "target": str(target),
@@ -444,22 +440,28 @@ def install(candidate: Path, target: Path, state_root: Path, health_timeout: flo
         "host_generation": health["host_generation"],
         "previous_version": previous_path,
         "recovered": recovered,
-        "pingagent_commands": commands,
+        "commands": commands,
     }
 
 
-def link_commands(target: Path, state_root: Path) -> dict[str, Any]:
+def _reconcile_command_result(target: Path, state_root: Path,
+                              replace: tuple[Path, ...]) -> dict[str, Any]:
+    try:
+        return reconcile_commands(target, state_root, replace=replace)
+    except (CommandLinkError, OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        return failure_result(exc)
+
+
+def link_commands(target: Path, state_root: Path, *, replace: tuple[Path, ...] = ()) -> dict[str, Any]:
     """Point ``~/.local/bin`` at the installed App without reinstalling it."""
 
     target = target.expanduser().resolve(strict=True)
     if target.suffix != ".app":
         raise InstallError("target must be an installed .app")
     verify_candidate(target)
-    try:
-        commands = install_commands(target, state_root)
-    except CommandLinkError as exc:
-        raise InstallError(str(exc)) from exc
-    return {"status": "linked", "target": str(target), "pingagent_commands": commands}
+    commands = _reconcile_command_result(target, state_root, replace)
+    return {"status": "linked" if commands["status"] == "ready" else "commands_need_attention",
+            "target": str(target), "commands": commands}
 
 
 def main() -> int:
@@ -474,7 +476,11 @@ def main() -> int:
     )
     parser.add_argument("--target", type=Path, default=DEFAULT_TARGET)
     parser.add_argument("--health-timeout", type=float, default=20.0)
+    parser.add_argument("--replace-command", type=Path, action="append", default=[],
+                        help="preserve and replace this explicitly approved command file")
     arguments = parser.parse_args()
+    if arguments.unregister and arguments.replace_command:
+        parser.error("--replace-command cannot be combined with --unregister")
     try:
         if arguments.unregister:
             unregister(arguments.target)
@@ -485,7 +491,8 @@ def main() -> int:
                 "pingagent_commands_removed": removed,
             }
         elif arguments.link_commands:
-            result = link_commands(arguments.target, DEFAULT_STATE_ROOT)
+            result = link_commands(arguments.target, DEFAULT_STATE_ROOT,
+                                   replace=tuple(arguments.replace_command))
         else:
             assert arguments.candidate is not None
             result = install(
@@ -493,12 +500,13 @@ def main() -> int:
                 arguments.target,
                 DEFAULT_STATE_ROOT,
                 arguments.health_timeout,
+                replace=tuple(arguments.replace_command),
             )
     except (InstallError, OSError, ValueError, subprocess.TimeoutExpired) as exc:
         print(json.dumps({"status": "failed", "reason": str(exc)}, sort_keys=True))
         return 1
     print(json.dumps(result, sort_keys=True))
-    return 0
+    return 1 if result.get("commands", {}).get("status") in {"conflict", "error"} else 0
 
 
 if __name__ == "__main__":

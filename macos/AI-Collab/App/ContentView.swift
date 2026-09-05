@@ -432,6 +432,25 @@ struct ContentView: View {
                 Text(S.Colleagues.deleteConfirmMessage(participant.id))
             }
         }
+        .confirmationDialog(
+            S.Installation.replaceTitle,
+            isPresented: Binding(
+                get: { model.pendingCommandReplacement != nil },
+                set: { if !$0 { model.pendingCommandReplacement = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            if let pending = model.pendingCommandReplacement {
+                Button(S.Installation.replaceAction) {
+                    Task { await model.confirmCommandReplacement(pending) }
+                }
+            }
+            Button(S.Common.cancel, role: .cancel) { model.pendingCommandReplacement = nil }
+        } message: {
+            Text(S.Installation.replaceMessage(
+                model.pendingCommandReplacement?.conflicts.map(\.path).joined(separator: "\n") ?? ""
+            ))
+        }
         .sheet(item: $destroyPanelTarget) { target in
             DestroyPanel(projectID: target.projectID, scenario: target.scenario)
                 .environmentObject(model)
@@ -2578,7 +2597,7 @@ struct ContentView: View {
 
     @ViewBuilder
     private var errorBanner: some View {
-        if let error = model.actionableError {
+        if let error = model.actionableError ?? model.commandInstallationError {
             let sentence = S.Fix.sentence(error.code)
                 ?? S.Fix.categoryFallback(error.category)
             let actionable = error.repairAction != nil
@@ -2630,13 +2649,15 @@ struct ContentView: View {
                     .font(.caption)
                 }
                 Spacer()
-                Button {
-                    model.dismissError()
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.caption.bold())
+                if model.actionableError != nil {
+                    Button {
+                        model.dismissError()
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.caption.bold())
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
             }
             .padding(12)
             .frame(maxWidth: 560)

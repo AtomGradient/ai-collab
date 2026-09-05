@@ -82,9 +82,9 @@ macOS 应用加一个本地 Host（后台服务），把 Agent CLI —— Codex�
 
 1. 从 [Releases](../../releases) 下载 `AICollab.dmg`，拖入「应用程序」，打开。
    发布版已签名、已公证；Host 和它的 Python 运行时在 bundle 里。App 自带整套
-   PingAgent 命令（`ai-ping`、`ai-pane-register`、`ai-pane-doctor` 等），每次启动
-   时把 `~/.local/bin/<命令>` 指向已安装的 App —— 请保证 `~/.local/bin` 在
-   `PATH` 里。属于 PingAgent 检出的链接会被迁移；同名的无关命令只报告，不替换。
+   PingAgent 命令（`ai-ping`、`ai-pane-register`、`ai-pane-doctor` 等）。安装及打开 App
+   时检查 `~/.local/bin/<命令>` 是否指向已安装的 App，请保证 `~/.local/bin` 在
+   `PATH` 里。未知的同名命令需明确确认替换，原件会保留；Host 重启不会修改这些链接。
 2. 安装 [iTerm2](https://iterm2.com) 并启用 Python API（Settings → General →
    Magic → **Python API**，然后重启 iTerm2），或执行
    `defaults write com.googlecode.iterm2 EnableAPIServer -bool true` 和
