@@ -3497,7 +3497,6 @@ def test_delivery_notification_does_not_create_terminal_reply_loops() -> None:
             message_kind,
             message_path,
             None,
-            "ai-ping",
         )
         assert request.startswith(
             "[ai-collab 收信] from=reviewer "
@@ -3532,7 +3531,6 @@ def test_delivery_notification_does_not_create_terminal_reply_loops() -> None:
             message_kind,
             message_path,
             "delivery-request",
-            "ai-ping",
         )
         assert "reply_to=delivery-request" in terminal
         assert "这是对你之前消息(id=delivery-request)的回复" in terminal
@@ -3567,14 +3565,12 @@ def test_delivery_message_moves_long_payload_out_of_tui_notification(
         message,
         token,
         None,
-        "ai-ping",
     )
     notification = participant_driver._delivery_notification(  # noqa: SLF001
         record,
         "collaboration.review-request",
         message_path.relative_to(workspace_path),
         None,
-        "ai-ping",
     )
     persisted = message_path.read_text(encoding="utf-8")
 
@@ -3602,15 +3598,11 @@ def test_delivery_message_moves_long_payload_out_of_tui_notification(
     assert len(notification.encode("utf-8")) < 1_024
 
 
-def test_reattached_legacy_tui_is_told_the_absolute_wrapper_path(
+def test_delivery_command_is_bare_for_every_binding(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
-    """A TUI launched before the private PATH existed keeps its environment.
-
-    Only a binding whose launch recorded the private-PATH layout gets the bare
-    command; an older binding reattached after an upgrade gets the absolute
-    generation wrapper, in the notification and in the message file.
-    """
+    """``ai-ping`` is the installer-managed command, so no binding — old or
+    new, whatever its process PATH — is ever told a private-root path."""
 
     private_root = tmp_path / "participant generation"
     private_root.mkdir(mode=0o700)
@@ -3675,32 +3667,19 @@ def test_reattached_legacy_tui_is_told_the_absolute_wrapper_path(
         "participant_working_directory": "bundle/project",
     }
     message_file = workspace_path / ".ai-mailbox" / "inbox" / "analyst" / "delivery-legacy.md"
-    wrapper = shlex.quote(str(private_root / "ai-ping"))
 
-    # Binding recorded by an older build: no private-PATH marker.
-    participant_driver.deliver(payload)
-    assert (
-        f"处理完用 {wrapper} reviewer --kind review-response "
-        "--reply-to delivery-legacy --file <你的回复.md>"
-    ) in notifications[-1]
-    persisted = message_file.read_text(encoding="utf-8")
-    assert (
-        f"需要回复时使用：{wrapper} reviewer --kind review-response "
-        "--reply-to delivery-legacy --file <你的回复.md>"
-    ) in persisted
-    assert "处理完用 ai-ping " not in notifications[-1]
-
-    # Binding recorded by a launch that put the wrapper first on PATH.
-    state["private_path_first"] = True
-    participant_driver.deliver(payload)
-    assert (
-        "处理完用 ai-ping reviewer --kind review-response "
-        "--reply-to delivery-legacy --file <你的回复.md>"
-    ) in notifications[-1]
-    assert str(private_root) not in notifications[-1]
-    persisted = message_file.read_text(encoding="utf-8")
-    assert "需要回复时使用：ai-ping reviewer --kind review-response" in persisted
-    assert str(private_root) not in persisted
+    for marker in (None, True):
+        if marker is not None:
+            state["private_path_first"] = marker
+        participant_driver.deliver(payload)
+        assert (
+            "处理完用 ai-ping reviewer --kind review-response "
+            "--reply-to delivery-legacy --file <你的回复.md>"
+        ) in notifications[-1]
+        assert str(private_root) not in notifications[-1]
+        persisted = message_file.read_text(encoding="utf-8")
+        assert "需要回复时使用：ai-ping reviewer --kind review-response" in persisted
+        assert str(private_root) not in persisted
 
 
 def test_driver_delivery_accepts_host_message_limit(

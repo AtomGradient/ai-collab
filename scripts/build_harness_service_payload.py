@@ -74,6 +74,17 @@ IMMUTABILITY_PROBE_FLAGS = (("-I",), ("-I", "-O"), ("-I", "-OO"))
 # ``co_filename`` in shipped bytecode is relative to this name, never the
 # build machine's output directory.
 SHIPPED_PATH_PREFIX = "HarnessService"
+# The whole PingAgent tool set ships with the App; the installer and the Host
+# link these names from ~/.local/bin to Contents/Resources/PingAgent/bin.
+PINGAGENT_COMMANDS = (
+    "ai-collab-watch",
+    "ai-harness-transport",
+    "ai-pane-doctor",
+    "ai-pane-register",
+    "ai-pane-unregister",
+    "ai-ping",
+)
+PINGAGENT_DOCUMENTS = ("AGENTS.md", "docs/ai-ping.md")
 _MACHO_MAGICS = (
     b"\xcf\xfa\xed\xfe",
     b"\xce\xfa\xed\xfe",
@@ -441,11 +452,16 @@ def build(destination: Path, integration_root: Path | None) -> None:
             _copy(integration_root / relative, destination / relative)
 
     ping_bin = PRODUCT_ROOT / "pingagent/bin"
-    for command in ("ai-harness-transport", "ai-ping"):
+    for command in PINGAGENT_COMMANDS:
         source = ping_bin / command
         if source.is_symlink() or not source.is_file():
             raise SystemExit(f"PingAgent command is unavailable: {command}")
         _copy(source, destination.parent / f"PingAgent/bin/{command}")
+    for relative in PINGAGENT_DOCUMENTS:
+        source = PRODUCT_ROOT / "pingagent" / relative
+        if source.is_symlink() or not source.is_file():
+            raise SystemExit(f"PingAgent document is unavailable: {relative}")
+        _copy(source, destination.parent / "PingAgent" / relative)
 
     # Without an integration payload the bundle points at the generic,
     # config-driven adapters that ship as product files, so a public build is

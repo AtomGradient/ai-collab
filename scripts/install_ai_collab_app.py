@@ -16,10 +16,22 @@ import shutil
 import signal
 import stat
 import subprocess
+import sys
 import time
 import uuid
 from pathlib import Path
 from typing import Any
+
+_SCRIPT_DIR = Path(__file__).resolve().parent
+for _candidate in (_SCRIPT_DIR.parent / "src", _SCRIPT_DIR.parent / "python"):
+    if (_candidate / "ai_collab" / "pingagent_commands.py").is_file():
+        sys.path.insert(0, str(_candidate))
+        break
+from ai_collab.pingagent_commands import (  # noqa: E402
+    CommandLinkError,
+    install_commands,
+    remove_commands,
+)
 
 
 BUNDLE_ID = "com.atomgradient.aicollab"
@@ -417,6 +429,13 @@ def install(candidate: Path, target: Path, state_root: Path, health_timeout: flo
         previous_path = str(archive)
     else:
         previous_path = None
+    try:
+        commands = install_commands(target, state_root)
+    except CommandLinkError as exc:
+        raise InstallError(
+            f"App installed at {target}, but its PingAgent commands were not "
+            f"linked: {exc}"
+        ) from exc
     return {
         "status": "installed",
         "target": str(target),
@@ -425,7 +444,22 @@ def install(candidate: Path, target: Path, state_root: Path, health_timeout: flo
         "host_generation": health["host_generation"],
         "previous_version": previous_path,
         "recovered": recovered,
+        "pingagent_commands": commands,
     }
+
+
+def link_commands(target: Path, state_root: Path) -> dict[str, Any]:
+    """Point ``~/.local/bin`` at the installed App without reinstalling it."""
+
+    target = target.expanduser().resolve(strict=True)
+    if target.suffix != ".app":
+        raise InstallError("target must be an installed .app")
+    verify_candidate(target)
+    try:
+        commands = install_commands(target, state_root)
+    except CommandLinkError as exc:
+        raise InstallError(str(exc)) from exc
+    return {"status": "linked", "target": str(target), "pingagent_commands": commands}
 
 
 def main() -> int:
@@ -433,13 +467,25 @@ def main() -> int:
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument("--candidate", type=Path)
     action.add_argument("--unregister", action="store_true")
+    action.add_argument(
+        "--link-commands",
+        action="store_true",
+        help="point ~/.local/bin PingAgent commands at the installed App",
+    )
     parser.add_argument("--target", type=Path, default=DEFAULT_TARGET)
     parser.add_argument("--health-timeout", type=float, default=20.0)
     arguments = parser.parse_args()
     try:
         if arguments.unregister:
             unregister(arguments.target)
-            result = {"status": "unregistered", "target": str(arguments.target)}
+            removed = remove_commands(DEFAULT_STATE_ROOT)
+            result = {
+                "status": "unregistered",
+                "target": str(arguments.target),
+                "pingagent_commands_removed": removed,
+            }
+        elif arguments.link_commands:
+            result = link_commands(arguments.target, DEFAULT_STATE_ROOT)
         else:
             assert arguments.candidate is not None
             result = install(

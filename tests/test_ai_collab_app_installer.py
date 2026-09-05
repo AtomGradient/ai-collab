@@ -390,3 +390,25 @@ def test_first_install_failure_unregisters_bad_service(
 
     assert unregistered == [target]
     assert (target / "marker").read_text(encoding="utf-8") == "new"
+
+
+def test_link_commands_points_the_command_directory_at_the_installed_app(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = tmp_path / "AI Collab.app"
+    bin_dir = app / "Contents" / "Resources" / "PingAgent" / "bin"
+    bin_dir.mkdir(parents=True)
+    for command in INSTALLER.install_commands.__globals__["PINGAGENT_COMMANDS"]:
+        path = bin_dir / command
+        path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        path.chmod(0o755)
+    commands = tmp_path / "local" / "bin"
+    monkeypatch.setenv("AI_COLLAB_COMMAND_DIRECTORY", str(commands))
+    monkeypatch.setattr(INSTALLER, "verify_candidate", lambda *_args, **_kwargs: {})
+
+    result = INSTALLER.link_commands(app, tmp_path / "state")
+
+    assert result["status"] == "linked"
+    assert result["pingagent_commands"]["command_directory"] == str(commands)
+    assert (commands / "ai-ping").is_symlink()
+    assert (commands / "ai-ping").resolve() == (bin_dir / "ai-ping").resolve()

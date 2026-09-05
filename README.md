@@ -97,7 +97,11 @@ it.*
 
 1. Download `AICollab.dmg` from [Releases](../../releases), drag it into
    Applications, open it. Builds are signed and notarized; the Host and its
-   Python runtime are inside the bundle.
+   Python runtime are inside the bundle. The App ships the PingAgent commands
+   (`ai-ping`, `ai-pane-register`, `ai-pane-doctor`, …) and, at every start,
+   points `~/.local/bin/<command>` at the installed App — keep `~/.local/bin`
+   on your `PATH`. Links that belong to a PingAgent checkout are migrated;
+   an unrelated command with the same name is reported, never replaced.
 2. Install [iTerm2](https://iterm2.com) and enable its Python API
    (Settings → General → Magic → **Python API**, then restart iTerm2), or run
    `defaults write com.googlecode.iterm2 EnableAPIServer -bool true` and

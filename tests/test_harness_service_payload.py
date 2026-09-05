@@ -60,8 +60,10 @@ def test_embedded_payload_copies_pingagent_client_and_transport(
     module.build(destination, integration_root)
 
     targets = {target.relative_to(destination.parent) for _, target in copied}
-    assert Path("PingAgent/bin/ai-harness-transport") in targets
-    assert Path("PingAgent/bin/ai-ping") in targets
+    for command in module.PINGAGENT_COMMANDS:
+        assert Path(f"PingAgent/bin/{command}") in targets, command
+    assert Path("PingAgent/AGENTS.md") in targets
+    assert Path("PingAgent/docs/ai-ping.md") in targets
     assert Path("HarnessService/ai_collab_team_policies.json") in targets
     assert Path("HarnessService/scripts/ai_collab_macos_automation_preflight.py") in targets
     assert Path("HarnessService/python/ai_collab") in targets
