@@ -17,6 +17,8 @@ import threading
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+
+from .playbooks import DEFAULT_PLAYBOOK, MAX_NOTE_CHARACTERS, PLAYBOOK_IDS
 from typing import Any
 
 from .protocol import (
@@ -217,6 +219,7 @@ class ScenarioStore:
                 )
                 ScenarioStore._validate_objective_record(item["record"])
                 ScenarioStore._participant_history(item)
+                ScenarioStore._validate_room_extras(item)
         for request_id, request in value["requests"].items():
             ScenarioStore._validate_workspace_join_request_ledger(
                 request_id,
@@ -258,6 +261,24 @@ class ScenarioStore:
                 "scenario.objective-too-long",
                 "Scenario objective exceeds the collaboration context budget",
             )
+
+    @staticmethod
+    def _validate_room_extras(item: dict[str, Any]) -> None:
+        """Opening choice and colleague notes; absent in state written before v3."""
+
+        record = item["record"]
+        playbook = record.setdefault("playbook", DEFAULT_PLAYBOOK)
+        if playbook not in PLAYBOOK_IDS:
+            raise StoreError("host.state-invalid", "Scenario playbook differs")
+        participants = item.get("participants", {})
+        if not isinstance(participants, dict):
+            raise StoreError("host.state-invalid", "participant state schema differs")
+        for participant in participants.values():
+            if not isinstance(participant, dict):
+                raise StoreError("host.state-invalid", "participant state schema differs")
+            note = participant.setdefault("note", "")
+            if not isinstance(note, str) or len(note) > MAX_NOTE_CHARACTERS or "\x00" in note:
+                raise StoreError("host.state-invalid", "participant note differs")
 
     @staticmethod
     def _validate_objective_record(record: Any) -> None:
@@ -1749,12 +1770,15 @@ class ScenarioStore:
         objective: str = "",
         acceptance_criteria: str = "",
         project_contract_snapshot: dict[str, Any] | None = None,
+        playbook: str = DEFAULT_PLAYBOOK,
     ) -> tuple[str, dict[str, Any]]:
         self._validate_objective_texts(
             objective,
             acceptance_criteria,
             allow_empty=True,
         )
+        if playbook not in PLAYBOOK_IDS:
+            raise StoreError("scenario.playbook-invalid", "opening choice is invalid")
         self._validate_project_contract_snapshot(
             project_contract_snapshot,
             require_collaboration_snapshot=True,
@@ -1816,6 +1840,7 @@ class ScenarioStore:
                 "active_operation_id": operation["operation_id"],
                 "degraded": None,
                 "journal_head_sequence": 0,
+                "playbook": playbook,
                 "objective": objective,
                 "objective_history": (
                     [
@@ -4501,6 +4526,19 @@ class ScenarioStore:
                 ) from exc
             return path
 
+    def list_all_scenarios(self) -> list[dict[str, str]]:
+        """Every live room as (project, scenario) ids, for one-time upgrades."""
+
+        with self._lock:
+            state = self._read_state()
+            return [
+                {
+                    "project_instance_id": item["project_instance_id"],
+                    "scenario_id": item["record"]["scenario_id"],
+                }
+                for item in state["scenarios"].values()
+            ]
+
     def scenario_project_contract(
         self, project_instance_id: str, scenario_id: str
     ) -> dict[str, Any] | None:
@@ -4668,7 +4706,10 @@ class ScenarioStore:
         scenario_state_revision: int,
         launch_spec: dict[str, Any],
         resolved_driver: dict[str, Any],
+        note: str = "",
     ) -> tuple[str, dict[str, Any]]:
+        if not isinstance(note, str) or len(note) > MAX_NOTE_CHARACTERS or "\x00" in note:
+            raise StoreError("participant.note-invalid", "colleague note is invalid")
         key = self._scenario_key(project_instance_id, scenario_id)
         with self._lock:
             state = self._read_state()
@@ -4728,6 +4769,7 @@ class ScenarioStore:
                 "active_operation_id": None,
                 "degraded": None,
                 "journal_head_sequence": 0,
+                "note": note,
             }
             participants[participant_id] = record
             artifacts[participant_id] = {

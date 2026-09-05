@@ -115,7 +115,6 @@ final class HarnessContractTests: XCTestCase {
             "team": [
                 [
                     "participant_id": "analyst2",
-                    "template_participant_id": "analyst",
                     "participant_generation": 4,
                     "present": true,
                 ],
@@ -136,8 +135,6 @@ final class HarnessContractTests: XCTestCase {
         ]))
         XCTAssertEqual(plan.templateID, "team.peer-review")
         XCTAssertEqual(plan.team.map(\.participantID), ["analyst2", "reviewer"])
-        XCTAssertEqual(plan.team[0].templateParticipantID, "analyst")
-        XCTAssertNil(plan.team[1].templateParticipantID)
         XCTAssertEqual(plan.team[0].generation, 4)
         XCTAssertNil(plan.team[1].generation)
         XCTAssertEqual(plan.routeEffects[0].maxAttempts, 2)

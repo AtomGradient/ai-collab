@@ -131,6 +131,7 @@ class ParticipantCoordinator:
         scenario_generation: int,
         scenario_state_revision: int,
         launch_spec: dict[str, Any],
+        note: str = "",
         presentation_driver_id: str | None,
     ) -> tuple[str, dict[str, Any]]:
         resolved = self.driver.call(
@@ -156,6 +157,7 @@ class ParticipantCoordinator:
             scenario_state_revision=scenario_state_revision,
             launch_spec=launch_spec,
             resolved_driver=resolved,
+            note=note,
         )
 
     def list_templates(self) -> dict[str, Any]:

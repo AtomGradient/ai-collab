@@ -133,8 +133,10 @@ def test_collaboration_context_revision_tracks_semantic_changes_only(
 
     def context(peers: list[dict[str, Any]]) -> dict[str, Any]:
         unsigned = {
-            "schema_version": 1,
+            "schema_version": 2,
             "context_revision": 99,
+            "opening": "",
+            "note": "",
             "scenario": {
                 "project_instance_id": PROJECT_ID,
                 "scenario_id": SCENARIO_ID,
@@ -207,8 +209,10 @@ def test_collaboration_context_rejects_cross_project_identity(
 ) -> None:
     store = ParticipantAuthStore(tmp_path / "state", tmp_path / "host.sock")
     unsigned = {
-        "schema_version": 1,
+        "schema_version": 2,
         "context_revision": 1,
+        "opening": "",
+        "note": "",
         "scenario": {
             "project_instance_id": "project-other",
             "scenario_id": SCENARIO_ID,

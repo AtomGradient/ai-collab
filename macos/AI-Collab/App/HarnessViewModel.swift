@@ -31,6 +31,14 @@ struct ValidationNotice: Identifiable {
     var message: String { build() }
 }
 
+/// One seat in the new-room form: a name, a CLI, an optional note.
+struct RoomSeat: Identifiable, Equatable {
+    let id: UUID
+    var name: String
+    var templateID: String?
+    var note: String
+}
+
 /// The rail's one next step, derived from live state on every render —
 /// nothing is stored, so it can never drift from reality.
 enum GuidanceStep: Equatable {
@@ -39,7 +47,6 @@ enum GuidanceStep: Equatable {
     case prepareWorkspace
     case addColleague
     case resumeRoom
-    case configurePolicy
     case startColleagues
     case focusAndAssign
     case attend(String)
@@ -106,9 +113,14 @@ final class HarnessViewModel: ObservableObject {
     var deliveryMessage: String { deliveryNote?() ?? S.Defaults.delivery }
     @Published var newScenarioID = "research-\(HarnessViewModel.shortTimestamp())"
     @Published var newScenarioObjective = ""
+    /// The new room's colleagues: a pair by default, any names, any CLI.
+    @Published var newRoomSeats: [RoomSeat] = []
+    @Published var newScenarioPlaybook = "pairing"
+    @Published var isComposingRoom = false
+    @Published var newParticipantNote = ""
     @Published var objectiveDraft = ""
     @Published var acceptanceCriteriaDraft = ""
-    @Published var newParticipantID = "analyst"
+    @Published var newParticipantID = ""
     /// Set only while a mutation is in flight. Read-only refreshes deliberately
     /// leave it false so browsing never disables the window.
     @Published var isBusy = false {
@@ -317,14 +329,14 @@ final class HarnessViewModel: ObservableObject {
                 break
             }
             if interactive.isEmpty { return .addColleague }
+            // Rules are the Host's job: room-wide by default and kept current
+            // as colleagues change. Only a failed read blocks the rail.
             switch policyReadiness {
             case .loading:
                 return .working(S.Policy.loadingRules)
-            case .missing, .replanRequired:
-                return .configurePolicy
             case .unavailable:
                 return .inconsistent
-            case .current:
+            case .missing, .replanRequired, .current:
                 break
             }
             // Readiness is unanimous, not "at least one". A room holding one
@@ -369,7 +381,6 @@ final class HarnessViewModel: ObservableObject {
         case .prepareWorkspace: return (2, .prepareWorkspace)
         case .addColleague: return (3, .addColleague)
         case .resumeRoom: return (4, .resumeRoom)
-        case .configurePolicy: return (4, .configurePolicy)
         case .startColleagues: return (4, .startColleagues)
         case .focusAndAssign: return (5, .focusAndAssign)
         case .attend, .working, .inconsistent:
@@ -875,6 +886,18 @@ final class HarnessViewModel: ObservableObject {
         let objective = newScenarioObjective.trimmingCharacters(
             in: .whitespacesAndNewlines
         )
+        let seats = newRoomSeats.map { seat in
+            RoomSeat(
+                id: seat.id,
+                name: seat.name.trimmingCharacters(in: .whitespacesAndNewlines),
+                templateID: seat.templateID,
+                note: seat.note.trimmingCharacters(in: .whitespacesAndNewlines)
+            )
+        }
+        if let problem = Self.seatProblem(seats, templates: templates) {
+            return refuse(.scenarioCreate, problem)
+        }
+        let playbook = newScenarioPlaybook
         await performMutation(
             activity: S.Msg.creatingRoom(scenarioID),
             scope: .scenarioCreate,
@@ -889,18 +912,164 @@ final class HarnessViewModel: ObservableObject {
                         "project_binding_digest": project.bindingDigest,
                         "objective": objective,
                         "acceptance_criteria": "",
+                        "playbook": playbook,
                     ]
                 )
             )
-            guard result["scenario"] as? [String: Any] != nil else {
-                throw HarnessIPCError.invalidReply
+            guard
+                let raw = result["scenario"] as? [String: Any],
+                let created = ScenarioRecord(raw)
+            else { throw HarnessIPCError.invalidReply }
+            // Seats become colleagues right away; nothing starts until the
+            // person prepares the workspace and clicks Start All.
+            for seat in seats {
+                guard let template = self.templates.first(where: { $0.id == seat.templateID }) else {
+                    continue
+                }
+                _ = try await self.client.call(
+                    HarnessCall(
+                        operation: "participant.add",
+                        target: self.participantTarget(
+                            projectID: project.id,
+                            scenarioID: scenarioID,
+                            participantID: seat.name
+                        ),
+                        fence: ["operation_generation": 0, "participant_generation": 0],
+                        payload: [
+                            "scenario_generation": created.generation,
+                            "scenario_state_revision": created.stateRevision,
+                            "launch_spec": template.launchSpec,
+                            "presentation_driver_id": template.presentationDriverID ?? NSNull(),
+                            "note": seat.note,
+                        ]
+                    )
+                )
             }
             try await self.reloadScenarios()
             self.selectedScenarioID = scenarioID
             self.newScenarioID = "research-\(Self.shortTimestamp())"
             self.newScenarioObjective = ""
+            self.isComposingRoom = false
+            self.resetRoomComposer()
             try await self.refreshSelectedScenarioValues()
         }
+    }
+
+    // MARK: - Room composer (a pair by default)
+
+    /// A CLI's short name: `runtime-profile.codex` → `codex`.
+    static func cliName(of template: ParticipantTemplate) -> String {
+        let name = template.id.split(separator: ".").last.map(String.init) ?? template.id
+        return name.isEmpty ? "colleague" : name
+    }
+
+    /// `base`, then `base-2`, `base-3`… skipping names already taken.
+    static func uniqueName(_ base: String, taken: Set<String>) -> String {
+        guard taken.contains(base) else { return base }
+        var index = 2
+        while taken.contains("\(base)-\(index)") { index += 1 }
+        return "\(base)-\(index)"
+    }
+
+    /// Two seats from the interactive CLIs the Host offers, in registry
+    /// order (by id); one CLI yields `name` and `name-2`.
+    static func defaultSeats(from templates: [ParticipantTemplate]) -> [RoomSeat] {
+        let interactive = templates.filter { !$0.isHeadless }
+        guard !interactive.isEmpty else { return [] }
+        let ordered = interactive.sorted { $0.id < $1.id }
+        var seats: [RoomSeat] = []
+        var taken: Set<String> = []
+        for index in 0..<2 {
+            let template = ordered[min(index, ordered.count - 1)]
+            let name = uniqueName(cliName(of: template), taken: taken)
+            taken.insert(name)
+            seats.append(RoomSeat(id: UUID(), name: name, templateID: template.id, note: ""))
+        }
+        return seats
+    }
+
+    /// Why the seats cannot be created as written, or nil when they can.
+    static func seatProblem(_ seats: [RoomSeat], templates: [ParticipantTemplate]) -> String? {
+        var seen: Set<String> = []
+        for seat in seats {
+            if seat.name.isEmpty { return S.Create.seatNeedsName }
+            if seen.contains(seat.name) { return S.Create.seatNameTaken(seat.name) }
+            seen.insert(seat.name)
+            if seat.templateID == nil || !templates.contains(where: { $0.id == seat.templateID }) {
+                return S.Create.seatNeedsCLI(seat.name)
+            }
+        }
+        return nil
+    }
+
+    func resetRoomComposer() {
+        newRoomSeats = Self.defaultSeats(from: templates)
+        newScenarioPlaybook = "pairing"
+    }
+
+    /// Opens the new-room form fresh: a pair of seats, pairing opening.
+    func beginRoomComposer() {
+        resetRoomComposer()
+        if validation?.scope == .scenarioCreate { validation = nil }
+        isComposingRoom = true
+    }
+
+    /// The one line shown under a seat that cannot be created as written.
+    func seatRowProblem(_ seat: RoomSeat) -> String? {
+        let name = seat.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if name.isEmpty { return S.Create.seatNeedsName }
+        let sameName = newRoomSeats.filter {
+            $0.name.trimmingCharacters(in: .whitespacesAndNewlines) == name
+        }
+        if sameName.count > 1, sameName.first?.id != seat.id {
+            return S.Create.seatNameTaken(name)
+        }
+        return nil
+    }
+
+    /// The Host's environment probe said this CLI is not on the Mac.
+    func isCLIMissing(templateID: String?) -> Bool {
+        guard let templateID else { return false }
+        return environmentObservations.contains {
+            $0.subjectRef == templateID && $0.status == "missing"
+        }
+    }
+
+    /// Every kind the room-wide policy allows, as the Host names them.
+    static let openMessageKinds = [
+        "collaboration.message", "collaboration.response", "collaboration.request",
+        "collaboration.question", "collaboration.review-request",
+        "collaboration.review-response", "collaboration.pushback",
+        "collaboration.notice", "collaboration.done",
+    ]
+
+    /// Step one of enabling a project policy: preview what it restricts and
+    /// who it needs. Applying is a second, explicit click on the preview.
+    func enableProjectPolicy(_ template: PolicyTemplateRecord) async {
+        selectPolicyTemplate(template.id)
+        await planSelectedPolicy()
+    }
+
+    func addSeat() {
+        let interactive = interactiveTemplates
+        let template = newRoomSeats.last.flatMap { last in interactive.first { $0.id == last.templateID } }
+            ?? interactive.first
+        let base = template.map(Self.cliName(of:)) ?? "colleague"
+        let taken = Set(newRoomSeats.map(\.name))
+        newRoomSeats.append(
+            RoomSeat(id: UUID(), name: Self.uniqueName(base, taken: taken), templateID: template?.id, note: "")
+        )
+    }
+
+    func removeSeat(_ id: UUID) {
+        newRoomSeats.removeAll { $0.id == id }
+    }
+
+    /// The name the add row uses when the person types nothing: the CLI's
+    /// name, made unique among the room's colleagues.
+    var suggestedParticipantName: String {
+        let base = selectedTemplate.map(Self.cliName(of:)) ?? "colleague"
+        return Self.uniqueName(base, taken: Set(participants.map(\.id)))
     }
 
     func appendScenarioObjective() async {
@@ -1192,16 +1361,15 @@ final class HarnessViewModel: ObservableObject {
         guard let template = selectedTemplate else {
             return refuse(.participantAdd, S.Msg.chooseTemplate)
         }
-        let participantID = newParticipantID.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !participantID.isEmpty else {
-            return refuse(.participantAdd, S.Msg.nameTheColleague)
-        }
+        let typed = newParticipantID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let participantID = typed.isEmpty ? suggestedParticipantName : typed
         guard !participants.contains(where: { $0.id == participantID }) else {
             return refuse(
                 .participantAdd,
                 S.Msg.colleagueNameTaken(participantID)
             )
         }
+        let note = newParticipantNote.trimmingCharacters(in: .whitespacesAndNewlines)
         await performMutation(
             activity: S.Msg.adding(participantID),
             scope: .participantAdd,
@@ -1221,9 +1389,12 @@ final class HarnessViewModel: ObservableObject {
                         "scenario_state_revision": scenario.stateRevision,
                         "launch_spec": template.launchSpec,
                         "presentation_driver_id": template.presentationDriverID ?? NSNull(),
+                        "note": note,
                     ]
                 )
             )
+            self.newParticipantID = ""
+            self.newParticipantNote = ""
             try await self.reloadParticipants(project: project, scenario: scenario)
         }
     }
@@ -1551,14 +1722,30 @@ final class HarnessViewModel: ObservableObject {
         }
     }
 
-    /// One employee decision, while preserving the Host's two-step
-    /// plan/apply fence. Clearing the preview first ensures a failed plan can
-    /// never fall through and apply stale UI state.
-    func applyRecommendedPolicy() async {
-        policyPlan = nil
-        await planSelectedPolicy()
-        guard policyPlan?.canApply == true else { return }
-        await applySelectedPolicyPlan()
+    /// Back to the Host-maintained default after a project policy was enabled.
+    func resetDefaultPolicy() async {
+        guard let project = selectedProject, let scenario = selectedScenario else {
+            return refuse(.policy, S.Msg.selectRoomFirst)
+        }
+        await performMutation(
+            activity: S.Policy.restoringRoomWide,
+            scope: .policy,
+            success: S.Policy.roomWideRestored
+        ) {
+            _ = try await self.client.call(
+                HarnessCall(
+                    operation: "policy.reset-default",
+                    target: self.scenarioTarget(projectID: project.id, scenarioID: scenario.id),
+                    fence: ["operation_generation": scenario.stateRevision],
+                    payload: [
+                        "scenario_generation": scenario.generation,
+                        "scenario_state_revision": scenario.stateRevision,
+                    ]
+                )
+            )
+            self.policyPlan = nil
+            try await self.refreshSelectedScenarioValues()
+        }
     }
 
     func applySelectedPolicyPlan() async {
@@ -1840,7 +2027,8 @@ final class HarnessViewModel: ObservableObject {
             HarnessCall(operation: "participant.template.list", target: ["scope": "host"])
         )
         templates = dictionaries(result["templates"]).compactMap(ParticipantTemplate.init)
-        if selectedTemplateID == nil { selectedTemplateID = templates.first?.id }
+        if selectedTemplateID == nil { selectedTemplateID = interactiveTemplates.first?.id ?? templates.first?.id }
+        if newRoomSeats.isEmpty { resetRoomComposer() }
     }
 
     private func reloadPolicyTemplates() async throws {

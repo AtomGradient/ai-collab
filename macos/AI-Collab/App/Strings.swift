@@ -136,6 +136,102 @@ enum S {
 
     // MARK: Task rooms (Scenarios)
 
+    enum Create {
+        static var title: String { t("New task room", "新建任务房间") }
+        static var openButton: String { t("New Room…", "新建房间…") }
+        static var cancel: String { t("Cancel", "取消") }
+        static var subtitle: String {
+            t(
+                "A pair of colleagues and you by default. Creating makes the room "
+                    + "only; prepare the workspace, then Start All.",
+                "默认是一对同事和你。创建只建房间，不启动任何会话；准备工作区后再「全部启动」。"
+            )
+        }
+        static var seatsTitle: String {
+            t("Colleague seats · any name, unique in the room", "同事席位 · 名字随意，房间内唯一")
+        }
+        static var seatNote: String {
+            t("Note (optional, written into the opening as is)", "备注（可选，原样写进开场）")
+        }
+        static var seatAdd: String { t("Add another", "再加一位") }
+        static var seatNeedsName: String { t("Give this seat a name.", "给这个席位起个名字。") }
+        static func seatNameTaken(_ name: String) -> String {
+            t("“\(name)” is used twice; names are unique in a room.", "「\(name)」重复了；名字在房间内唯一。")
+        }
+        static func seatNeedsCLI(_ name: String) -> String {
+            t("Choose a CLI for \(name).", "为 \(name) 选择一个 CLI。")
+        }
+        static func cliMissing(_ cli: String) -> String {
+            t(
+                "\(cli) is not installed on this Mac — the room can still be created; "
+                    + "install it before starting this colleague.",
+                "本机还没有安装 \(cli)——不影响创建；启动这位同事前需要先装好。"
+            )
+        }
+        static var playbookTitle: String {
+            t(
+                "Opening · a paragraph written into each colleague's startup prompt",
+                "开场白 · 只是一段写进两位同事启动提示的文字"
+            )
+        }
+        static func playbookName(_ id: String) -> String {
+            switch id {
+            case "pairing": return t("Pair programming", "结对编程")
+            case "peer-review": return t("Peer review", "同行评审")
+            default: return t("No opening", "不用开场白")
+            }
+        }
+        static func playbookDetail(_ id: String) -> String {
+            switch id {
+            case "pairing":
+                return t(
+                    "One writes, one reviews each step and pushes back; swap when you "
+                        + "say so; you settle disagreements. They agree who starts first.",
+                    "一人写、一人逐步审并回推；换手听你指挥；分歧由你裁决。开场先互相确认谁先做什么。"
+                )
+            case "peer-review":
+                return t(
+                    "One implements and sends review requests; the other reviews and "
+                        + "replies; each round ends with a done notice.",
+                    "一人实现并发审核请求；另一人审核并回复；每一轮以完成通知收尾。"
+                )
+            default:
+                return t(
+                    "Colleagues get the objective, acceptance criteria and your notes only.",
+                    "同事只拿到目标、验收标准和你写的备注。"
+                )
+            }
+        }
+        static var previewTitle: String {
+            t("What both colleagues see at start", "两位同事启动时会看到")
+        }
+        static func previewColleagues(_ others: String) -> String {
+            t("with \(others)", "同事：\(others)")
+        }
+        static var rulesTitle: String { t("Rules after creation", "创建后的规则") }
+        static var rulesOpen: String {
+            t(
+                "Any colleague can send any kind to any colleague; the Host keeps this "
+                    + "current as colleagues come and go. No template to apply.",
+                "房间内任何同事可向任何同事发任何种类的消息；Host 随同事增删自动维护，你不需要应用模板。"
+            )
+        }
+        static var rulesJournal: String {
+            t(
+                "Every message is still routed, journaled and receipted by the Host; "
+                    + "Collaboration activity shows it.",
+                "每一条消息仍经 Host 路由、记录、有回执；「协作动态」照常显示。"
+            )
+        }
+        static var rulesProject: String {
+            t(
+                "A project policy file can be enabled explicitly under Collaboration "
+                    + "policy; it never takes effect on its own.",
+                "项目自带策略文件的，可在「协作规则」里显式启用——不会自动生效。"
+            )
+        }
+    }
+
     enum Rooms {
         static var listTitle: String { t("Task Rooms", "任务房间") }
         static var createButton: String { t("Create", "创建") }
@@ -463,7 +559,12 @@ enum S {
     enum Colleagues {
         static var sectionTitle: String { t("AI Colleagues", "AI 同事") }
         static var identityPlaceholder: String { t("Colleague name", "同事名字") }
-        static var templatePicker: String { t("Template", "模板") }
+        static var cliPicker: String { t("CLI", "CLI") }
+        static var notePlaceholder: String { t("Note (optional)", "备注（可选）") }
+        static func noteMeta(_ note: String) -> String { t("Note: \(note)", "备注：\(note)") }
+        static func runningCountOpen(_ count: Int) -> String {
+            t("\(count) working · room-wide", "\(count) 位工作中 · 房间内互通")
+        }
         static var advanced: String { t("Advanced", "高级") }
         static var add: String { t("Add", "添加") }
         static var emptyHint: String {
@@ -621,28 +722,72 @@ enum S {
         }
         static var noActivePolicy: String {
             t(
-                "No active policy. Choose a team template below.",
-                "尚未启用协作规则。在下面选择一个团队模板。"
+                "No rules yet. The Host writes the room-wide rules as soon as the first colleague joins.",
+                "还没有规则。第一位同事加入后，Host 会自动生成房间内互通规则。"
             )
         }
-        static var teamTemplate: String { t("Team template", "团队模板") }
-        static var createRepairPlan: String { t("Create Repair Plan", "生成修复方案") }
-        static var previewPlan: String { t("Preview Plan", "预览方案") }
-        static var applyPlan: String { t("Apply Plan", "应用方案") }
+        static var roomWide: String { t("Room-wide", "房间内互通") }
+        static func roomWideDetail(_ members: String) -> String {
+            t(
+                "Maintained by the Host · bound to \(members) · recomputed as colleagues change",
+                "Host 自动维护 · 绑定 \(members) · 同事增删时重算"
+            )
+        }
+        static var kinds: String {
+            t("Kinds anyone can send to anyone", "可发送的种类（每位 → 每位）")
+        }
+        static var kindsNote: String {
+            t(
+                "Kinds are intent labels for the receiver; response, review response, "
+                    + "notice and done need no reply.",
+                "种类是给对方看的意图标签；回复、审核回复、通知、完成不要求回执。"
+            )
+        }
+        static var project: String { t("Advanced · project policy", "高级 · 项目策略") }
+        static func projectFound(_ template: String, _ members: String) -> String {
+            t(
+                "ai_collab_team_policies.json · \(template) · needs \(members)",
+                "ai_collab_team_policies.json · \(template) · 需要成员 \(members)"
+            )
+        }
+        static var enable: String { t("Enable", "启用") }
+        static var confirmEnable: String { t("Enable as shown", "按上面所列启用") }
+        static func cannotEnable(_ member: String) -> String {
+            t("Cannot enable · no colleague named \(member)", "不能启用 · 房间里没有 \(member)")
+        }
+        static func cannotEnableDetail(_ member: String) -> String {
+            t(
+                "Current rules stay as they are. Rename a colleague to \(member), or "
+                    + "change the project file and try again.",
+                "当前规则保留不变。把一位同事改名为 \(member)，或修改项目文件后再试。"
+            )
+        }
+        static var revert: String { t("Back to room-wide", "改回房间内互通") }
+        static var explicit: String {
+            t(
+                "Enabling is explicit: restrictions and required members are shown first; "
+                    + "a failed enable loosens nothing and tightens nothing. Finding the "
+                    + "file is not enabling it.",
+                "启用是显式操作：会先列出限制和所需成员；启用失败不放开也不收紧任何权限。发现文件不等于启用。"
+            )
+        }
+        static var progressTitle: String { t("Collaboration policy", "协作规则") }
+        static var progressOpen: String { t("Room-wide · automatic", "房间内互通 · 自动") }
+        static func progressProject(_ template: String, _ version: Int) -> String {
+            t("\(template) v\(version) · project policy", "\(template) v\(version) · 项目策略")
+        }
+        static var progressPending: String { t("not written yet", "尚未生成") }
+        static var restoringRoomWide: String {
+            t("Restoring room-wide rules", "正在改回房间内互通")
+        }
+        static var roomWideRestored: String {
+            t("Room-wide rules restored.", "已改回房间内互通。")
+        }
         static var loadingRules: String {
             t("Loading collaboration rules", "正在载入协作规则")
         }
-        static func teamLine(_ members: String) -> String {
-            t("Team: \(members)", "团队：\(members)")
-        }
-        static var planPreview: String { t("Plan preview", "方案预览") }
+        static var planPreview: String { t("What enabling changes", "启用后会怎样") }
         static var memberMissing: String { t("missing", "缺席") }
-        static func replacementMember(_ participant: String, fills template: String) -> String {
-            t(
-                "\(participant) (fills \(template))",
-                "\(participant)（顶替 \(template)）"
-            )
-        }
         static func upToAttempts(_ count: Int) -> String {
             t(" · up to \(count) attempts", " · 最多 \(count) 次")
         }
@@ -1523,13 +1668,12 @@ enum S {
         static var reopenHelp: String {
             t("Open the getting-started guide", "打开上手引导")
         }
-        static var policySay: String {
+        static var startSay: String {
             t(
-                "This room has no collaboration rules yet, so messages "
-                    + "between colleagues would be refused. Apply the rules "
-                    + "for the current team, then start them.",
-                "这个房间还没有协作规则，同事之间的消息会被拒绝。"
-                    + "按当前团队应用规则，然后就能启动他们。"
+                "Start All — each colleague opens in its own terminal window. "
+                    + "They can already message each other; no rules to apply.",
+                "「全部启动」——每位同事在自己的终端窗口开工。"
+                    + "他们之间已经可以互发消息，不需要应用任何规则。"
             )
         }
 
@@ -1556,9 +1700,6 @@ enum S {
         }
         static var addAction: String { t("Add AI Colleague", "添加 AI 同事") }
         static var resumeAction: String { t("Resume Room", "恢复房间") }
-        static var configurePolicyAction: String {
-            t("Apply Collaboration Rules", "应用协作规则")
-        }
         static var startAction: String { t("Start All", "全部启动") }
         static var focusSay: String {
             t(

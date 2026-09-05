@@ -848,9 +848,17 @@ def test_empty_project_shows_first_use_canvas_not_the_generic_placeholder() -> N
         "\n    private ", 1
     )[0]
     assert "model.selectedProject != nil, model.scenarios.isEmpty" in canvas
-    assert "$model.newScenarioObjective" in canvas
-    assert "$model.newScenarioID" in canvas
-    assert "await model.createScenario()" in canvas
+    # v3: the canvas embeds the one room composer form, which owns the
+    # bindings and the create call for every entry point.
+    assert "roomComposerForm" in canvas
+    form = content.split("private var roomComposerForm", 1)[1].split(
+        "\n    private ", 1
+    )[0]
+    assert "$model.newScenarioObjective" in form
+    assert "$model.newScenarioID" in form
+    assert "$model.newRoomSeats" in form
+    assert "$model.newScenarioPlaybook" in form
+    assert "await model.createScenario()" in form
     assert "ContentUnavailableView(" in canvas, "the generic placeholder stays for the other case"
 
 

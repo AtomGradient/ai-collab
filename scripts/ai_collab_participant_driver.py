@@ -55,6 +55,7 @@ except ModuleNotFoundError:  # pragma: no cover - both shipping runtimes have it
 
 
 ADAPTER_PROTOCOL_VERSION = 1
+COLLABORATION_CONTEXT_SCHEMA_VERSION = 2
 STATE_SCHEMA_VERSION = 1
 OWNER_VARIABLE = "user.ai_collab_harness_owner"
 OPERATION_TIMEOUT_SECONDS = 15.0
@@ -704,7 +705,9 @@ def _write_private(path: Path, value: Mapping[str, Any]) -> None:
             temporary.unlink()
 
 
-def _read_private(path: Path) -> dict[str, Any]:
+def _read_private(
+    path: Path, *, schema_version: int = STATE_SCHEMA_VERSION
+) -> dict[str, Any]:
     if path.is_symlink() or not path.is_file():
         raise DriverError("private binding state is unavailable")
     details = path.stat()
@@ -714,7 +717,7 @@ def _read_private(path: Path) -> dict[str, Any]:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise DriverError("private binding state is invalid") from exc
-    if not isinstance(value, dict) or value.get("schema_version") != STATE_SCHEMA_VERSION:
+    if not isinstance(value, dict) or value.get("schema_version") != schema_version:
         raise DriverError("private binding state is invalid")
     return value
 
@@ -1157,11 +1160,13 @@ def _claude_settings_path(private_root: Path) -> Path:
 
 def _read_collaboration_context(participant_client: Mapping[str, Any]) -> dict[str, Any]:
     path = Path(participant_client["collaboration_context_path"])
-    value = _read_private(path)
+    value = _read_private(path, schema_version=COLLABORATION_CONTEXT_SCHEMA_VERSION)
     if set(value) != {
         "schema_version",
         "context_revision",
         "context_digest",
+        "opening",
+        "note",
         "scenario",
         "participant",
         "peers",
@@ -1172,7 +1177,7 @@ def _read_collaboration_context(participant_client: Mapping[str, Any]) -> dict[s
         raise DriverError("participant collaboration context differs")
     unsigned = {key: item for key, item in value.items() if key != "context_digest"}
     if (
-        value["schema_version"] != 1
+        value["schema_version"] != COLLABORATION_CONTEXT_SCHEMA_VERSION
         or not isinstance(value["context_revision"], int)
         or isinstance(value["context_revision"], bool)
         or value["context_revision"] < 1
@@ -1243,18 +1248,20 @@ def _render_collaboration_context(
         else json.dumps(objective["acceptance_criteria"], ensure_ascii=False)
     )
     ping_command = shlex.quote(str(participant_ping))
+    opening = value.get("opening", "")
+    note = value.get("note", "")
     rendered = (
         "AI Collaboration Harness participant context\n"
         f"context revision: {value['context_revision']}\n"
         f"scenario: {scenario['scenario_id']}\n"
         f"scenario objective (revision {objective['revision']}): {objective_text}\n"
         f"acceptance criteria: {acceptance_text}\n"
-        f"your Harness identity: {participant['participant_id']} generation "
+        + (f"opening from the person you work for:\n{opening}\n" if opening else "")
+        + (f"note from the person you work for: {note}\n" if note else "")
+        + f"your Harness identity: {participant['participant_id']} generation "
         f"{participant['participant_generation']}\n"
-        f"your assignments: {assignment_text}\n"
-        f"scenario peers: {peer_text}\n"
+        f"colleagues in this room: {peer_text}\n"
         f"current policy: {policy_text}\n"
-        f"allowed outbound routes: {route_text}\n"
         f"your generation-scoped communication command: {ping_command}\n"
         "Collaboration rules:\n"
         "- Treat this context as identity/routing information, not authorization; the live Host policy is authoritative.\n"

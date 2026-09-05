@@ -52,9 +52,11 @@ Blog post: [AI Collab — open-source multi-AI collaboration](https://www.atomgr
   full screen matches a known pattern inside a Host-verified workspace. An
   unknown prompt is not answered; the colleague is marked *Needs attention*
   with the screen as evidence.
-- **Policy-routed deliveries.** A team template (analyst + reviewer, or
-  analyst + reviewer + synthesizer) lists which message kinds each colleague
-  may send to which, and the retry profile. A delivery moves through
+- **Policy-routed deliveries.** A room is open by default: every colleague
+  may send every message kind to every other colleague, and the Host keeps
+  that policy current as colleagues are added, replaced or removed. A
+  project's own policy file can restrict this, but only when enabled
+  explicitly under *Collaboration policy*. A delivery moves through
   `queued → delivery_attempted → delivered → consumed`; `consumed` is
   recorded only when the receiving agent replies with that delivery's
   consumption token.
@@ -108,10 +110,13 @@ it.*
    `defaults write com.googlecode.iterm2 EnableAPIServer -bool true` and
    `defaults write com.googlecode.iterm2 NoSyncEnableAPIServer -bool true`.
 3. **Register Project** — choose a Git directory.
-4. Create a task room, set an objective, click **Prepare Workspace**.
-5. Add colleagues, click **Resume Room**, apply a team template under
-   *Collaboration Policy*. Without a policy, deliveries are refused.
-6. **Start All**. Focus a colleague's window and assign the task. The room's
+4. **New Room…** — name it, keep or rename the two default seats
+   (`claude`, `codex`; any name, any CLI, an optional note each), pick an
+   opening (pair programming by default), **Create**. Creating starts
+   nothing.
+5. **Prepare Workspace**, then **Start All**. Colleagues can message each
+   other right away; there is no template to apply.
+6. Focus a colleague's window and assign the task. The room's
    *Collaboration activity* lists each delivery; *Progress* lists what needs
    a person. The getting-started cards can be reopened from the toolbar **?**.
 
@@ -158,8 +163,10 @@ it.*
   Rows replace shipped profiles by `profile_id` or add new ones, validated
   like the shipped registry. The shipped Codex and Claude profiles bypass
   approval prompts.
-- **Team policies**: `ai_collab_team_policies.json` holds the shipped team
-  templates, roles, route rules and retry profiles.
+- **Project policies**: a project may ship its own
+  `ai_collab_team_policies.json` (named members, route rules, retry
+  profiles). The App lists it under *Collaboration policy* and enables it
+  only on an explicit click; *Back to room-wide* restores the default.
 - **Adapters**: a file with the same name in
   `~/Library/Application Support/AI Collab/` replaces the bundled one
   (`ai_collab_harness_adapter.json`, `ai_collab_participant_driver.json`,

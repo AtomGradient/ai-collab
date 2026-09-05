@@ -66,6 +66,7 @@ def _participant(participant_id: str) -> dict[str, Any]:
         "active_operation_id": None,
         "degraded": None,
         "journal_head_sequence": 10,
+        "note": "",
     }
 
 
@@ -3945,8 +3946,10 @@ def test_vendor_session_hook_captures_and_reuses_exact_identity(
     client_pythonpath = tmp_path / "client-pythonpath"
     client_pythonpath.mkdir(mode=0o700)
     unsigned = {
-        "schema_version": 1,
+        "schema_version": 2,
         "context_revision": 7,
+        "opening": "你们在结对工作。",
+        "note": "先补测试",
         "scenario": {
             "project_instance_id": "project-one",
             "scenario_id": "scenario-one",
@@ -4640,3 +4643,37 @@ def test_presentation_permission_request_prompts_when_target_running(
     assert asked == [False]
     assert observation["status"] == "granted"
     assert observation["prompt_requested"] is True
+
+
+def test_collaboration_prompt_shows_opening_and_note_without_roles() -> None:
+    unsigned = {
+        "schema_version": 2,
+        "context_revision": 3,
+        "opening": "你们在结对工作。\nYou are pair programming.",
+        "note": "先补测试",
+        "scenario": {
+            "project_instance_id": "project-one",
+            "scenario_id": "scenario-one",
+            "scenario_generation": 1,
+            "objective": {"revision": 1, "objective": "修复对账偏差", "acceptance_criteria": "CI 全绿"},
+        },
+        "participant": {"participant_id": "claude", "participant_generation": 2, "assignments": []},
+        "peers": [{"participant_id": "codex", "participant_generation": 1, "assignments": []}],
+        "policy": None,
+        "allowed_outbound": [],
+        "reply_semantics": {
+            "reply_expected_kinds": [],
+            "terminal_kinds": [],
+            "preserve_reply_to": True,
+            "machine_ack_is_silent": True,
+        },
+    }
+    value = {**unsigned, "context_digest": participant_driver.digest(unsigned)}
+    rendered = participant_driver._render_collaboration_context(  # noqa: SLF001
+        value, Path("/private/generation/ai-ping")
+    )
+    assert "opening from the person you work for:\n你们在结对工作。\nYou are pair programming.\n" in rendered
+    assert "note from the person you work for: 先补测试\n" in rendered
+    assert "colleagues in this room: codex" in rendered
+    assert "your assignments" not in rendered
+    assert "allowed outbound routes" not in rendered

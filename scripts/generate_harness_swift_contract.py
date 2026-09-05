@@ -64,6 +64,7 @@ APP_OPERATIONS = (
     "policy.template.list",
     "policy.plan",
     "policy.apply-plan",
+    "policy.reset-default",
     "policy.show",
     "delivery.list",
     "delivery.retry",

@@ -12,6 +12,7 @@ import json
 import re
 from dataclasses import dataclass
 from typing import Any, Mapping
+from .playbooks import MAX_NOTE_CHARACTERS, PLAYBOOK_IDS
 
 
 CONTRACT_VERSION = 1
@@ -144,6 +145,15 @@ CREATE_REQUEST_SCHEMA = {
         "project_binding_digest": {"type": "sha256"},
         "objective": {"type": "string"},
         "acceptance_criteria": {"type": "string"},
+        "playbook": {"type": "string"},
+    },
+}
+POLICY_RESET_REQUEST_SCHEMA = {
+    "type": "object",
+    "required": ["scenario_generation", "scenario_state_revision"],
+    "properties": {
+        "scenario_generation": {"type": "positive_integer"},
+        "scenario_state_revision": {"type": "positive_integer"},
     },
 }
 OBJECTIVE_APPEND_REQUEST_SCHEMA = {
@@ -339,6 +349,7 @@ PARTICIPANT_ADD_REQUEST_SCHEMA = {
         "scenario_state_revision": {"type": "positive_integer"},
         "launch_spec": {"type": "object"},
         "presentation_driver_id": {"type": "nullable_opaque_id"},
+        "note": {"type": "string"},
     },
 }
 PARTICIPANT_EXISTING_REQUEST_SCHEMA = {
@@ -1026,6 +1037,15 @@ OPERATION_DESCRIPTORS = (
         result_schema=POLICY_RESULT_SCHEMA,
     ),
     _descriptor(
+        "policy.reset-default",
+        capability="policy.manage",
+        target_scope="scenario",
+        required_fences=["host_generation", "operation_generation"],
+        mutation_class="durable_state",
+        request_schema=POLICY_RESET_REQUEST_SCHEMA,
+        result_schema=POLICY_RESULT_SCHEMA,
+    ),
+    _descriptor(
         "policy.show",
         capability="policy.read",
         target_scope="scenario",
@@ -1453,11 +1473,16 @@ def _validate_payload(operation: str, value: Any) -> None:
             )
         return
     if operation == "scenario.create":
+        fields = {"project_binding_digest", "objective", "acceptance_criteria"}
+        if isinstance(value, dict) and "playbook" in value:
+            fields.add("playbook")
         payload = _require_exact_fields(
             value,
-            {"project_binding_digest", "objective", "acceptance_criteria"},
+            fields,
             label="scenario create payload",
         )
+        if payload.get("playbook", "none") not in PLAYBOOK_IDS:
+            raise ProtocolError("ipc.operation-schema-mismatch", "protocol", "opening choice is invalid")
         if not isinstance(payload["project_binding_digest"], str) or SHA256_RE.fullmatch(payload["project_binding_digest"]) is None:
             raise ProtocolError("ipc.operation-schema-mismatch", "protocol", "project binding digest is invalid")
         _validate_objective_texts(
@@ -1539,12 +1564,22 @@ def _validate_payload(operation: str, value: Any) -> None:
         }
         if operation == "participant.replace":
             fields.add("participant_state_revision")
+        elif isinstance(value, dict) and "note" in value:
+            fields.add("note")
         payload = _require_exact_fields(
             value,
             fields,
             label=f"{operation} payload",
         )
         _validate_scenario_revision(payload)
+        if operation == "participant.add" and (
+            not isinstance(payload.get("note", ""), str)
+            or len(payload.get("note", "")) > MAX_NOTE_CHARACTERS
+            or "\x00" in payload.get("note", "")
+        ):
+            raise ProtocolError(
+                "ipc.operation-schema-mismatch", "protocol", "colleague note is invalid"
+            )
         if operation == "participant.replace" and (
             not isinstance(payload["participant_state_revision"], int)
             or isinstance(payload["participant_state_revision"], bool)
@@ -1673,6 +1708,14 @@ def _validate_payload(operation: str, value: Any) -> None:
                 "protocol",
                 "policy plan payload is invalid",
             )
+        return
+    if operation == "policy.reset-default":
+        payload = _require_exact_fields(
+            value,
+            {"scenario_generation", "scenario_state_revision"},
+            label="policy reset payload",
+        )
+        _validate_scenario_revision(payload)
         return
     if operation == "policy.apply":
         payload = _require_exact_fields(

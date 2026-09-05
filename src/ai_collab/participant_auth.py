@@ -25,7 +25,7 @@ from .protocol import (
 
 
 CONTEXT_SCHEMA_VERSION = 1
-COLLABORATION_CONTEXT_SCHEMA_VERSION = 1
+COLLABORATION_CONTEXT_SCHEMA_VERSION = 2
 
 
 class ParticipantAuthError(ValueError):
@@ -149,6 +149,8 @@ class ParticipantAuthStore:
             unsigned: dict[str, Any] = {
                 "schema_version": COLLABORATION_CONTEXT_SCHEMA_VERSION,
                 "context_revision": participant_state_revision,
+                "opening": "",
+                "note": "",
                 "scenario": {
                     "project_instance_id": project_instance_id,
                     "scenario_id": scenario_id,
@@ -301,6 +303,8 @@ class ParticipantAuthStore:
                 "schema_version",
                 "context_revision",
                 "context_digest",
+                "opening",
+                "note",
                 "scenario",
                 "participant",
                 "peers",
@@ -309,6 +313,8 @@ class ParticipantAuthStore:
                 "reply_semantics",
             }
             or value["schema_version"] != COLLABORATION_CONTEXT_SCHEMA_VERSION
+            or not isinstance(value["opening"], str)
+            or not isinstance(value["note"], str)
             or not isinstance(value["context_revision"], int)
             or isinstance(value["context_revision"], bool)
             or value["context_revision"] < 1

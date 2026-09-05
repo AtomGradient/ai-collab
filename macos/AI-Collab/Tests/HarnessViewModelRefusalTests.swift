@@ -195,24 +195,30 @@ final class HarnessViewModelRefusalTests: XCTestCase {
         )
     }
 
-    func testAddParticipantWithABlankNameSaysWhy() async {
+    /// v3: a blank name means "use the CLI's name". The suggestion is made
+    /// unique among the room's colleagues, so the only way a blank name is
+    /// refused is when the typed name — not the suggestion — is taken.
+    func testAddParticipantWithABlankNameUsesTheSuggestedName() async {
         let model = modelWithScenario()
         guard
             let template = ParticipantTemplate([
-                "template_id": "tmpl-claude",
+                "template_id": "runtime-profile.claude",
                 "display_name": "Claude",
-                "launch_spec": ["runtime_profile_ref": "claude-cli"],
+                "launch_spec": ["runtime_profile_ref": "runtime-profile.claude"],
             ])
         else {
             return XCTFail("fixture template could not be built")
         }
         model.templates = [template]
         model.selectedTemplateID = template.id
-        model.newParticipantID = "  "
+        model.participants = [participant("claude", observed: "ready")]
+        XCTAssertEqual(model.suggestedParticipantName, "claude-2")
+
+        model.newParticipantID = "claude"
         await model.addParticipant()
         XCTAssertEqual(
             model.validationMessage(for: .participantAdd),
-            "Give the colleague a name."
+            "This room already has a colleague named “claude”."
         )
     }
 

@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .participant import ParticipantCoordinator, ParticipantError
+from .playbooks import opening_text
 from .protocol import canonical_json_bytes, canonical_json_sha256
 from .store import ScenarioStore, StoreError
 
@@ -28,6 +29,22 @@ from .store import ScenarioStore, StoreError
 DELIVERY_STATE_SCHEMA_VERSION = 1
 NAMESPACED_RE = re.compile(r"^[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*)+$")
 OPAQUE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+# The room-wide default: every colleague may send every kind to every other
+# colleague. The engine has no wildcard, so the kinds are enumerated and one
+# exact rule is written per ordered pair and kind, bound to live generations.
+DEFAULT_POLICY_ID = "team.room-open"
+OPEN_MESSAGE_KINDS = (
+    "collaboration.message",
+    "collaboration.response",
+    "collaboration.request",
+    "collaboration.question",
+    "collaboration.review-request",
+    "collaboration.review-response",
+    "collaboration.pushback",
+    "collaboration.notice",
+    "collaboration.done",
+)
+OPEN_RETRY_PROFILE = {"profile_id": "interactive", "max_attempts": 3, "backoff_ms": [0, 500, 2000]}
 IMMUTABLE_FIELDS = {
     "delivery_id",
     "message_id",
@@ -118,9 +135,10 @@ class DeliveryCoordinator:
             raise DeliveryError("delivery.state-invalid", "delivery state is invalid") from exc
         if (
             not isinstance(value, dict)
-            or set(value)
+            or set(value) - {"policy_upgrade"}
             != {"schema_version", "state_revision", "policies", "deliveries", "requests"}
             or value["schema_version"] != DELIVERY_STATE_SCHEMA_VERSION
+            or not isinstance(value.get("policy_upgrade", 0), int)
             or not isinstance(value["state_revision"], int)
             or not isinstance(value["policies"], dict)
             or not isinstance(value["deliveries"], dict)
@@ -204,10 +222,25 @@ class DeliveryCoordinator:
             if replay is not None:
                 return replay
             previous = state["policies"].get(key)
-            if previous is None:
+            replacing_default = (
+                previous is not None
+                and pack["policy_id"] != previous["policy_id"]
+                and DEFAULT_POLICY_ID in {pack["policy_id"], previous["policy_id"]}
+            )
+            if previous is None or replacing_default:
+                # A policy line starts at version one: the first policy of a
+                # room, a project policy replacing the room-wide default, or
+                # the default replacing a project policy.
                 if pack["policy_version"] != 1:
                     raise DeliveryError(
                         "policy.version-invalid", "initial policy version must be one"
+                    )
+                if previous is not None and (
+                    pack["scenario_id"] != previous["scenario_id"]
+                    or pack["policy_contract_version"] != previous["policy_contract_version"]
+                ):
+                    raise DeliveryError(
+                        "policy.version-invalid", "policy update fence differs"
                     )
             elif (
                 pack["policy_id"] != previous["policy_id"]
@@ -231,6 +264,138 @@ class DeliveryCoordinator:
             state["state_revision"] += 1
             self._write_state(state)
             return operation_id, result
+
+    @staticmethod
+    def default_policy_pack(
+        *,
+        scenario_id: str,
+        participants: Sequence[Mapping[str, Any]],
+        policy_version: int,
+    ) -> dict[str, Any]:
+        """The room-wide policy for exactly these colleagues and generations."""
+
+        refs = [
+            _participant_ref(value)
+            for value in sorted(participants, key=lambda value: value["participant_id"])
+        ]
+        route_rules: list[dict[str, Any]] = []
+        for sender_index, sender in enumerate(refs):
+            for receiver_index, receiver in enumerate(refs):
+                if sender_index == receiver_index:
+                    continue
+                for kind in OPEN_MESSAGE_KINDS:
+                    route_rules.append(
+                        {
+                            "rule_id": (
+                                f"open-{sender_index}-{receiver_index}-"
+                                f"{kind.removeprefix('collaboration.')}"
+                            ),
+                            "sender": {"kind": "participant", "participant": copy.deepcopy(sender)},
+                            "receiver": {"kind": "participant", "participant": copy.deepcopy(receiver)},
+                            "message_kind": kind,
+                            "effect": "allow",
+                            "retry_profile_id": OPEN_RETRY_PROFILE["profile_id"],
+                        }
+                    )
+        return {
+            "policy_contract_version": 1,
+            "policy_id": DEFAULT_POLICY_ID,
+            "policy_version": policy_version,
+            "scenario_id": scenario_id,
+            "default_effect": "deny",
+            "assignments": [],
+            "retry_profiles": [copy.deepcopy(OPEN_RETRY_PROFILE)],
+            "route_rules": route_rules,
+        }
+
+    def sync_default_policy(
+        self, *, project_instance_id: str, scenario_id: str
+    ) -> bool:
+        """Keep the room-wide policy current; leave a project policy alone.
+
+        Returns True when a new policy version was applied.
+        """
+
+        scenario, participants = self.store.delivery_snapshot(
+            project_instance_id, scenario_id
+        )
+        key = self._key(project_instance_id, scenario_id)
+        with self._lock:
+            current = copy.deepcopy(self._read_state()["policies"].get(key))
+        if current is not None and current["policy_id"] != DEFAULT_POLICY_ID:
+            return False
+        version = 1 if current is None else current["policy_version"] + 1
+        target = self.default_policy_pack(
+            scenario_id=scenario_id, participants=participants, policy_version=version
+        )
+        if current is not None and {**current, "policy_version": 0} == {**target, "policy_version": 0}:
+            return False
+        request_id = f"policy-sync-{uuid.uuid4().hex}"
+        self.apply_policy(
+            request_id=request_id,
+            request_digest=canonical_json_sha256({"policy_sync": request_id}),
+            project_instance_id=project_instance_id,
+            scenario_id=scenario_id,
+            scenario_generation=scenario["scenario_generation"],
+            scenario_state_revision=scenario["state_revision"],
+            policy_pack=target,
+        )
+        return True
+
+    def policy_upgrade_done(self) -> bool:
+        with self._lock:
+            return self._read_state().get("policy_upgrade") == 3
+
+    def mark_policy_upgrade_done(self) -> None:
+        with self._lock:
+            state = self._read_state()
+            state["policy_upgrade"] = 3
+            state["state_revision"] += 1
+            self._write_state(state)
+
+    def reset_to_default_policy(
+        self,
+        *,
+        request_id: str,
+        request_digest: str | None,
+        project_instance_id: str,
+        scenario_id: str,
+    ) -> tuple[str, dict[str, Any]]:
+        """Replace whatever policy a room has with the room-wide default."""
+
+        scenario, participants = self.store.delivery_snapshot(
+            project_instance_id, scenario_id
+        )
+        key = self._key(project_instance_id, scenario_id)
+        with self._lock:
+            state = self._read_state()
+            replay = self._previous_request(state, request_id, request_digest or "")
+            if replay is not None:
+                return replay
+            current = copy.deepcopy(state["policies"].get(key))
+        if current is not None and current["policy_id"] == DEFAULT_POLICY_ID:
+            self.sync_default_policy(
+                project_instance_id=project_instance_id, scenario_id=scenario_id
+            )
+            operation_id, shown = self.show_policy(
+                project_instance_id=project_instance_id, scenario_id=scenario_id
+            )
+            return operation_id, {
+                "policy": shown["policy"],
+                "policy_snapshot": shown["policy_snapshot"],
+            }
+        target = self.default_policy_pack(
+            scenario_id=scenario_id, participants=participants, policy_version=1
+        )
+        return self.apply_policy(
+            request_id=request_id,
+            request_digest=request_digest or canonical_json_sha256({"policy_upgrade": request_id}),
+            project_instance_id=project_instance_id,
+            scenario_id=scenario_id,
+            scenario_generation=scenario["scenario_generation"],
+            scenario_state_revision=scenario["state_revision"],
+            policy_pack=target,
+        )
 
     def show_policy(
         self, *, project_instance_id: str, scenario_id: str
@@ -324,8 +489,10 @@ class DeliveryCoordinator:
                 )
 
         unsigned: dict[str, Any] = {
-            "schema_version": 1,
+            "schema_version": 2,
             "context_revision": context_revision,
+            "opening": opening_text(scenario.get("playbook", "none")),
+            "note": participant.get("note", ""),
             "scenario": {
                 "project_instance_id": project_instance_id,
                 "scenario_id": scenario_id,
@@ -418,7 +585,11 @@ class DeliveryCoordinator:
         key = self._key(project_instance_id, scenario_id)
         with self._lock:
             previous = copy.deepcopy(self._read_state()["policies"].get(key))
-        policy_version = 1 if previous is None else previous["policy_version"] + 1
+        policy_version = (
+            1
+            if previous is None or previous["policy_id"] != template["policy_id"]
+            else previous["policy_version"] + 1
+        )
 
         team: list[dict[str, Any]] = []
         blockers: list[str] = []
@@ -428,25 +599,6 @@ class DeliveryCoordinator:
             for participant_id in participant_ids
             if participant_id in current
         }
-        missing_ids = [
-            participant_id
-            for participant_id in participant_ids
-            if participant_id not in current
-        ]
-        replacement_ids = sorted(
-            participant_id
-            for participant_id, record in current.items()
-            if participant_id not in participant_ids
-            and record["interaction_mode"] == "tui"
-        )
-        if (
-            previous is not None
-            and previous["policy_id"] == template["policy_id"]
-            and len(missing_ids) == 1
-            and len(replacement_ids) == 1
-        ):
-            resolved_ids[missing_ids[0]] = replacement_ids[0]
-
         for participant_id in participant_ids:
             resolved_id = resolved_ids.get(participant_id, participant_id)
             record = current.get(resolved_id)
@@ -462,16 +614,18 @@ class DeliveryCoordinator:
                 continue
             ref = _participant_ref(record)
             refs[participant_id] = ref
-            member = {
-                "participant_id": resolved_id,
-                "participant_generation": ref["participant_generation"],
-                "present": True,
-            }
-            if resolved_id != participant_id:
-                member["template_participant_id"] = participant_id
-            team.append(member)
+            team.append(
+                {
+                    "participant_id": resolved_id,
+                    "participant_generation": ref["participant_generation"],
+                    "present": True,
+                }
+            )
 
-        if previous is not None and previous["policy_id"] != template["policy_id"]:
+        if (
+            previous is not None
+            and previous["policy_id"] not in {template["policy_id"], DEFAULT_POLICY_ID}
+        ):
             blockers.append("policy.template-conflict")
 
         policy_pack: dict[str, Any] | None = None

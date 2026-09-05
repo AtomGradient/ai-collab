@@ -157,7 +157,10 @@ final class GuidanceRailTests: XCTestCase {
         )
     }
 
-    func testPolicyGatePrecedesStartAndFocus() {
+    /// v3: rules are the Host's job. A room without a policy record yet, or
+    /// a project policy that drifted, never gates start or focus — only a
+    /// failed policy read does.
+    func testRulesNeverGateStartAndFocus() {
         let stopped = [participant("stopped")]
         let ready = [participant("ready")]
         let suite = "guidance-policy-gate-tests-\(UUID().uuidString)"
@@ -169,21 +172,17 @@ final class GuidanceRailTests: XCTestCase {
                 room: "running", workspaceReady: true, participants: stopped,
                 policyReadiness: .missing
             ).guidance,
-            .configurePolicy
+            .startColleagues
         )
         let drifted = model(
             room: "running", workspaceReady: true, participants: ready,
             policyReadiness: .replanRequired, defaults: defaults
         )
-        XCTAssertEqual(
-            drifted.guidance,
-            .configurePolicy,
-            "generation drift must suppress the false ready/focus state"
-        )
+        XCTAssertEqual(drifted.guidance, .focusAndAssign)
         drifted.updateReadyMoment()
-        XCTAssertFalse(
+        XCTAssertTrue(
             drifted.showReadyMoment,
-            "policy drift must not emit a false all-ready milestone"
+            "a drifted project policy is an inspector fact, not a blocked room"
         )
         XCTAssertEqual(
             model(
@@ -266,10 +265,10 @@ final class GuidanceRailTests: XCTestCase {
             participants: [participant("stopped")],
             policyReadiness: .missing
         )
-        XCTAssertEqual(noPolicy.guidance, GuidanceStep.configurePolicy)
+        XCTAssertEqual(noPolicy.guidance, GuidanceStep.startColleagues)
         XCTAssertFalse(
             noPolicy.lifecycleActionsPreempted,
-            "a missing policy is actionable, not a preempting block"
+            "a missing policy record never preempts the room"
         )
     }
 
@@ -453,12 +452,12 @@ final class GuidanceRailTests: XCTestCase {
         XCTAssertEqual(resume.guidePresentation().index, 4)
         XCTAssertEqual(resume.guidePresentation().actionable, .resumeRoom)
 
-        let configure = model(
+        let noRulesYet = model(
             room: "running", workspaceReady: true,
             participants: [participant("stopped")], policyReadiness: .missing
         )
-        XCTAssertEqual(configure.guidePresentation().index, 4)
-        XCTAssertEqual(configure.guidePresentation().actionable, .configurePolicy)
+        XCTAssertEqual(noRulesYet.guidePresentation().index, 4)
+        XCTAssertEqual(noRulesYet.guidePresentation().actionable, .startColleagues)
 
         let start = model(
             room: "running", workspaceReady: true,
@@ -493,10 +492,10 @@ final class GuidanceRailTests: XCTestCase {
         let model = HarnessViewModel()
         model.guideStep = 4
         L10n.shared.preference = .english
-        XCTAssertTrue(S.Guide.policySay.contains("no collaboration rules yet"))
+        XCTAssertTrue(S.Guide.startSay.contains("Start All"))
         L10n.shared.preference = .simplifiedChinese
         XCTAssertEqual(model.guideStep, 4, "switching language must not close the card")
-        XCTAssertTrue(S.Guide.policySay.contains("还没有协作规则"))
+        XCTAssertTrue(S.Guide.startSay.contains("全部启动"))
         L10n.shared.preference = .english
     }
 }

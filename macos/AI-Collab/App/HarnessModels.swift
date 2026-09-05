@@ -144,6 +144,9 @@ struct ScenarioRecord: Identifiable, Equatable {
     let participantIDs: [String]
     let objective: String
     let objectiveHistory: [ScenarioObjectiveRevision]
+    /// The opening written into each colleague's startup prompt: "none",
+    /// "pairing" or "peer-review". Text, never a rule.
+    let playbook: String
 
     var objectiveRevision: Int { objectiveHistory.last?.revision ?? 0 }
     var acceptanceCriteria: String {
@@ -181,6 +184,7 @@ struct ScenarioRecord: Identifiable, Equatable {
         self.participantIDs = participantIDs
         self.objective = objective
         self.objectiveHistory = objectiveHistory
+        self.playbook = value["playbook"] as? String ?? "none"
     }
 }
 
@@ -202,6 +206,8 @@ struct ParticipantRecord: Identifiable, Equatable {
     /// colleague has a window an employee can focus and assign work in.
     let interactionMode: String?
     let issuedObjectiveRevision: Int
+    /// The person's optional note for this colleague, shown as is.
+    let note: String
 
     var isInteractive: Bool { interactionMode == "tui" }
 
@@ -251,6 +257,7 @@ struct ParticipantRecord: Identifiable, Equatable {
         self.runtimeBindingID = value["runtime_binding_id"] as? String
         self.interactionMode = value["interaction_mode"] as? String
         self.issuedObjectiveRevision = value["issued_objective_revision"] as? Int ?? 0
+        self.note = value["note"] as? String ?? ""
         self.presentationBindingID = value["presentation_binding_id"] as? String
         let degraded = value["degraded"] as? [String: Any]
         self.degradedReason = degraded?["reason"] as? String
@@ -660,7 +667,6 @@ struct PolicyTemplateRecord: Identifiable, Equatable {
 
 struct PolicyTeamMember: Identifiable, Equatable {
     let participantID: String
-    let templateParticipantID: String?
     let generation: Int?
     let isPresent: Bool
 
@@ -669,12 +675,9 @@ struct PolicyTeamMember: Identifiable, Equatable {
     init?(_ value: [String: Any]) {
         guard
             let participantID = value["participant_id"] as? String,
-            let isPresent = value["present"] as? Bool,
-            value["template_participant_id"] == nil
-                || value["template_participant_id"] is String
+            let isPresent = value["present"] as? Bool
         else { return nil }
         self.participantID = participantID
-        self.templateParticipantID = value["template_participant_id"] as? String
         self.generation = value["participant_generation"] as? Int
         self.isPresent = isPresent
     }
@@ -767,10 +770,15 @@ struct PolicyGenerationDrift: Identifiable, Equatable {
 }
 
 struct PolicyStatusRecord: Equatable {
+    static let roomWidePolicyID = "team.room-open"
+
     let policyID: String
     let policyVersion: Int
     let requiresReplan: Bool
     let generationDrift: [PolicyGenerationDrift]
+
+    /// The Host-maintained default: everyone may send every kind to everyone.
+    var isRoomWide: Bool { policyID == Self.roomWidePolicyID }
 
     init?(_ value: [String: Any]) {
         guard

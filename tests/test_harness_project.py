@@ -470,7 +470,7 @@ def test_registered_project_exposes_bounded_path_free_collaboration_templates(
         assert str(project_root) not in encoded
 
 
-def test_builtin_catalog_refresh_offers_new_rules_without_rewriting_scenario_snapshot(
+def test_builtin_catalog_refresh_is_not_offered_to_rooms_and_snapshot_stays_frozen(
     tmp_path: Path,
 ) -> None:
     state_root = tmp_path / "state"
@@ -511,7 +511,11 @@ def test_builtin_catalog_refresh_offers_new_rules_without_rewriting_scenario_sna
         }
         assert host._scenario_collaboration_templates(  # noqa: SLF001
             project_id, "scenario-v1"
-        ) == {"templates": [version_two]}
+        ) == {"templates": []}
+        assert client.list_policy_templates(project_instance_id=project_id) == {
+            "templates": [],
+            "source": "builtin",
+        }
         assert host.store.scenario_project_contract(project_id, "scenario-v1") == frozen
 
         client.create_scenario(
@@ -522,7 +526,7 @@ def test_builtin_catalog_refresh_offers_new_rules_without_rewriting_scenario_sna
         )
         assert host._scenario_collaboration_templates(  # noqa: SLF001
             project_id, "scenario-v2"
-        ) == {"templates": [version_two]}
+        ) == {"templates": []}
 
         project_root.rmdir()
         assert host.projects.collaboration_templates(project_id) == {
@@ -530,7 +534,7 @@ def test_builtin_catalog_refresh_offers_new_rules_without_rewriting_scenario_sna
         }
         assert host._scenario_collaboration_templates(  # noqa: SLF001
             project_id, "scenario-v1"
-        ) == {"templates": [version_two]}
+        ) == {"templates": []}
 
 
 def test_registration_is_idempotent_and_rejects_request_reuse(tmp_path: Path) -> None:

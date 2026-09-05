@@ -146,6 +146,7 @@ class HarnessClient:
         project_binding_digest: str,
         objective: str = "",
         acceptance_criteria: str = "",
+        playbook: str = "none",
         request_id: str | None = None,
     ) -> dict[str, Any]:
         return self._call(
@@ -160,6 +161,7 @@ class HarnessClient:
                 "project_binding_digest": project_binding_digest,
                 "objective": objective,
                 "acceptance_criteria": acceptance_criteria,
+                "playbook": playbook,
             },
             request_id=request_id,
         )
@@ -598,6 +600,7 @@ class HarnessClient:
         scenario_state_revision: int,
         launch_spec: dict[str, Any],
         presentation_driver_id: str | None,
+        note: str = "",
         request_id: str | None = None,
     ) -> dict[str, Any]:
         return self._call(
@@ -611,6 +614,7 @@ class HarnessClient:
                 "scenario_state_revision": scenario_state_revision,
                 "launch_spec": launch_spec,
                 "presentation_driver_id": presentation_driver_id,
+                "note": note,
             },
             request_id=request_id,
         )
@@ -884,6 +888,26 @@ class HarnessClient:
                 "scenario_state_revision": scenario_state_revision,
                 "template_id": template_id,
                 "plan_digest": plan_digest,
+            },
+            request_id=request_id,
+        )
+
+    def reset_default_policy(
+        self,
+        *,
+        project_instance_id: str,
+        scenario_id: str,
+        scenario_generation: int,
+        scenario_state_revision: int,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        return self._call(
+            "policy.reset-default",
+            self._scenario_target(project_instance_id, scenario_id),
+            {"operation_generation": scenario_state_revision},
+            {
+                "scenario_generation": scenario_generation,
+                "scenario_state_revision": scenario_state_revision,
             },
             request_id=request_id,
         )

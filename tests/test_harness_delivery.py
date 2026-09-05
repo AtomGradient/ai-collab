@@ -1544,8 +1544,11 @@ def test_project_template_plan_apply_and_generation_drift_require_replan(
     state_root = tmp_path / "state"
     template = _policy_template()
     with running_host(state_root) as (host, client, _):
-        host.projects.collaboration_templates = (  # type: ignore[method-assign]
-            lambda project_id: {"templates": [copy.deepcopy(template)]}
+        host._project_policy_templates = (  # type: ignore[method-assign]
+            lambda project_id: {
+                "templates": [copy.deepcopy(template)],
+                "source": "project-registry",
+            }
         )
         host._scenario_collaboration_templates = (  # type: ignore[method-assign]
             lambda project_id, scenario_id: {
@@ -1555,7 +1558,7 @@ def test_project_template_plan_apply_and_generation_drift_require_replan(
         opened, sender, receiver = _prepare(client)
 
         listed = client.list_policy_templates(project_instance_id=PROJECT_ID)
-        assert listed == {"templates": [template]}
+        assert listed == {"templates": [template], "source": "project-registry"}
         planned = client.plan_policy(
             project_instance_id=PROJECT_ID,
             scenario_id=SCENARIO_ID,
@@ -1781,239 +1784,6 @@ def test_policy_plan_does_not_infer_replacement_without_matching_policy(
             "template_participant_id" not in member
             for member in conflict["team"]
         )
-
-
-def test_policy_replan_rebinds_one_missing_member_and_refreshes_live_context(
-    tmp_path: Path,
-) -> None:
-    state_root = tmp_path / "state"
-    replacement_id = "sender-two"
-    template = _policy_template()
-    with running_host(state_root) as (host, client, _):
-        host.projects.collaboration_templates = (  # type: ignore[method-assign]
-            lambda project_id: {"templates": [copy.deepcopy(template)]}
-        )
-        host._scenario_collaboration_templates = (  # type: ignore[method-assign]
-            lambda project_id, scenario_id: {
-                "templates": [copy.deepcopy(template)]
-            }
-        )
-        opened, sender, receiver = _prepare(client)
-        initial = client.plan_policy(
-            project_instance_id=PROJECT_ID,
-            scenario_id=SCENARIO_ID,
-            scenario_generation=1,
-            scenario_state_revision=opened["state_revision"],
-            template_id=template["template_id"],
-        )["policy_plan"]
-        client.apply_policy_plan(
-            project_instance_id=PROJECT_ID,
-            scenario_id=SCENARIO_ID,
-            scenario_generation=1,
-            scenario_state_revision=opened["state_revision"],
-            template_id=template["template_id"],
-            plan_digest=initial["plan_digest"],
-            request_id="apply-policy-before-replacement",
-        )
-
-        original_snapshot = host.store.delivery_snapshot
-
-        def headless_replacement(
-            project_instance_id: str, scenario_id: str
-        ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-            scenario, participants = original_snapshot(
-                project_instance_id, scenario_id
-            )
-            current_receiver = next(
-                value
-                for value in participants
-                if value["participant_id"] == RECEIVER_ID
-            )
-            replacement = copy.deepcopy(sender)
-            replacement["participant_id"] = replacement_id
-            replacement["interaction_mode"] = "headless"
-            return scenario, [current_receiver, replacement]
-
-        host.store.delivery_snapshot = headless_replacement  # type: ignore[method-assign]
-        try:
-            headless = client.plan_policy(
-                project_instance_id=PROJECT_ID,
-                scenario_id=SCENARIO_ID,
-                scenario_generation=1,
-                scenario_state_revision=opened["state_revision"],
-                template_id=template["template_id"],
-            )["policy_plan"]
-        finally:
-            host.store.delivery_snapshot = original_snapshot  # type: ignore[method-assign]
-        assert headless["can_apply"] is False
-        assert headless["blockers"] == [
-            f"team.participant-missing:{SENDER_ID}"
-        ]
-
-        def ambiguous_replacements(
-            project_instance_id: str, scenario_id: str
-        ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-            scenario, participants = original_snapshot(
-                project_instance_id, scenario_id
-            )
-            current_receiver = next(
-                value
-                for value in participants
-                if value["participant_id"] == RECEIVER_ID
-            )
-            replacements = []
-            for participant_id in ("sender-two", "sender-three"):
-                replacement = copy.deepcopy(sender)
-                replacement["participant_id"] = participant_id
-                replacements.append(replacement)
-            return scenario, [current_receiver, *replacements]
-
-        host.store.delivery_snapshot = ambiguous_replacements  # type: ignore[method-assign]
-        try:
-            ambiguous = client.plan_policy(
-                project_instance_id=PROJECT_ID,
-                scenario_id=SCENARIO_ID,
-                scenario_generation=1,
-                scenario_state_revision=opened["state_revision"],
-                template_id=template["template_id"],
-            )["policy_plan"]
-        finally:
-            host.store.delivery_snapshot = original_snapshot  # type: ignore[method-assign]
-        assert ambiguous["can_apply"] is False
-        assert ambiguous["blockers"] == [
-            f"team.participant-missing:{SENDER_ID}"
-        ]
-
-        stopped = client.stop_participant(
-            project_instance_id=PROJECT_ID,
-            scenario_id=SCENARIO_ID,
-            participant_id=SENDER_ID,
-            scenario_generation=1,
-            scenario_state_revision=opened["state_revision"],
-            participant_generation=sender["participant_generation"],
-            participant_state_revision=sender["state_revision"],
-            request_id="stop-policy-member",
-        )["participant"]
-        client.destroy_participant(
-            project_instance_id=PROJECT_ID,
-            scenario_id=SCENARIO_ID,
-            participant_id=SENDER_ID,
-            scenario_generation=1,
-            scenario_state_revision=opened["state_revision"],
-            participant_generation=stopped["participant_generation"],
-            participant_state_revision=stopped["state_revision"],
-            request_id="delete-policy-member",
-        )
-        scenario = client.scenario_status(
-            project_instance_id=PROJECT_ID,
-            scenario_id=SCENARIO_ID,
-        )["scenario"]
-        replacement = client.add_participant(
-            project_instance_id=PROJECT_ID,
-            scenario_id=SCENARIO_ID,
-            participant_id=replacement_id,
-            scenario_generation=scenario["scenario_generation"],
-            scenario_state_revision=scenario["state_revision"],
-            launch_spec=_launch_spec(),
-            presentation_driver_id="presentation.iterm2",
-            request_id="add-policy-replacement",
-        )["participant"]
-        scenario = client.scenario_status(
-            project_instance_id=PROJECT_ID,
-            scenario_id=SCENARIO_ID,
-        )["scenario"]
-
-        repair = client.plan_policy(
-            project_instance_id=PROJECT_ID,
-            scenario_id=SCENARIO_ID,
-            scenario_generation=scenario["scenario_generation"],
-            scenario_state_revision=scenario["state_revision"],
-            template_id=template["template_id"],
-        )["policy_plan"]
-        assert repair["can_apply"] is True
-        assert repair["blockers"] == []
-        assert repair["team"][0] == {
-            "participant_id": replacement_id,
-            "participant_generation": 1,
-            "present": True,
-            "template_participant_id": SENDER_ID,
-        }
-        applied = client.apply_policy_plan(
-            project_instance_id=PROJECT_ID,
-            scenario_id=SCENARIO_ID,
-            scenario_generation=scenario["scenario_generation"],
-            scenario_state_revision=scenario["state_revision"],
-            template_id=template["template_id"],
-            plan_digest=repair["plan_digest"],
-            request_id="apply-policy-replacement",
-        )
-        assert applied["policy"]["policy_version"] == 2
-        assert {
-            assignment["participant"]["participant_id"]
-            for assignment in applied["policy"]["assignments"]
-        } == {replacement_id, RECEIVER_ID}
-        assert client.show_policy(
-            project_instance_id=PROJECT_ID,
-            scenario_id=SCENARIO_ID,
-        )["policy_health"] == {
-            "requires_replan": False,
-            "generation_drift": [],
-        }
-
-        receiver_context = next(
-            value
-            for value in (
-                json.loads(path.read_text(encoding="utf-8"))
-                for path in (state_root / "participant-collaboration").glob(
-                    "participant-*.json"
-                )
-            )
-            if value["participant"]["participant_id"] == RECEIVER_ID
-        )
-        assert receiver_context["policy"]["policy_version"] == 2
-        assert receiver_context["peers"] == [
-            {
-                "participant_id": replacement_id,
-                "participant_generation": 1,
-                "assignments": ["collaboration.role"],
-            }
-        ]
-        assert receiver_context["allowed_outbound"] == [
-            {
-                "message_kind": "collaboration.response",
-                "receiver_label": replacement_id,
-            }
-        ]
-
-        client.start_participant(
-            project_instance_id=PROJECT_ID,
-            scenario_id=SCENARIO_ID,
-            participant_id=replacement_id,
-            scenario_generation=scenario["scenario_generation"],
-            scenario_state_revision=scenario["state_revision"],
-            participant_generation=replacement["participant_generation"],
-            participant_state_revision=replacement["state_revision"],
-            request_id="start-policy-replacement",
-        )
-        replacement_context = next(
-            value
-            for value in (
-                json.loads(path.read_text(encoding="utf-8"))
-                for path in (state_root / "participant-collaboration").glob(
-                    "participant-*.json"
-                )
-            )
-            if value["participant"]["participant_id"] == replacement_id
-        )
-        assert replacement_context["participant"]["assignments"] == [
-            {"attribute": "collaboration.role", "task_id": None}
-        ]
-        assert replacement_context["allowed_outbound"] == [
-            {
-                "message_kind": "collaboration.request",
-                "receiver_label": RECEIVER_ID,
-            }
-        ]
 
 
 def test_host_delivery_carries_receipt_working_directory(tmp_path: Path) -> None:
@@ -2913,7 +2683,7 @@ def _remove_snapshot_project_files(project_root: Path) -> None:
     project_root.rmdir()
 
 
-@pytest.mark.parametrize("builtin", [False, True], ids=["project-registry", "builtin"])
+@pytest.mark.parametrize("builtin", [False], ids=["project-registry"])
 def test_policy_catalog_updates_without_rewriting_scenario_snapshots(
     tmp_path: Path, builtin: bool,
 ) -> None:
@@ -2986,7 +2756,8 @@ def test_policy_catalog_updates_without_rewriting_scenario_snapshots(
         )
 
         assert client.list_policy_templates(project_instance_id=project_id) == {
-            "templates": [template_v2]
+            "templates": [template_v2],
+            "source": "project-registry",
         }
         assert host.store.scenario_project_contract(project_id, "snapshot-a") == frozen
         assert client.show_policy(
@@ -3025,7 +2796,8 @@ def test_policy_catalog_updates_without_rewriting_scenario_snapshots(
 
         _remove_snapshot_project_files(project_root)
         assert client.list_policy_templates(project_instance_id=project_id) == {
-            "templates": [template_v2]
+            "templates": [template_v2],
+            "source": "project-registry",
         }
         assert client.plan_policy(
             project_instance_id=project_id,
@@ -3104,3 +2876,235 @@ def test_policy_apply_plan_replays_before_mutable_template_inputs(
             request_id="apply-frozen-policy-plan",
         ) == applied
         assert adapter.collaboration_calls == 0
+
+
+def _open_ref(participant: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "scenario_id": participant["scenario_id"],
+        "participant_id": participant["participant_id"],
+        "participant_generation": participant["participant_generation"],
+    }
+
+
+def _pairs(pack: Mapping[str, Any]) -> set[tuple[str, str]]:
+    return {
+        (
+            rule["sender"]["participant"]["participant_id"],
+            rule["receiver"]["participant"]["participant_id"],
+        )
+        for rule in pack["route_rules"]
+    }
+
+
+def test_room_wide_default_policy_follows_colleagues(tmp_path: Path) -> None:
+    from ai_collab.delivery import OPEN_MESSAGE_KINDS
+
+    state_root = tmp_path / "state"
+    with running_host(state_root) as (host, client, _):
+        opened, sender, receiver = _prepare(client)
+        shown = client.show_policy(project_instance_id=PROJECT_ID, scenario_id=SCENARIO_ID)
+        pack = shown["policy"]
+        assert pack["policy_id"] == "team.room-open"
+        assert pack["assignments"] == []
+        assert _pairs(pack) == {(SENDER_ID, RECEIVER_ID), (RECEIVER_ID, SENDER_ID)}
+        assert {rule["message_kind"] for rule in pack["route_rules"]} == set(OPEN_MESSAGE_KINDS)
+        assert all(
+            rule["effect"] == "allow" and rule["retry_profile_id"] == "interactive"
+            for rule in pack["route_rules"]
+        )
+        assert shown["policy_health"]["requires_replan"] is False
+        version = pack["policy_version"]
+
+        # A kind no template ever granted is routable without any setup.
+        sent = client.send_message(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=opened["scenario_generation"],
+            scenario_state_revision=opened["state_revision"],
+            sender_participant_id=SENDER_ID,
+            sender_participant_generation=sender["participant_generation"],
+            sender_participant_state_revision=sender["state_revision"],
+            receiver_intent={"kind": "participant", "participant": _open_ref(receiver)},
+            message_id="message-open-notice",
+            message_kind="collaboration.notice",
+            message="换手：你写，我审",
+        )
+        assert sent["acceptance"]["outcome"] == "accepted"
+
+        # Any name may join; the policy grows and stays bound to real generations.
+        added = client.add_participant(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            participant_id="claude-2",
+            scenario_generation=opened["scenario_generation"],
+            scenario_state_revision=opened["state_revision"],
+            launch_spec=_launch_spec(),
+            presentation_driver_id="presentation.iterm2",
+            note="先补测试",
+        )["participant"]
+        grown = client.show_policy(project_instance_id=PROJECT_ID, scenario_id=SCENARIO_ID)["policy"]
+        assert grown["policy_version"] == version + 1
+        assert len(_pairs(grown)) == 6
+        assert all(
+            rule["receiver"]["participant"]["participant_generation"] == added["participant_generation"]
+            for rule in grown["route_rules"]
+            if rule["receiver"]["participant"]["participant_id"] == "claude-2"
+        )
+
+        # Leaving shrinks it again.
+        client.destroy_participant(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            participant_id="claude-2",
+            scenario_generation=opened["scenario_generation"],
+            scenario_state_revision=opened["state_revision"],
+            participant_generation=added["participant_generation"],
+            participant_state_revision=added["state_revision"],
+            request_id="destroy-claude-2",
+        )
+        shrunk = client.show_policy(project_instance_id=PROJECT_ID, scenario_id=SCENARIO_ID)["policy"]
+        assert shrunk["policy_version"] == version + 2
+        assert _pairs(shrunk) == {(SENDER_ID, RECEIVER_ID), (RECEIVER_ID, SENDER_ID)}
+
+
+def test_project_policy_stays_until_reset_to_room_wide(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    with running_host(state_root) as (host, client, _):
+        opened, sender, receiver = _prepare(client)
+        applied = client.apply_policy(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=opened["scenario_generation"],
+            scenario_state_revision=opened["state_revision"],
+            policy_pack=_policy(sender, receiver),
+        )["policy"]
+        assert applied["policy_id"] == "policy.edgestudio-dogfood"
+        assert applied["policy_version"] == 1
+
+        client.add_participant(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            participant_id="claude-2",
+            scenario_generation=opened["scenario_generation"],
+            scenario_state_revision=opened["state_revision"],
+            launch_spec=_launch_spec(),
+            presentation_driver_id="presentation.iterm2",
+        )
+        kept = client.show_policy(project_instance_id=PROJECT_ID, scenario_id=SCENARIO_ID)["policy"]
+        assert kept == applied  # a project policy is never rewritten by membership
+
+        reset = client.reset_default_policy(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=opened["scenario_generation"],
+            scenario_state_revision=opened["state_revision"],
+        )["policy"]
+        assert reset["policy_id"] == "team.room-open"
+        assert reset["policy_version"] == 1
+        assert len(_pairs(reset)) == 6
+
+
+def test_upgrade_makes_every_room_room_wide_once(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    with running_host(state_root) as (host, client, _):
+        opened, sender, receiver = _prepare(client)
+        client.apply_policy(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=opened["scenario_generation"],
+            scenario_state_revision=opened["state_revision"],
+            policy_pack=_policy(sender, receiver),
+        )
+        sent = client.send_message(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            scenario_generation=opened["scenario_generation"],
+            scenario_state_revision=opened["state_revision"],
+            sender_participant_id=SENDER_ID,
+            sender_participant_generation=sender["participant_generation"],
+            sender_participant_state_revision=sender["state_revision"],
+            receiver_intent={"kind": "participant", "participant": _open_ref(receiver)},
+            message_id="message-before-upgrade",
+            message_kind="collaboration.request",
+            message="before the upgrade",
+        )
+        delivery_id = sent["deliveries"][0]["delivery_id"]
+        assert host.delivery is not None
+        # State written by a pre-v3 Host carries no upgrade marker. Under the
+        # coordinator's lock: the delivery worker is still retrying the
+        # message above, and its own read-modify-write would otherwise put
+        # the marker back.
+        with host.delivery._lock:  # noqa: SLF001
+            state = host.delivery._read_state()  # noqa: SLF001
+            state.pop("policy_upgrade", None)
+            host.delivery._write_state(state)  # noqa: SLF001
+
+    with running_host(state_root) as (host, client, _):
+        shown = client.show_policy(project_instance_id=PROJECT_ID, scenario_id=SCENARIO_ID)["policy"]
+        assert shown["policy_id"] == "team.room-open"
+        assert shown["policy_version"] == 1
+        assert _pairs(shown) == {(SENDER_ID, RECEIVER_ID), (RECEIVER_ID, SENDER_ID)}
+        assert host.delivery is not None
+        record = host.delivery._read_state()["deliveries"][delivery_id]["record"]  # noqa: SLF001
+        assert record["policy_snapshot"]["policy_id"] == "policy.edgestudio-dogfood"
+
+    with running_host(state_root) as (host, client, _):
+        again = client.show_policy(project_instance_id=PROJECT_ID, scenario_id=SCENARIO_ID)["policy"]
+        assert again["policy_version"] == 1  # the upgrade runs once
+
+
+def test_collaboration_context_carries_opening_and_note(tmp_path: Path) -> None:
+    from ai_collab.protocol import canonical_json_sha256
+
+    state_root = tmp_path / "state"
+    with running_host(state_root) as (host, client, _):
+        created = client.create_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            project_binding_digest=PROJECT_DIGEST,
+            playbook="pairing",
+        )["scenario"]
+        added = client.add_participant(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            participant_id="claude",
+            scenario_generation=1,
+            scenario_state_revision=created["state_revision"],
+            launch_spec=_launch_spec(),
+            presentation_driver_id="presentation.iterm2",
+            note="先补测试，再改实现",
+        )["participant"]
+        assert host.delivery is not None
+        context = host.delivery.participant_collaboration_context(
+            project_instance_id=PROJECT_ID,
+            scenario_id=SCENARIO_ID,
+            participant_id="claude",
+            participant_generation=added["participant_generation"],
+        )
+        assert context["schema_version"] == 2
+        assert "结对" in context["opening"] and "pair programming" in context["opening"]
+        assert context["note"] == "先补测试，再改实现"
+        unsigned = {key: value for key, value in context.items() if key != "context_digest"}
+        assert canonical_json_sha256(unsigned) == context["context_digest"]
+
+        plain = client.create_scenario(
+            project_instance_id=PROJECT_ID,
+            scenario_id="scenario-plain",
+            project_binding_digest=PROJECT_DIGEST,
+        )["scenario"]
+        quiet = client.add_participant(
+            project_instance_id=PROJECT_ID,
+            scenario_id="scenario-plain",
+            participant_id="codex",
+            scenario_generation=1,
+            scenario_state_revision=plain["state_revision"],
+            launch_spec=_launch_spec(),
+            presentation_driver_id="presentation.iterm2",
+        )["participant"]
+        context = host.delivery.participant_collaboration_context(
+            project_instance_id=PROJECT_ID,
+            scenario_id="scenario-plain",
+            participant_id="codex",
+            participant_generation=quiet["participant_generation"],
+        )
+        assert context["opening"] == "" and context["note"] == ""

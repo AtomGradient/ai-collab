@@ -17,6 +17,7 @@ import struct
 import sys
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -213,6 +214,18 @@ class _Handler(socketserver.StreamRequestHandler):
             return
 
 
+ROOM_POLICY_SYNC_OPERATIONS = {
+    "scenario.create",
+    "scenario.open",
+    "scenario.start-participants",
+    "participant.add",
+    "participant.destroy",
+    "participant.replace",
+    "participant.start",
+    "participant.recover",
+}
+
+
 class HarnessHost:
     """Synchronous Unix-socket Host with typed request/reply and durable state."""
 
@@ -312,36 +325,41 @@ class HarnessHost:
             project_instance_id, project_binding_digest
         )
 
+    def _project_policy_templates(self, project_instance_id: str) -> dict[str, Any]:
+        """Templates a project's own policy file offers; none for the shipped catalog."""
+
+        render = self.projects.resolved_render(project_instance_id)
+        source = (
+            render.get("collaboration", {}).get("kind")
+            if isinstance(render, dict)
+            else None
+        )
+        if source != "project-registry":
+            return {"templates": [], "source": source or "none"}
+        return {
+            **self.projects.collaboration_templates(project_instance_id),
+            "source": "project-registry",
+        }
+
     def _scenario_collaboration_templates(
         self, project_instance_id: str, scenario_id: str
     ) -> dict[str, Any]:
         """Offer refreshed built-ins; keep project-authored scenario rules frozen."""
 
+        # Only a project's own policy file is offered; the room-wide default
+        # needs no template and the shipped catalog is not a product choice.
         snapshot = self.store.scenario_project_contract(
             project_instance_id, scenario_id
         )
         collaboration = (
             snapshot.get("collaboration") if isinstance(snapshot, dict) else None
         )
-        if isinstance(collaboration, dict) and collaboration.get("kind") == "builtin":
-            current = self.projects.resolved_render(project_instance_id)
-            if (
-                isinstance(current, dict)
-                and current.get("collaboration", {}).get("kind") == "builtin"
-            ):
-                # Reconciliation updates the catalog, not the applied policy.
-                # The operator still explicitly previews/applies this template.
-                return self.projects.collaboration_templates(project_instance_id)
-        if isinstance(collaboration, dict) and (
+        if isinstance(collaboration, dict) and collaboration.get("kind") == "project-registry" and (
             "registry_snapshot" in collaboration
             or "registry_snapshot_digest" in collaboration
         ):
             return self.projects.collaboration_templates_from_render(snapshot)
-        # Migrated v0.1.6.1 Scenarios have no project snapshot. Prerelease
-        # v0.1.7 snapshots may predate the embedded template catalog. Their
-        # accepted current registry remains the only available compatibility
-        # source; new Scenarios never take this branch.
-        return self.projects.collaboration_templates(project_instance_id)
+        return {"templates": []}
 
     def bind(self) -> None:
         if self._server is not None:
@@ -353,6 +371,7 @@ class HarnessHost:
             os.chmod(self.socket_path, 0o600)
             if self.security is not None:
                 self.security.start_host()
+            self._upgrade_room_policies()
             if self.workspace is not None:
                 self.workspace.start_host(self.store.workspace_path)
                 self._reconcile_workspace_operations()
@@ -475,6 +494,42 @@ class HarnessHost:
                 # retry or Host restart rejoins the idempotent settlement.
                 continue
 
+    def _sync_room_policy(self, project_instance_id: str, scenario_id: str) -> None:
+        """Bring the room-wide policy up to date with the colleagues present."""
+
+        if self.delivery is None:
+            return
+        try:
+            changed = self.delivery.sync_default_policy(
+                project_instance_id=project_instance_id, scenario_id=scenario_id
+            )
+        except (DeliveryError, StoreError, OSError):
+            return
+        if changed:
+            self._refresh_participant_collaboration_contexts(
+                project_instance_id, scenario_id
+            )
+
+    def _upgrade_room_policies(self) -> None:
+        """v3: every room is room-wide once; a project policy is re-enabled explicitly."""
+
+        if self.delivery is None or self.delivery.policy_upgrade_done():
+            return
+        for scenario in self.store.list_all_scenarios():
+            try:
+                self.delivery.reset_to_default_policy(
+                    request_id=f"policy-upgrade-{uuid.uuid4().hex}",
+                    request_digest=None,
+                    project_instance_id=scenario["project_instance_id"],
+                    scenario_id=scenario["scenario_id"],
+                )
+            except (DeliveryError, StoreError, OSError):
+                continue
+            self._refresh_participant_collaboration_contexts(
+                scenario["project_instance_id"], scenario["scenario_id"]
+            )
+        self.delivery.mark_policy_upgrade_done()
+
     def _refresh_participant_collaboration_contexts(
         self, project_instance_id: str, scenario_id: str
     ) -> None:
@@ -549,8 +604,10 @@ class HarnessHost:
                 project_instance_id, scenario_id
             )
             unsigned: dict[str, Any] = {
-                "schema_version": 1,
+                "schema_version": 2,
                 "context_revision": scenario["state_revision"],
+                "opening": "",
+                "note": "",
                 "scenario": {
                     "project_instance_id": project_instance_id,
                     "scenario_id": scenario_id,
@@ -1980,6 +2037,7 @@ class HarnessHost:
                     objective=request["payload"]["objective"],
                     acceptance_criteria=request["payload"]["acceptance_criteria"],
                     project_contract_snapshot=project_contract_snapshot,
+                    playbook=request["payload"].get("playbook", "none"),
                 )
         elif operation == "scenario.open":
             if request["fence"]["operation_generation"] != request["payload"]["scenario_state_revision"]:
@@ -2763,9 +2821,7 @@ class HarnessHost:
                 with self._active_operation_lock:
                     self._active_operations.pop(operation_id, None)
         elif operation == "policy.template.list":
-            result = self.projects.collaboration_templates(
-                target["project_instance_id"]
-            )
+            result = self._project_policy_templates(target["project_instance_id"])
             # Validate detailed policy semantics before exposing project data.
             for template in result["templates"]:
                 DeliveryCoordinator.validate_template(
@@ -2849,6 +2905,22 @@ class HarnessHost:
                     self._refresh_participant_collaboration_contexts(
                         target["project_instance_id"], target["scenario_id"]
                     )
+            elif operation == "policy.reset-default":
+                if request["fence"]["operation_generation"] != payload["scenario_state_revision"]:
+                    raise ProtocolError(
+                        "fence.stale-operation-generation",
+                        "fencing",
+                        "policy operation generation differs from Scenario revision",
+                        retryable=True,
+                    )
+                operation_id, result = self.delivery.reset_to_default_policy(
+                    request_id=request["request_id"],
+                    request_digest=request_digest,
+                    **common,
+                )
+                self._refresh_participant_collaboration_contexts(
+                    target["project_instance_id"], target["scenario_id"]
+                )
             elif operation == "policy.apply":
                 if request["fence"]["operation_generation"] != payload["scenario_state_revision"]:
                     raise ProtocolError(
@@ -3178,6 +3250,7 @@ class HarnessHost:
                     scenario_state_revision=payload["scenario_state_revision"],
                     launch_spec=payload["launch_spec"],
                     presentation_driver_id=payload["presentation_driver_id"],
+                    note=payload.get("note", ""),
                 )
             else:
                 if (
@@ -3519,6 +3592,11 @@ class HarnessHost:
                     receipt_digest=payload["receipt_digest"],
                     workspace_path=workspace_path,
                 )
+        if operation in ROOM_POLICY_SYNC_OPERATIONS:
+            self._sync_room_policy(
+                request["target"]["project_instance_id"],
+                request["target"]["scenario_id"],
+            )
         reply = {
             "message_type": "operation_reply",
             "contract_version": CONTRACT_VERSION,

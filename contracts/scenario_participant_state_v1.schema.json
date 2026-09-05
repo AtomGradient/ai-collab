@@ -163,7 +163,8 @@
         "degraded",
         "journal_head_sequence",
         "objective",
-        "objective_history"
+        "objective_history",
+        "playbook"
       ],
       "properties": {
         "scenario_id": {"$ref": "#/$defs/opaque_id"},
@@ -185,7 +186,8 @@
         "objective_history": {
           "type": "array",
           "items": {"$ref": "#/$defs/objective_revision"}
-        }
+        },
+        "playbook": {"enum": ["none", "pairing", "peer-review"]}
       },
       "additionalProperties": false
     },
@@ -204,7 +206,8 @@
         "presentation_binding_id",
         "active_operation_id",
         "degraded",
-        "journal_head_sequence"
+        "journal_head_sequence",
+        "note"
       ],
       "properties": {
         "scenario_id": {"$ref": "#/$defs/opaque_id"},
@@ -219,7 +222,8 @@
         "presentation_binding_id": {"$ref": "#/$defs/nullable_opaque_id"},
         "active_operation_id": {"$ref": "#/$defs/nullable_opaque_id"},
         "degraded": {"$ref": "#/$defs/nullable_degraded_observation"},
-        "journal_head_sequence": {"$ref": "#/$defs/revision"}
+        "journal_head_sequence": {"$ref": "#/$defs/revision"},
+        "note": {"type": "string", "maxLength": 500}
       },
       "additionalProperties": false
     },

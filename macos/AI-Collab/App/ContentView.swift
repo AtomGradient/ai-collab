@@ -488,7 +488,7 @@ struct ContentView: View {
             GuideStep(say: S.Guide.createSay),
             GuideStep(say: S.Guide.prepareSay),
             GuideStep(say: S.Guide.addSay),
-            GuideStep(say: S.Guide.policySay),
+            GuideStep(say: S.Guide.startSay),
             GuideStep(say: S.Guide.focusSay),
         ]
     }
@@ -515,11 +515,6 @@ struct ContentView: View {
             return (S.Guide.addAction, { Task { await model.addParticipant() } })
         case .resumeRoom:
             return (S.Guide.resumeAction, { Task { await model.openScenario() } })
-        case .configurePolicy:
-            return (
-                S.Guide.configurePolicyAction,
-                { Task { await model.applyRecommendedPolicy() } }
-            )
         case .startColleagues:
             return (S.Guide.startAction, { Task { await model.startAllParticipants() } })
         case .focusAndAssign:
@@ -553,11 +548,6 @@ struct ContentView: View {
             return (S.Guide.addAction, { Task { await model.addParticipant() } })
         case .resumeRoom:
             return (S.Guide.resumeAction, { Task { await model.openScenario() } })
-        case .configurePolicy:
-            return (
-                S.Guide.configurePolicyAction,
-                { Task { await model.applyRecommendedPolicy() } }
-            )
         case .startColleagues:
             return (S.Guide.startAction, { Task { await model.startAllParticipants() } })
         case .focusAndAssign:
@@ -798,22 +788,16 @@ struct ContentView: View {
             // composer. Rendering the same bindings in both columns creates
             // two mirrored forms and two competing primary actions.
             if model.selectedProject == nil || !model.scenarios.isEmpty {
-                VStack(spacing: 8) {
-                    TextField(S.Rooms.objectivePlaceholder, text: $model.newScenarioObjective)
-                    HStack(spacing: 8) {
-                        TextField(S.Rooms.identityPlaceholder, text: $model.newScenarioID)
-                            .onSubmit {
-                                guard model.selectedProject != nil, !model.isBusy else { return }
-                                Task { await model.createScenario() }
-                            }
-                        Button(S.Rooms.createButton) { Task { await model.createScenario() } }
-                            .buttonStyle(.borderedProminent)
-                            .disabled(model.selectedProject == nil || model.isBusy)
+                HStack {
+                    Button {
+                        model.beginRoomComposer()
+                    } label: {
+                        Label(S.Create.openButton, systemImage: "plus")
                     }
+                    .disabled(model.selectedProject == nil || model.isBusy)
+                    Spacer()
                 }
                 .padding(12)
-                validationBanner(for: .scenarioCreate)
-                    .padding(.horizontal)
             }
             List {
                 ForEach(scenarioGroups, id: \.label) { group in
@@ -915,7 +899,9 @@ struct ContentView: View {
 
     private var scenarioDetail: some View {
         Group {
-            if let scenario = model.selectedScenario {
+            if model.isComposingRoom {
+                roomComposerCanvas
+            } else if let scenario = model.selectedScenario {
                 GeometryReader { geo in
                     let wide = geo.size.width >= Self.twoColumnMinimumWidth
                     HStack(spacing: 0) {
@@ -1061,30 +1047,8 @@ struct ContentView: View {
                         title: S.Rooms.firstUseTitle,
                         detail: S.Rooms.firstUseBody
                     ) {
-                        VStack(spacing: 8) {
-                            TextField(
-                                S.Rooms.identityPlaceholder,
-                                text: $model.newScenarioID
-                            )
-                            .onSubmit {
-                                guard !model.isBusy else { return }
-                                Task { await model.createScenario() }
-                            }
-                            TextField(
-                                S.Rooms.objectivePlaceholder,
-                                text: $model.newScenarioObjective
-                            )
-                            HStack {
-                                Button(S.Rooms.createButton) {
-                                    Task { await model.createScenario() }
-                                }
-                                .buttonStyle(.borderedProminent)
-                                .disabled(model.isBusy)
-                                Spacer()
-                            }
-                            validationBanner(for: .scenarioCreate)
-                        }
-                        .padding(.top, 8)
+                        roomComposerForm
+                            .padding(.top, 8)
                     }
                     onboardingStep(
                         index: 3,
@@ -1191,6 +1155,174 @@ struct ContentView: View {
         ) { EmptyView() }
     }
 
+    // MARK: - New-room composer (the design's "新建任务房间" form)
+
+    /// The composer as the detail pane, for a project that already has
+    /// rooms. The first-use canvas embeds `roomComposerForm` directly.
+    private var roomComposerCanvas: some View {
+        ScrollView {
+            HStack(alignment: .top, spacing: 40) {
+                roomComposerForm
+                    .frame(maxWidth: 560)
+                composerPreview
+                    .frame(width: 300)
+            }
+            .padding(28)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    /// Room name, objective, the seats, the opening, one Create button. The
+    /// same `createScenario()` call whichever canvas hosts it.
+    private var roomComposerForm: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(S.Create.title).font(.title2.bold())
+                Text(S.Create.subtitle)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+            TextField(S.Rooms.identityPlaceholder, text: $model.newScenarioID)
+                .onSubmit {
+                    guard !model.isBusy else { return }
+                    Task { await model.createScenario() }
+                }
+            TextField(S.Rooms.objectivePlaceholder, text: $model.newScenarioObjective)
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text(S.Create.seatsTitle).font(.callout.bold())
+                ForEach($model.newRoomSeats) { $seat in
+                    seatRow($seat)
+                }
+                Button {
+                    model.addSeat()
+                } label: {
+                    Label(S.Create.seatAdd, systemImage: "plus.circle")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Color.accentColor)
+                .disabled(model.interactiveTemplates.isEmpty)
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text(S.Create.playbookTitle).font(.callout.bold())
+                Picker(S.Create.playbookTitle, selection: $model.newScenarioPlaybook) {
+                    ForEach(["pairing", "peer-review", "none"], id: \.self) { id in
+                        Text(S.Create.playbookName(id)).tag(id)
+                    }
+                }
+                .pickerStyle(.radioGroup)
+                .labelsHidden()
+                Text(S.Create.playbookDetail(model.newScenarioPlaybook))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack {
+                Button(S.Rooms.createButton) { Task { await model.createScenario() } }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(model.selectedProject == nil || model.isBusy)
+                if !model.scenarios.isEmpty {
+                    Button(S.Create.cancel) { model.isComposingRoom = false }
+                }
+                Spacer()
+            }
+            validationBanner(for: .scenarioCreate)
+        }
+    }
+
+    /// One seat: name, CLI, note, remove — plus the one line that explains
+    /// why this seat cannot be created yet, or that its CLI is not installed.
+    private func seatRow(_ seat: Binding<RoomSeat>) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 8) {
+                TextField(S.Colleagues.identityPlaceholder, text: seat.name)
+                    .frame(width: 150)
+                Picker(S.Colleagues.cliPicker, selection: seat.templateID) {
+                    ForEach(model.interactiveTemplates) { template in
+                        Text(template.displayName).tag(Optional(template.id))
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 130)
+                TextField(S.Create.seatNote, text: seat.note)
+                Button {
+                    model.removeSeat(seat.wrappedValue.id)
+                } label: {
+                    Image(systemName: "minus.circle")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .disabled(model.newRoomSeats.count <= 1)
+                .help(S.Colleagues.deleteMenu)
+            }
+            if let problem = model.seatRowProblem(seat.wrappedValue) {
+                Text(problem)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            } else if model.isCLIMissing(templateID: seat.wrappedValue.templateID),
+                let template = model.templates.first(where: { $0.id == seat.wrappedValue.templateID }) {
+                Text(S.Create.cliMissing(template.displayName + " CLI"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    /// What each colleague's startup prompt will carry, and the three facts
+    /// about rules that hold from the moment the room exists.
+    private var composerPreview: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(S.Create.previewTitle)
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+            VStack(alignment: .leading, spacing: 8) {
+                Text(
+                    model.newScenarioObjective.isEmpty
+                        ? S.Rooms.objectivePlaceholder : model.newScenarioObjective
+                )
+                .font(.callout)
+                .foregroundStyle(model.newScenarioObjective.isEmpty ? .tertiary : .primary)
+                .lineLimit(3)
+                ForEach(model.newRoomSeats) { seat in
+                    VStack(alignment: .leading, spacing: 1) {
+                        HStack(spacing: 6) {
+                            Text(seat.name.isEmpty ? "—" : seat.name).font(.callout.bold())
+                            Text(
+                                S.Create.previewColleagues(
+                                    model.newRoomSeats.filter { $0.id != seat.id }
+                                        .map(\.name).joined(separator: ", ")
+                                )
+                            )
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        }
+                        if !seat.note.isEmpty {
+                            Text(S.Colleagues.noteMeta(seat.note))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                Text(S.Create.playbookDetail(model.newScenarioPlaybook))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
+
+            Text(S.Create.rulesTitle)
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+            ForEach([S.Create.rulesOpen, S.Create.rulesJournal, S.Create.rulesProject], id: \.self) { rule in
+                Label(rule, systemImage: "checkmark.circle")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
     private var firstUsePreview: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(S.Rooms.onboardingPreviewTitle)
@@ -1221,9 +1353,14 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 6))
 
-            Label(S.Rooms.onboardingNoColleagues, systemImage: "person.2")
-                .font(.caption)
-                .foregroundStyle(.tertiary)
+            Label(
+                model.newRoomSeats.isEmpty
+                    ? S.Rooms.onboardingNoColleagues
+                    : model.newRoomSeats.map(\.name).joined(separator: " · "),
+                systemImage: "person.2"
+            )
+            .font(.caption)
+            .foregroundStyle(.tertiary)
             Divider()
             Label(S.Rooms.onboardingNextStep, systemImage: "square.stack.3d.up")
                 .font(.caption)
@@ -1423,11 +1560,16 @@ struct ContentView: View {
                 }
             }
             HStack {
-                TextField(S.Colleagues.identityPlaceholder, text: $model.newParticipantID)
-                    .onSubmit {
-                        Task { await model.addParticipant() }
-                    }
-                Picker(S.Colleagues.templatePicker, selection: $model.selectedTemplateID) {
+                TextField(
+                    S.Colleagues.identityPlaceholder,
+                    text: $model.newParticipantID,
+                    prompt: Text(model.suggestedParticipantName)
+                )
+                .frame(minWidth: 120)
+                .onSubmit {
+                    Task { await model.addParticipant() }
+                }
+                Picker(S.Colleagues.cliPicker, selection: $model.selectedTemplateID) {
                     ForEach(model.interactiveTemplates) { template in
                         Text(template.displayName).tag(Optional(template.id))
                     }
@@ -1440,7 +1582,12 @@ struct ContentView: View {
                         }
                     }
                 }
-                .frame(minWidth: 180)
+                .labelsHidden()
+                .frame(minWidth: 130)
+                TextField(S.Colleagues.notePlaceholder, text: $model.newParticipantNote)
+                    .onSubmit {
+                        Task { await model.addParticipant() }
+                    }
                 Button(S.Colleagues.add) { Task { await model.addParticipant() } }
             }
             .padding(.vertical, 4)
@@ -1466,6 +1613,9 @@ struct ContentView: View {
         if model.participants.isEmpty { return S.Colleagues.noneYet }
         let attention = model.participants.filter { $0.presentationClass == .attention }.count
         if attention > 0 { return S.Colleagues.attentionCount(attention) }
+        if model.policyStatus?.isRoomWide == true {
+            return S.Colleagues.runningCountOpen(model.runningParticipantCount)
+        }
         return S.Colleagues.runningCount(model.runningParticipantCount)
     }
 
@@ -1617,6 +1767,12 @@ struct ContentView: View {
                     .font(.caption)
                     .foregroundStyle(issued || inactive ? Color.secondary : Color.orange)
                     .help(issued || inactive ? "" : S.Objective.pendingIssuanceHelp)
+            }
+            if !participant.note.isEmpty {
+                Text("· " + S.Colleagues.noteMeta(participant.note))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
         }
     }
@@ -1928,22 +2084,48 @@ struct ContentView: View {
 
     private var policySection: some View {
         VStack(alignment: .leading, spacing: 12) {
-                if let status = model.policyStatus {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(status.policyID).font(.callout.bold())
-                            Text(S.Policy.version(status.policyVersion))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        PresentationBadge(
-                            cls: .policy(requiresReplan: status.requiresReplan),
-                            label: HarnessViewModel.humanState(
-                                status.requiresReplan ? "re-plan required" : "current"
-                            )
+            if let status = model.policyStatus {
+                HStack(alignment: .top) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(status.isRoomWide ? S.Policy.roomWide : status.policyID)
+                            .font(.callout.bold())
+                        Text(
+                            status.isRoomWide
+                                ? S.Policy.roomWideDetail(policyMembersLine)
+                                : S.Policy.version(status.policyVersion)
                         )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                     }
+                    Spacer()
+                    PresentationBadge(
+                        cls: .policy(requiresReplan: status.requiresReplan),
+                        label: HarnessViewModel.humanState(
+                            status.requiresReplan ? "re-plan required" : "current"
+                        )
+                    )
+                }
+                if status.isRoomWide {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(S.Policy.kinds).font(.caption.bold())
+                        LazyVGrid(
+                            columns: [GridItem(.adaptive(minimum: 90), spacing: 6)],
+                            alignment: .leading,
+                            spacing: 6
+                        ) {
+                            ForEach(HarnessViewModel.openMessageKinds, id: \.self) { kind in
+                                Text(S.Deliveries.kindNoun(kind))
+                                    .font(.caption)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 3)
+                                    .background(.secondary.opacity(0.12), in: Capsule())
+                            }
+                        }
+                        Text(S.Policy.kindsNote)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
                     if !status.generationDrift.isEmpty {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(S.Policy.generationChanged)
@@ -1958,49 +2140,47 @@ struct ContentView: View {
                         .padding(8)
                         .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
                     }
-                } else {
-                    Text(S.Policy.noActivePolicy)
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
+                    Button(S.Policy.revert) { Task { await model.resetDefaultPolicy() } }
+                        .controlSize(.small)
+                        .disabled(model.isBusy)
                 }
+            } else {
+                Text(S.Policy.noActivePolicy)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
 
-                HStack {
-                    Picker(
-                        S.Policy.teamTemplate,
-                        selection: Binding(
-                            get: { model.selectedPolicyTemplateID },
-                            set: { model.selectPolicyTemplate($0) }
+            if !model.policyTemplates.isEmpty {
+                Divider()
+                Text(S.Policy.project).font(.callout.bold())
+                ForEach(model.policyTemplates) { template in
+                    let missing = template.participantIDs.filter { id in
+                        !model.participants.contains { $0.id == id }
+                    }
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(
+                            S.Policy.projectFound(
+                                template.displayName,
+                                template.participantIDs.joined(separator: ", ")
+                            )
                         )
-                    ) {
-                        ForEach(model.policyTemplates) { template in
-                            Text(template.displayName).tag(Optional(template.id))
+                        .font(.caption)
+                        if let member = missing.first {
+                            Text(S.Policy.cannotEnable(member))
+                                .font(.caption.bold())
+                                .foregroundStyle(.orange)
+                            Text(S.Policy.cannotEnableDetail(member))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else if model.policyStatus?.policyID != template.id
+                            || model.policyStatus?.requiresReplan == true {
+                            Button(S.Policy.enable) {
+                                Task { await model.enableProjectPolicy(template) }
+                            }
+                            .controlSize(.small)
+                            .disabled(model.isBusy)
                         }
                     }
-                    .frame(minWidth: 240)
-                    Button(
-                        model.policyStatus?.requiresReplan == true
-                            ? S.Policy.createRepairPlan
-                            : S.Policy.previewPlan
-                    ) {
-                        Task { await model.planSelectedPolicy() }
-                    }
-                    .controlSize(.small)
-                    .disabled(model.selectedPolicyTemplate == nil)
-                    Button(S.Policy.applyPlan) {
-                        Task { await model.applySelectedPolicyPlan() }
-                    }
-                    .controlSize(.small)
-                    .disabled(
-                        model.policyPlan?.canApply != true
-                            || model.policyPlan?.templateID
-                                != model.selectedPolicyTemplateID
-                    )
-                }
-
-                if let template = model.selectedPolicyTemplate {
-                    Text(S.Policy.teamLine(template.participantIDs.joined(separator: ", ")))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
                 }
 
                 if let plan = model.policyPlan {
@@ -2021,13 +2201,7 @@ struct ContentView: View {
                                         : "xmark.circle.fill"
                                 )
                                 .foregroundStyle(member.isPresent ? .green : .red)
-                                Text(
-                                    member.templateParticipantID.map {
-                                        S.Policy.replacementMember(
-                                            member.participantID, fills: $0
-                                        )
-                                    } ?? member.participantID
-                                )
+                                Text(member.participantID)
                                 Spacer()
                                 Text(
                                     member.generation.map { "g\($0)" } ?? S.Policy.memberMissing
@@ -2043,7 +2217,7 @@ struct ContentView: View {
                                 )
                                 .font(.callout.bold())
                                 Text(
-                                    "\(route.messageKind) · \(route.effect)"
+                                    "\(S.Deliveries.kindNoun(route.messageKind)) · \(route.effect)"
                                         + (route.maxAttempts.map { S.Policy.upToAttempts($0) } ?? "")
                                 )
                                 .font(.caption)
@@ -2055,12 +2229,28 @@ struct ContentView: View {
                                 .font(.caption)
                                 .foregroundStyle(.red)
                         }
+                        if plan.canApply {
+                            Button(S.Policy.confirmEnable) {
+                                Task { await model.applySelectedPolicyPlan() }
+                            }
+                            .controlSize(.small)
+                            .disabled(model.isBusy)
+                        }
                     }
                     .padding(10)
                     .background(.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
                 }
+                Text(S.Policy.explicit)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
-            .padding(.vertical, 6)
+        }
+        .padding(.vertical, 6)
+    }
+
+    /// `claude#3, codex#2` — the exact colleagues the room-wide rules bind.
+    private var policyMembersLine: String {
+        model.participants.map { "\($0.id)#\($0.generation)" }.joined(separator: ", ")
     }
 
     private var deliveriesSection: some View {
@@ -2281,6 +2471,15 @@ struct ContentView: View {
     /// attention colour in any room.
     private func collaborationHealthSection(neutral: Bool) -> some View {
         VStack(alignment: .leading, spacing: 6) {
+            PolicyFactRow(
+                title: S.Policy.progressTitle,
+                value: model.policyStatus.map {
+                    $0.isRoomWide
+                        ? S.Policy.progressOpen
+                        : S.Policy.progressProject($0.policyID, $0.policyVersion)
+                } ?? S.Policy.progressPending,
+                cls: model.policyStatus.map { .policy(requiresReplan: $0.requiresReplan) }
+            )
             if let health = model.collaborationHealth {
                 CollaborationHealthMetricRow(
                     title: S.CollaborationHealth.teamReady,
@@ -3012,6 +3211,34 @@ private struct DeliveryKindDistributionPanel: View {
 /// One collaboration-health fact as a label/value row. `cls == nil` is the
 /// neutral row (unobserved, or expected-incomplete in an inactive room):
 /// grey text, an empty circle, no colour claim either way.
+/// A fact, not a metric: the rules in force, in the same row grammar as
+/// the health metrics so the column reads as one list.
+private struct PolicyFactRow: View {
+    let title: String
+    let value: String
+    let cls: PresentationClass?
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: cls?.symbolName ?? "circle")
+                .font(.caption)
+                .foregroundStyle(cls?.color ?? Color.secondary.opacity(0.6))
+                .frame(width: 14)
+            Text(title)
+                .font(.callout)
+                .foregroundStyle(cls == nil ? Color.secondary : Color.primary)
+            Spacer(minLength: 8)
+            Text(value)
+                .font(.caption)
+                .foregroundStyle(cls == .attention ? Color.orange : Color.secondary)
+                .lineLimit(1)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(title)
+        .accessibilityValue(value)
+    }
+}
+
 private struct CollaborationHealthMetricRow: View {
     let title: String
     let value: Int
