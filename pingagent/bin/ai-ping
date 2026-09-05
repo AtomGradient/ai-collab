@@ -125,7 +125,20 @@ fi
 # state.  Environment values only locate the Host-issued context and canonical
 # product client; Host still requires the scoped capability plus owned-process
 # proof before accepting the sender.
-if [[ -n "${AI_COLLAB_HARNESS_CONTEXT:-}" ]]; then
+HARNESS_MANAGED=false
+for marker in AI_COLLAB_HARNESS_CONTEXT AI_COLLAB_HARNESS_CLIENT_EXECUTABLE \
+    AI_COLLAB_HARNESS_CLIENT_PYTHONPATH AI_COLLAB_HARNESS_COLLABORATION_CONTEXT; do
+  if [[ -n "${!marker:-}" ]]; then
+    HARNESS_MANAGED=true
+  fi
+done
+if $HARNESS_MANAGED; then
+  # Any Harness marker means a Host-managed invocation; an incomplete
+  # environment fails here rather than falling through to the legacy mailbox.
+  if [[ -z "${AI_COLLAB_HARNESS_CONTEXT:-}" ]]; then
+    echo "Harness participant environment is incomplete (AI_COLLAB_HARNESS_CONTEXT is missing); refusing to use the legacy mailbox." >&2
+    exit 1
+  fi
   if $FROM_EXPLICIT; then
     echo "--from is forbidden inside a Harness Scenario; sender identity is scoped by Host." >&2
     exit 1

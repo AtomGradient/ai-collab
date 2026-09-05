@@ -478,7 +478,7 @@ def main() -> int:
     try:
         if arguments.unregister:
             unregister(arguments.target)
-            removed = remove_commands(DEFAULT_STATE_ROOT)
+            removed = remove_commands(DEFAULT_STATE_ROOT, app=arguments.target)
             result = {
                 "status": "unregistered",
                 "target": str(arguments.target),

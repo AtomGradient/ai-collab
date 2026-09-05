@@ -10,6 +10,7 @@ import argparse
 import json
 import os
 import signal
+import subprocess
 import sys
 import threading
 from collections.abc import Sequence
@@ -22,7 +23,12 @@ from .project import ProjectError
 from .security import SecurityError
 from .store import StoreError
 from .workspace import WorkspaceError
-from .pingagent_commands import CommandLinkError, app_bundle_for, install_commands
+from .pingagent_commands import (
+    CommandLinkError,
+    app_bundle_for,
+    install_commands,
+    verify_product_bundle,
+)
 
 
 def default_state_root() -> Path:
@@ -70,8 +76,9 @@ def _refresh_pingagent_commands(state_root: Path) -> None:
     if app is None:
         return
     try:
+        verify_product_bundle(app)
         install_commands(app, state_root)
-    except (CommandLinkError, OSError) as exc:
+    except (CommandLinkError, OSError, subprocess.TimeoutExpired) as exc:
         print(
             json.dumps(
                 {"status": "pingagent-commands-not-linked", "reason": str(exc)},

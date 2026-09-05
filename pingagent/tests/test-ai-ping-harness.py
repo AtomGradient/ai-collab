@@ -158,6 +158,7 @@ def test_harness_mode_fails_closed_on_invalid_context(tmp_path: Path) -> None:
         "relative-client",
         "relative-pythonpath",
         "missing-client",
+        "missing-context",
     )
     for case in cases:
         case_root = tmp_path / case
@@ -171,6 +172,10 @@ def test_harness_mode_fails_closed_on_invalid_context(tmp_path: Path) -> None:
             environment["AI_COLLAB_HARNESS_CLIENT_EXECUTABLE"] = "participant-client"
         elif case == "relative-pythonpath":
             environment["AI_COLLAB_HARNESS_CLIENT_PYTHONPATH"] = "client-pythonpath"
+        elif case == "missing-context":
+            # Client markers survive but the context does not: still a
+            # managed invocation, never a legacy mailbox send.
+            del environment["AI_COLLAB_HARNESS_CONTEXT"]
         else:
             environment["AI_COLLAB_HARNESS_CLIENT_EXECUTABLE"] = str(
                 case_root / "missing-participant-client"
@@ -189,3 +194,6 @@ def test_harness_mode_fails_closed_on_invalid_context(tmp_path: Path) -> None:
         assert completed.returncode != 0, case
         assert not log.exists(), case
         assert not (case_root / ".ai-mailbox").exists(), case
+        if case == "missing-context":
+            assert "AI_COLLAB_HARNESS_CONTEXT" in completed.stderr, completed.stderr
+            assert "No .ai-mailbox" not in completed.stderr

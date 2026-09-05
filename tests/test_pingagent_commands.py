@@ -6,11 +6,15 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import stat
+import subprocess
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+import ai_collab.pingagent_commands as commands_module
+import ai_collab.service as service_module
 from ai_collab.pingagent_commands import (
     PINGAGENT_COMMANDS,
     CommandLinkError,
@@ -18,6 +22,7 @@ from ai_collab.pingagent_commands import (
     install_commands,
     provenance,
     remove_commands,
+    verify_product_bundle,
 )
 
 
@@ -58,7 +63,9 @@ def _entries(directory: Path) -> dict[str, Any]:
 def test_fresh_install_links_every_command_and_writes_a_receipt(tmp_path: Path) -> None:
     app = _fake_app(tmp_path)
     state = tmp_path / "state"
-    commands = tmp_path / "home with space" / ".local" / "bin"
+    home = tmp_path / "home with space"
+    home.mkdir()
+    commands = home / ".local" / "bin"
 
     result = install_commands(app, state, commands)
 
@@ -181,12 +188,46 @@ def test_remove_only_removes_links_into_an_app(tmp_path: Path) -> None:
     (commands / "ai-collab-watch").unlink()
     (commands / "ai-collab-watch").write_text("#!/bin/sh\n", encoding="utf-8")
 
+    # A link retargeted to another App is not ours any more.
+    other = _fake_app(tmp_path / "elsewhere", "Other.app")
+    (commands / "ai-ping").unlink()
+    os.symlink(_app_bin(other) / "ai-ping", commands / "ai-ping")
+
     removed = remove_commands(state, commands)
 
-    assert removed == sorted(set(PINGAGENT_COMMANDS) - {"ai-pane-register", "ai-collab-watch"})
+    assert removed == sorted(
+        set(PINGAGENT_COMMANDS) - {"ai-pane-register", "ai-collab-watch", "ai-ping"}
+    )
     assert Path(os.readlink(commands / "ai-pane-register")) == checkout / "ai-pane-register"
     assert (commands / "ai-collab-watch").is_file()
+    assert Path(os.readlink(commands / "ai-ping")) == _app_bin(other) / "ai-ping"
     assert not (state / "installation" / "pingagent-commands.json").exists()
+
+
+def test_remove_without_a_trustworthy_receipt_removes_nothing(tmp_path: Path) -> None:
+    app = _fake_app(tmp_path)
+    state = tmp_path / "state"
+    commands = tmp_path / ".local" / "bin"
+    install_commands(app, state, commands)
+    receipt = state / "installation" / "pingagent-commands.json"
+    before = _entries(commands)
+
+    receipt.write_text("{not json", encoding="utf-8")
+    assert remove_commands(state, commands) == []
+    assert _entries(commands) == before
+
+    receipt.unlink()
+    assert remove_commands(state, commands) == []
+    assert _entries(commands) == before
+
+    install_commands(app, state, commands)
+    receipt.chmod(0o644)
+    assert remove_commands(state, commands) == []
+    assert _entries(commands) == before
+
+    receipt.chmod(0o600)
+    assert remove_commands(state, commands, app=tmp_path / "elsewhere" / "Other.app") == []
+    assert remove_commands(state, commands, app=app) == sorted(PINGAGENT_COMMANDS)
 
 
 def test_app_requires_every_command_before_touching_anything(tmp_path: Path) -> None:
@@ -278,3 +319,130 @@ def test_command_directory_override(tmp_path: Path, monkeypatch: Any) -> None:
     assert default_command_directory() == tmp_path / "bin"
     monkeypatch.delenv("AI_COLLAB_COMMAND_DIRECTORY")
     assert default_command_directory() == Path.home() / ".local" / "bin"
+
+
+def test_install_is_transactional_across_verification_and_receipt(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    app = _fake_app(tmp_path)
+    checkout = _checkout(tmp_path / "Codes")
+    commands = tmp_path / ".local" / "bin"
+    commands.mkdir(parents=True)
+    for command in PINGAGENT_COMMANDS[:3]:
+        os.symlink(checkout / command, commands / command)
+    copied = commands / "ai-ping"
+    copied.write_text(
+        "#!/usr/bin/env bash\n# SPDX-License-Identifier: MIT\n"
+        "# Copyright © 2026 AtomGradient\n#\n# ai-ping <to>\n",
+        encoding="utf-8",
+    )
+    copied.chmod(0o700)
+    before = _entries(commands)
+    state = tmp_path / "state"
+
+    def failing_receipt(path: Path, value: dict[str, Any]) -> None:
+        raise OSError("receipt disk full")
+
+    monkeypatch.setattr(commands_module, "_write_receipt", failing_receipt)
+    with pytest.raises(OSError, match="receipt disk full"):
+        install_commands(app, state, commands)
+    assert _entries(commands) == before
+    assert stat.S_IMODE(copied.lstat().st_mode) == 0o700
+    assert not (state / "installation" / "pingagent-commands.json").exists()
+    monkeypatch.undo()
+
+    def failing_verification(directory: Path, source_bin: Path) -> None:
+        raise CommandLinkError("verification mismatch")
+
+    monkeypatch.setattr(commands_module, "_verify_links", failing_verification)
+    with pytest.raises(CommandLinkError, match="verification mismatch"):
+        install_commands(app, state, commands)
+    assert _entries(commands) == before
+    assert stat.S_IMODE(copied.lstat().st_mode) == 0o700
+    monkeypatch.undo()
+
+    # An unsafe receipt location is refused before any command changes.
+    shutil.rmtree(state / "installation", ignore_errors=True)
+    state.mkdir(parents=True, exist_ok=True)
+    os.symlink(tmp_path / "elsewhere", state / "installation")
+    with pytest.raises(CommandLinkError, match="installation state directory"):
+        install_commands(app, state, commands)
+    assert _entries(commands) == before
+
+
+def test_unsafe_command_directory_or_parent_is_refused(tmp_path: Path) -> None:
+    app = _fake_app(tmp_path)
+    state = tmp_path / "state"
+
+    loose = tmp_path / "loose" / "bin"
+    loose.mkdir(parents=True)
+    loose.chmod(0o777)
+    with pytest.raises(CommandLinkError, match="world-writable"):
+        install_commands(app, state, loose)
+    assert list(loose.iterdir()) == []
+
+    real_parent = tmp_path / "real-parent"
+    real_parent.mkdir()
+    linked_parent = tmp_path / "linked-parent"
+    os.symlink(real_parent, linked_parent)
+    with pytest.raises(CommandLinkError, match="parent must be a real directory"):
+        install_commands(app, state, linked_parent / "bin")
+    assert not (real_parent / "bin").exists()
+
+    loose_parent = tmp_path / "loose-parent"
+    loose_parent.mkdir()
+    loose_parent.chmod(0o777)
+    with pytest.raises(CommandLinkError, match="parent is group- or world-writable"):
+        install_commands(app, state, loose_parent / "bin")
+    assert not (loose_parent / "bin").exists()
+
+
+def test_host_repair_links_only_a_verified_product_bundle(
+    tmp_path: Path, monkeypatch: Any, capsys: Any
+) -> None:
+    import plistlib
+
+    calls: list[Path] = []
+    monkeypatch.setattr(service_module, "install_commands", lambda app, state: calls.append(app))
+
+    # Not inside a bundle at all: nothing happens.
+    monkeypatch.setattr(service_module.sys, "executable", str(tmp_path / "venv" / "bin" / "python3"))
+    (tmp_path / "venv" / "bin").mkdir(parents=True)
+    (tmp_path / "venv" / "bin" / "python3").write_text("", encoding="utf-8")
+    service_module._refresh_pingagent_commands(tmp_path / "state")  # noqa: SLF001
+    assert calls == []
+
+    # A bundle with another identity is refused and reported, never linked.
+    other = tmp_path / "Other.app"
+    executable = other / "Contents" / "Resources" / "HarnessService" / "runtime" / "bin" / "python3"
+    executable.parent.mkdir(parents=True)
+    executable.write_text("", encoding="utf-8")
+    with (other / "Contents" / "Info.plist").open("wb") as stream:
+        plistlib.dump({"CFBundleIdentifier": "com.example.other"}, stream)
+    monkeypatch.setattr(service_module.sys, "executable", str(executable))
+    service_module._refresh_pingagent_commands(tmp_path / "state")  # noqa: SLF001
+    assert calls == []
+    assert "pingagent-commands-not-linked" in capsys.readouterr().err
+
+    # The product bundle with a verifying signature is linked.
+    with (other / "Contents" / "Info.plist").open("wb") as stream:
+        plistlib.dump({"CFBundleIdentifier": "com.atomgradient.aicollab"}, stream)
+    monkeypatch.setattr(
+        commands_module.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, ""),
+    )
+    service_module._refresh_pingagent_commands(tmp_path / "state")  # noqa: SLF001
+    assert calls == [other]
+
+    # A failing signature check is refused even with the right identity.
+    calls.clear()
+    monkeypatch.setattr(
+        commands_module.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args, 1, "invalid signature"),
+    )
+    service_module._refresh_pingagent_commands(tmp_path / "state")  # noqa: SLF001
+    assert calls == []
+    with pytest.raises(CommandLinkError, match="does not verify"):
+        verify_product_bundle(other)
