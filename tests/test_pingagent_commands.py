@@ -116,6 +116,24 @@ def test_recorded_upgrade_and_verified_current_target_are_migratable(setup, tmp_
     assert entries(directory) == before
 
 
+def test_noncanonical_current_app_link_is_repaired_but_other_app_link_conflicts(setup, tmp_path) -> None:
+    app, state, directory = setup
+    directory.mkdir(parents=True)
+    link = directory / "ai-ping"
+    link.symlink_to(os.path.relpath(app / commands.PINGAGENT_BIN_RELATIVE / "ai-ping", directory))
+    status = commands.command_status(app, state, directory)
+    assert next(entry for entry in status["entries"] if entry["name"] == "ai-ping")["state"] == "repair"
+    assert commands.reconcile_commands(app, state, directory)["status"] == "ready"
+    assert os.readlink(link) == str(app / commands.PINGAGENT_BIN_RELATIVE / "ai-ping")
+    (state / "installation" / commands.RECEIPT_NAME).unlink()
+    other = fake_app(tmp_path / "other")
+    link.unlink()
+    link.symlink_to(os.path.relpath(other / commands.PINGAGENT_BIN_RELATIVE / "ai-ping", directory))
+    before = entries(directory)
+    assert commands.reconcile_commands(app, state, directory)["status"] == "conflict"
+    assert entries(directory) == before
+
+
 @pytest.mark.parametrize("bad", ["missing", "malformed", "mode", "target"])
 def test_invalid_receipts_grant_no_uninstall_authority(setup, bad) -> None:
     app, state, directory = setup
@@ -199,18 +217,23 @@ def test_failed_transaction_restores_links_original_inode_mode_and_receipt(setup
     assert receipt.read_bytes() == old_receipt
 
 
-def test_replace_rejects_unapproved_paths_and_unsafe_entries(setup) -> None:
+def test_replace_rejects_unapproved_paths_and_directories_but_preserves_file_mode(setup) -> None:
     app, state, directory = setup
     directory.mkdir(parents=True)
     path = directory / "ai-ping"
-    path.write_text("original")
+    path.mkdir()
     for wrong in (directory / "ai-watch-service", Path("ai-ping")):
         with pytest.raises(commands.CommandLinkError, match="six command"):
             commands.reconcile_commands(app, state, directory, replace=[wrong])
-    path.chmod(0o666)
     with pytest.raises(commands.CommandLinkError, match="cannot be explicitly replaced"):
         commands.reconcile_commands(app, state, directory, replace=[path])
-    assert path.read_text() == "original"
+    path.rmdir()
+    path.write_text("original")
+    path.chmod(0o666)
+    result = commands.reconcile_commands(app, state, directory, replace=[path])
+    original = Path(result["backup_directory"]) / path.name
+    assert original.read_text() == "original"
+    assert stat.S_IMODE(original.stat().st_mode) == 0o666
 
 
 @pytest.mark.parametrize("kind", ["unsigned", "adhoc", "invalid", "valid", "foreign"])
@@ -223,6 +246,7 @@ def test_product_verification_distinguishes_dev_from_broken_release(tmp_path, mo
             return subprocess.CompletedProcess(argv, 1 if kind == "unsigned" else 0, "",
                 "code object is not signed at all" if kind == "unsigned" else
                 "Signature=adhoc" if kind == "adhoc" else "Authority=Developer ID Application")
+        assert "--strict" in argv and "--deep" not in argv
         return subprocess.CompletedProcess(argv, 1 if kind == "invalid" else 0, "", "invalid signature")
     monkeypatch.setattr(commands.subprocess, "run", run)
     if kind in {"invalid", "foreign"}:

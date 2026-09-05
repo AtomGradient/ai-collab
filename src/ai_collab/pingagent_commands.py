@@ -92,7 +92,7 @@ def verify_product_bundle(app: Path) -> dict[str, str]:
     if "Signature=adhoc" in signing or "code object is not signed at all" in signing:
         return {"bundle": "unverified"}
     verified = subprocess.run(
-        ["/usr/bin/codesign", "--verify", "--deep", "--strict", str(app)],
+        ["/usr/bin/codesign", "--verify", "--strict", str(app)],
         capture_output=True, text=True, timeout=30, check=False,
     )
     if display.returncode != 0 or verified.returncode != 0:
@@ -130,9 +130,7 @@ def _entry(path: Path) -> dict[str, Any]:
     except FileNotFoundError:
         return {"kind": "absent"}
     kind = "link" if stat.S_ISLNK(details.st_mode) else "file" if stat.S_ISREG(details.st_mode) else "other"
-    value: dict[str, Any] = {
-        "kind": kind, "uid": details.st_uid, "mode": stat.S_IMODE(details.st_mode),
-    }
+    value: dict[str, Any] = {"kind": kind, "uid": details.st_uid}
     if kind == "link":
         value["target"] = os.readlink(path)
     return value
@@ -167,8 +165,7 @@ def command_status(app: Path, state_root: Path, command_directory: Path | None =
         state = "ready" if owned and value["target"] == str(target) else (
             "repair" if owned or value["kind"] == "absent" else "conflict"
         )
-        replaceable = (value["kind"] in {"file", "link"} and value["uid"] == os.getuid()
-                       and (value["kind"] == "link" or not value["mode"] & 0o022))
+        replaceable = value["kind"] in {"file", "link"} and value["uid"] == os.getuid()
         entries.append({"name": name, "path": str(path), "kind": value["kind"],
                         "target": value.get("target"), "state": state, "replaceable": replaceable})
     conflicts = [entry for entry in entries if entry["state"] == "conflict"]
