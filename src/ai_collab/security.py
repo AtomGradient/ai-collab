@@ -177,6 +177,7 @@ class SecurityAdapterCommand:
             for key, value in os.environ.items()
             if key
             in {
+                "HOME",  # Match workspace probes' user Git configuration (e.g. LFS).
                 "PATH",
                 "TMPDIR",
                 "LANG",

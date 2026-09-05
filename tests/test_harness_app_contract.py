@@ -1075,6 +1075,33 @@ def test_destroy_panel_only_dismisses_after_a_confirmed_success() -> None:
     assert "await model.forceDestroyScenario" in panel
 
 
+def test_destroy_panel_shows_pending_request_until_mutation_finishes() -> None:
+    content = (APP_ROOT / "ContentView.swift").read_text(encoding="utf-8")
+    panel = content.split("private struct DestroyPanel: View", 1)[1].split(
+        "// MARK: - ContentView", 1
+    )[0]
+    progress = panel.split("if model.isBusy {", 1)[1].split(
+        "if phase == .eligible", 1
+    )[0]
+    assert "ProgressView()" in progress
+    assert "S.Risk.destroyInProgress" in progress
+    assert "S.Risk.destroyAwaitingApprovalNote" in progress
+    assert "} else {\n                statusLine" in progress
+    assert "@State private var isBusy" not in panel
+    assert ".interactiveDismissDisabled(model.isBusy)" in panel
+    controls = panel.split("Button(S.Common.cancel) { dismiss() }", 1)[1].split(
+        ".padding(20)", 1
+    )[0]
+    assert controls.count(".disabled(model.isBusy)") == 4
+    for method in ("performDestroy", "performForceDelete"):
+        action = panel.split(f"private func {method}() async", 1)[1].split(
+            "let succeeded = await", 1
+        )[0]
+        assert "actionFailure = nil" in action
+    strings = (APP_ROOT / "Strings.swift").read_text(encoding="utf-8")
+    assert 't("Processing delete request…", "正在处理删除请求…")' in strings
+
+
 def test_guide_is_a_dismissable_centered_card_deck() -> None:
     """User decision 2026-08-21: guidance is a centered card the employee
     steps through and can always close — never a persistent overlay bar."""

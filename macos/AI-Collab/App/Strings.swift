@@ -994,6 +994,15 @@ enum S {
         static var destroyPreviewLoading: String {
             t("Loading destroy preview…", "正在加载删除预览…")
         }
+        static var destroyInProgress: String {
+            t("Processing delete request…", "正在处理删除请求…")
+        }
+        static var destroyAwaitingApprovalNote: String {
+            t(
+                "The task room will not be deleted without your approval.",
+                "未经你的确认，不会删除任务房间。"
+            )
+        }
         /// The panel's target (id + generation) no longer matches what is
         /// actually selected — recreated under the same name, or selection
         /// changed, while the panel was open. Neither delete action is

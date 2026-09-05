@@ -188,7 +188,21 @@ private struct DestroyPanel: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
-            statusLine
+            if model.isBusy {
+                HStack(spacing: 10) {
+                    ProgressView().controlSize(.small)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(S.Risk.destroyInProgress)
+                            .font(.callout)
+                        Text(S.Risk.destroyAwaitingApprovalNote)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .accessibilityElement(children: .combine)
+            } else {
+                statusLine
+            }
 
             if phase == .eligible, !model.destroyPreviewText.isEmpty {
                 ScrollView {
@@ -208,6 +222,7 @@ private struct DestroyPanel: View {
 
             HStack {
                 Button(S.Common.cancel) { dismiss() }
+                    .disabled(model.isBusy)
                 Spacer()
                 Button(S.Common.retry, systemImage: "arrow.clockwise") {
                     Task { await load() }
@@ -229,6 +244,7 @@ private struct DestroyPanel: View {
         }
         .padding(20)
         .frame(width: 460)
+        .interactiveDismissDisabled(model.isBusy)
         .task { await load() }
         .confirmationDialog(
             S.HighRisk.forceDestroyTitle,
@@ -310,6 +326,7 @@ private struct DestroyPanel: View {
             phase = .stale
             return
         }
+        actionFailure = nil
         model.dismissError()
         let succeeded = await model.destroyScenario()
         if DestroyFlowDecision.shouldDismissAfterAction(succeeded: succeeded) {
@@ -330,6 +347,7 @@ private struct DestroyPanel: View {
             phase = .stale
             return
         }
+        actionFailure = nil
         model.dismissError()
         let succeeded = await model.forceDestroyScenario(current)
         if DestroyFlowDecision.shouldDismissAfterAction(succeeded: succeeded) {

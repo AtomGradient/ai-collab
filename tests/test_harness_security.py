@@ -274,6 +274,73 @@ def test_runtime_matrix_exactly_covers_registry_and_high_risk_bindings(
             assert value["effect_preview_schema_digest"] is not None
 
 
+def test_security_adapter_preserves_home_for_git_workspace_observations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("UNRELATED_PRIVATE_TOKEN", "must-not-be-forwarded")
+    for key in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_COUNT"):
+        monkeypatch.delenv(key, raising=False)
+    (home / ".gitconfig").write_text(
+        '[filter "fixture"]\n\tclean = sed s/expanded/stored/g\n',
+        encoding="utf-8",
+    )
+    project = tmp_path / "project"
+    project.mkdir()
+
+    def git(*arguments: str) -> bytes:
+        return subprocess.check_output(
+            ["git", "-C", str(project), *arguments], stderr=subprocess.PIPE
+        )
+
+    git("init")
+    git("config", "user.email", "test@example.invalid")
+    git("config", "user.name", "Security Test")
+    git("config", "commit.gpgsign", "false")
+    (project / ".gitattributes").write_text("asset filter=fixture\n")
+    asset = project / "asset"
+    asset.write_text("expanded\n")
+    git("add", ".")
+    git("commit", "-m", "fixture")
+    # Like an LFS checkout: worktree bytes differ, but the user's clean filter
+    # proves they represent the committed content.
+    os.utime(asset, ns=(1_000_000_000, 1_000_000_000))
+    monkeypatch.setenv("GIT_OPTIONAL_LOCKS", "0")
+    expected = git("status", "--porcelain=v1", "--untracked-files=all").decode()
+    assert expected == ""
+
+    script = tmp_path / "adapter.py"
+    script.write_text(
+        "import json, os, subprocess, sys\n"
+        "request = json.load(sys.stdin)\n"
+        "status = subprocess.check_output(['git', '-C', os.environ['AI_COLLAB_PROJECT_ROOT'],\n"
+        "    'status', '--porcelain=v1', '--untracked-files=all'],\n"
+        "    env=dict(os.environ, GIT_OPTIONAL_LOCKS='0')).decode()\n"
+        "json.dump({'security_adapter_protocol_version': 1, 'adapter_id': 'test-security',\n"
+        "    'outcome': 'completed', 'result': {'status': status,\n"
+        "    'leaked_token': 'UNRELATED_PRIVATE_TOKEN' in os.environ}}, sys.stdout)\n",
+        encoding="utf-8",
+    )
+    config = tmp_path / "security.json"
+    config.write_text(
+        json.dumps({
+            "schema_version": 1,
+            "adapter_id": "test-security",
+            "command": ["python3", "adapter.py"],
+            "working_directory": ".",
+        }),
+        encoding="utf-8",
+    )
+    adapter = security_module.SecurityAdapterCommand(config)
+    observed = adapter.call("observe", {}, project_root=project)
+    assert observed == {"status": expected, "leaked_token": False}
+
+    asset.write_text("actual change\n")
+    assert adapter.call("observe", {}, project_root=project)["status"] == " M asset\n"
+
+
 def test_default_security_adapter_proves_only_an_exact_empty_workspace_husk(
     tmp_path: Path,
 ) -> None:
