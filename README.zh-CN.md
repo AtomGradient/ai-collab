@@ -15,9 +15,10 @@ macOS 应用加一个本地 Host（后台服务），把 Agent CLI —— Codex�
 
 ![任务房间工作台：同事列表、协作动态、协作进度列](docs/images/readme-workbench.png)
 
-*任务房间工作台（v2 设计稿）。左：项目与房间。中：房间里的 AI 同事，以及
-他们之间的投递，最新的在前。右：生命周期阶段、四个协作健康计数、需要关注
-列表。界面有中文和英文两种语言。*
+*任务房间工作台（v3 设计稿）。左：项目与房间。中：房间里的 AI 同事 —— 名字
+随意、各自可带一条备注 —— 以及他们之间的投递，最新的在前；区头标明房间内互通。
+右：生命周期阶段、四个协作健康计数、生效中的协作规则、需要关注列表。界面有
+中文和英文两种语言。*
 
 博客：[AI Collab — 开源多 AI 协作](https://www.atomgradient.com/zh/blog/ai-collab-open-source-multi-ai-collaboration)
 （[English](https://www.atomgradient.com/en/blog/ai-collab-open-source-multi-ai-collaboration)）
@@ -45,13 +46,14 @@ macOS 应用加一个本地 Host（后台服务），把 Agent CLI —— Codex�
   通过 overlay 文件加入。Host 只在整屏匹配已知模式、且位于 Host 已验证的
   工作区内时，才回答厂商的启动提示（工作区信任、更新提示）。不认识的提示不
   回答；该同事被标为「需要关注」，屏幕内容作为证据。
-- **按规则路由的投递。** 团队模板（分析员 + 审核员，或分析员 + 审核员 +
-  综合员）列出每位同事可以向谁发哪些种类的消息，以及重试配置。一条投递经过
+- **按规则路由的投递。** 房间默认互通：任何同事可以向任何同事发任何种类的
+  消息，同事增删、替换后由 Host 自动维护。项目自带的策略文件可以收紧这一点，
+  但只在「协作规则」里显式启用后才生效。一条投递经过
   `queued → delivery_attempted → delivered → consumed`；只有接收方 Agent 用
   这条投递的消费令牌作答，才记为 `consumed`。
 - **无时钟的状态。** 存储不保存墙上时钟；日志按序号排列。
   [`contracts/`](contracts/) 里的七份 JSON-schema 契约定义了 IPC、状态、规则
-  与投递、权限确认、驱动、门禁、工作区环境。627 个 Python 测试和 111 个 Swift
+  与投递、权限确认、驱动、门禁、工作区环境。682 个 Python 测试和 124 个 Swift
   测试在无网络下运行。
 
 ## 界面
@@ -63,14 +65,19 @@ macOS 应用加一个本地 Host（后台服务），把 Agent CLI —— Codex�
 带自己的操作。房间列宽度不足 760 pt 时 —— 这里是因为检查器打开 —— 协作进度折入
 列表，如图。*
 
-![刚创建的空房间](docs/images/readme-empty-room.png)
+![新建任务房间表单：名字、目标、两个同事席位、开场白、预览](docs/images/readme-create-room.png)
 
-*刚创建的房间（v2 设计稿）：还没有同事，有添加同事的输入行，协作动态区说明
-之后会出现什么。*
+*新建任务房间（v3 设计稿）。默认两个席位 —— `claude` 与 `codex`，按 CLI 命名；
+可以改名、换 CLI、加备注或再加一位。开场白（默认结对编程）只是写进每位同事
+启动提示的一段文字。右侧预览显示两位同事启动时会看到什么，以及创建后即成立
+的规则：任何同事可向任何同事发消息，Host 自动维护，项目策略文件只能显式启用。
+创建不启动任何会话。*
 
-![首次使用画布：注册项目、创建第一个房间](docs/images/readme-first-use.png)
+![协作规则检查器：房间内互通、可发送的种类、不能启用的项目策略](docs/images/readme-policy.png)
 
-*已注册项目但还没有房间（v2 设计稿）：创建表单在画布里，下面列出后续步骤。*
+*协作规则（v3 设计稿）。Host 维护的房间内互通规则，绑定当前同事、随增删重算；
+每位可以发送的种类；「高级」里是项目自己的策略文件 —— 这里因为房间里没有名为
+`analyst` 的同事而不能启用，当前规则保留不变。*
 
 ![两个房间的四个同事终端窗口互发投递](docs/images/readme-with-tuis.png)
 
@@ -90,10 +97,12 @@ macOS 应用加一个本地 Host（后台服务），把 Agent CLI —— Codex�
    `defaults write com.googlecode.iterm2 EnableAPIServer -bool true` 和
    `defaults write com.googlecode.iterm2 NoSyncEnableAPIServer -bool true`。
 3. **注册项目** —— 选一个 Git 目录。
-4. 创建任务房间，写目标，点 **准备工作区**。
-5. 添加同事，点 **恢复房间**，在「协作规则」里应用一个团队模板。没有规则时
-   投递会被拒绝。
-6. **全部启动**。聚焦某位同事的窗口布置任务。房间的「协作动态」列出每一条
+4. **新建房间…** —— 起名字，保留或改掉默认的两个席位（`claude`、`codex`；
+   名字随意、CLI 任选、各可带一条备注），选一个开场白（默认结对编程），
+   **创建**。创建不启动任何会话。
+5. **准备工作区**，然后 **全部启动**。同事之间随即可以互发消息，不需要应用
+   任何模板。
+6. 聚焦某位同事的窗口布置任务。房间的「协作动态」列出每一条
    投递；「协作进度」列出需要人处理的事。上手引导卡片可从工具栏 **?** 重新打开。
 
 ## 工作原理
@@ -135,8 +144,9 @@ macOS 应用加一个本地 Host（后台服务），把 Agent CLI —— Codex�
   `~/Library/Application Support/AI Collab/runtime_profiles.overlay.json`。
   行按 `profile_id` 替换内置 profile 或新增，校验方式与内置注册表相同。内置
   的 Codex 与 Claude profile 跳过审批提示。
-- **团队规则**：`ai_collab_team_policies.json` 保存内置的团队模板、角色、路由
-  规则和重试配置。
+- **项目策略**：项目可以自带 `ai_collab_team_policies.json`（指名成员、路由
+  规则、重试配置）。App 在「协作规则」里列出它，只在显式点击后启用；「改回
+  房间内互通」恢复默认。
 - **Adapter**：在 `~/Library/Application Support/AI Collab/` 放同名文件即可替换
   内置版本（`ai_collab_harness_adapter.json`、`ai_collab_participant_driver.json`、
   `ai_collab_security_adapter.json`）。配置内的路径只相对配置所在目录解析。

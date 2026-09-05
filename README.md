@@ -16,11 +16,12 @@ and journals every message.
 
 ![Task room workbench: colleague list, collaboration activity, progress column](docs/images/readme-workbench.png)
 
-*Task room workbench (v2 design). Left: projects and rooms. Center: the
-room's AI colleagues and the deliveries between them, newest first. Right:
-lifecycle stage, four collaboration-health counts, and the needs-attention
-list. The UI ships in English and Simplified Chinese; the captures in this
-README show the Chinese UI.*
+*Task room workbench (v3 design). Left: projects and rooms. Center: the
+room's AI colleagues — any name, each with an optional note — and the
+deliveries between them, newest first; the header says the room is
+room-wide. Right: lifecycle stage, four collaboration-health counts, the
+policy in force, and the needs-attention list. The UI ships in English and
+Simplified Chinese; the captures in this README show the Chinese UI.*
 
 Blog post: [AI Collab — open-source multi-AI collaboration](https://www.atomgradient.com/en/blog/ai-collab-open-source-multi-ai-collaboration)
 ([中文](https://www.atomgradient.com/zh/blog/ai-collab-open-source-multi-ai-collaboration))
@@ -64,7 +65,7 @@ Blog post: [AI Collab — open-source multi-AI collaboration](https://www.atomgr
   is ordered by sequence number. Seven JSON-schema contracts in
   [`contracts/`](contracts/) define IPC, state, policy and delivery,
   permission confirmation, drivers, gates and workspace environment.
-  627 Python tests and 111 Swift tests run without network access.
+  682 Python tests and 124 Swift tests run without network access.
 
 ## Screens
 
@@ -77,16 +78,23 @@ the blocked check and the pending permission each carry their own action.
 When the room column is narrower than 760 pt — here, because the inspector
 is open — the progress column folds into the list, as shown.*
 
-![Empty room right after creation](docs/images/readme-empty-room.png)
+![New task room form: name, objective, two colleague seats, opening, preview](docs/images/readme-create-room.png)
 
-*A room right after creation (v2 design): no colleagues yet, the composer
-row to add one, and the empty activity section stating what will appear
-there.*
+*New task room (v3 design). Two seats by default — `claude` and `codex`,
+named after their CLI; rename them, pick another CLI, add a note, or add a
+third. The opening (pair programming by default) is only a paragraph in
+each colleague's startup prompt. The preview on the right shows what both
+colleagues will see and the rules that hold from creation: anyone can
+message anyone, the Host keeps it that way, a project policy file is
+enabled only explicitly. Creating starts nothing.*
 
-![First-use canvas: register a project, create the first room](docs/images/readme-first-use.png)
+![Collaboration policy inspector: room-wide policy, message kinds, project policy that cannot be enabled](docs/images/readme-policy.png)
 
-*A registered project with no rooms (v2 design): the create form sits in
-the canvas, with the next steps listed under it.*
+*Collaboration policy (v3 design). The room-wide policy the Host maintains,
+bound to the exact colleagues and recomputed as they change; the kinds
+anyone can send; and, under Advanced, the project's own policy file — here
+it cannot be enabled because the room has no colleague named `analyst`, and
+the current rules stay as they are.*
 
 ![Four colleague terminal windows across two rooms exchanging deliveries](docs/images/readme-with-tuis.png)
 
