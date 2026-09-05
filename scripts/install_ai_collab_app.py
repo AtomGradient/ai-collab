@@ -345,13 +345,17 @@ def install(candidate: Path, target: Path, state_root: Path, health_timeout: flo
             *, replace: tuple[Path, ...] = ()) -> dict[str, Any]:
     candidate = candidate.expanduser().absolute()
     target_input = target.expanduser().absolute()
+    if target_input.parent.is_symlink():
+        raise InstallError("installation directory must be a real directory")
     target = target_input.parent.resolve() / target_input.name
     state_root = state_root.expanduser().resolve()
     if target.suffix != ".app" or target == candidate:
         raise InstallError("target must be a different .app path")
     target.parent.mkdir(parents=True, exist_ok=True)
-    if target.parent.stat().st_uid != os.getuid():
-        raise InstallError("installation directory is not owned by the current user")
+    parent = target.parent.stat()
+    if (parent.st_uid not in {0, os.getuid()} or parent.st_mode & stat.S_IWOTH
+            or not os.access(target.parent, os.W_OK)):
+        raise InstallError("installation directory must be trusted and writable")
     existing = target if target.exists() or target.is_symlink() else None
     if state_root != DEFAULT_STATE_ROOT.resolve():
         raise InstallError("SMAppService installation requires the standard current-user state root")

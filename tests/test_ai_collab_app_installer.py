@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -175,6 +176,52 @@ def test_service_build_digest_tracks_bundle_inputs_but_not_info_plist(
 
     service.write_text("v2", encoding="utf-8")
     assert BUILDER._unsigned_bundle_digest(app) != first
+
+
+def test_install_parent_accepts_system_applications_without_relaxing_other_checks(tmp_path, monkeypatch):
+    candidate = _app(tmp_path / "candidate.app", "new")
+    target = tmp_path / "Applications/AI Collab.app"
+    target.parent.mkdir(mode=0o775)
+    state_root = tmp_path / "state"
+    monkeypatch.setattr(INSTALLER, "DEFAULT_STATE_ROOT", state_root)
+    real_stat = Path.stat
+    owner = 0
+
+    def root_owned_parent(path, *args, **kwargs):
+        details = real_stat(path, *args, **kwargs)
+        if path == target.parent:
+            values = list(details)
+            values[4] = owner
+            return os.stat_result(values)
+        return details
+
+    class ReachedSignatureVerification(Exception):
+        pass
+
+    def verify(*args, **kwargs):
+        raise ReachedSignatureVerification
+
+    monkeypatch.setattr(Path, "stat", root_owned_parent)
+    monkeypatch.setattr(INSTALLER, "verify_candidate", verify)
+    with pytest.raises(ReachedSignatureVerification):
+        INSTALLER.install(candidate, target, state_root, 1.0)
+    target.parent.chmod(0o777)
+    with pytest.raises(INSTALLER.InstallError, match="trusted and writable"):
+        INSTALLER.install(candidate, target, state_root, 1.0)
+    target.parent.chmod(0o755)
+    owner = os.getuid() + 1
+    with pytest.raises(INSTALLER.InstallError, match="trusted and writable"):
+        INSTALLER.install(candidate, target, state_root, 1.0)
+    owner = 0
+    target.parent.chmod(0o555)
+    with pytest.raises(INSTALLER.InstallError, match="trusted and writable"):
+        INSTALLER.install(candidate, target, state_root, 1.0)
+    target.parent.chmod(0o755)
+    alias = tmp_path / "Applications-link"
+    alias.symlink_to(target.parent)
+    with pytest.raises(INSTALLER.InstallError, match="real directory"):
+        INSTALLER.install(candidate, alias / target.name, state_root, 1.0)
+    assert not target.exists()
 
 
 def test_upgrade_health_failure_restores_previous_app(
