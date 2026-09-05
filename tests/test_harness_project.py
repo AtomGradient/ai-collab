@@ -470,7 +470,7 @@ def test_registered_project_exposes_bounded_path_free_collaboration_templates(
         assert str(project_root) not in encoded
 
 
-def test_collaboration_catalog_refresh_does_not_rewrite_existing_scenario_snapshot(
+def test_builtin_catalog_refresh_offers_new_rules_without_rewriting_scenario_snapshot(
     tmp_path: Path,
 ) -> None:
     state_root = tmp_path / "state"
@@ -495,6 +495,7 @@ def test_collaboration_catalog_refresh_does_not_rewrite_existing_scenario_snapsh
             project_binding_digest=registered["project_binding_digest"],
             request_id="create-v1",
         )
+        frozen = host.store.scenario_project_contract(project_id, "scenario-v1")
 
         adapter.collaboration_templates = [copy.deepcopy(version_two)]
         refreshed = client.reconcile_project(
@@ -510,7 +511,8 @@ def test_collaboration_catalog_refresh_does_not_rewrite_existing_scenario_snapsh
         }
         assert host._scenario_collaboration_templates(  # noqa: SLF001
             project_id, "scenario-v1"
-        ) == {"templates": [version_one]}
+        ) == {"templates": [version_two]}
+        assert host.store.scenario_project_contract(project_id, "scenario-v1") == frozen
 
         client.create_scenario(
             project_instance_id=project_id,
@@ -528,7 +530,7 @@ def test_collaboration_catalog_refresh_does_not_rewrite_existing_scenario_snapsh
         }
         assert host._scenario_collaboration_templates(  # noqa: SLF001
             project_id, "scenario-v1"
-        ) == {"templates": [version_one]}
+        ) == {"templates": [version_two]}
 
 
 def test_registration_is_idempotent_and_rejects_request_reuse(tmp_path: Path) -> None:

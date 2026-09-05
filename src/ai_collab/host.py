@@ -315,7 +315,7 @@ class HarnessHost:
     def _scenario_collaboration_templates(
         self, project_instance_id: str, scenario_id: str
     ) -> dict[str, Any]:
-        """Resolve policy templates from the Scenario's immutable contract."""
+        """Offer refreshed built-ins; keep project-authored scenario rules frozen."""
 
         snapshot = self.store.scenario_project_contract(
             project_instance_id, scenario_id
@@ -323,6 +323,15 @@ class HarnessHost:
         collaboration = (
             snapshot.get("collaboration") if isinstance(snapshot, dict) else None
         )
+        if isinstance(collaboration, dict) and collaboration.get("kind") == "builtin":
+            current = self.projects.resolved_render(project_instance_id)
+            if (
+                isinstance(current, dict)
+                and current.get("collaboration", {}).get("kind") == "builtin"
+            ):
+                # Reconciliation updates the catalog, not the applied policy.
+                # The operator still explicitly previews/applies this template.
+                return self.projects.collaboration_templates(project_instance_id)
         if isinstance(collaboration, dict) and (
             "registry_snapshot" in collaboration
             or "registry_snapshot_digest" in collaboration

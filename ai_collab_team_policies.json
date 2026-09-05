@@ -54,6 +54,14 @@
           "retry_profile_id": "interactive"
         },
         {
+          "rule_id": "analyst-response",
+          "sender": {"kind": "participant", "participant_id": "analyst"},
+          "receiver": {"kind": "participant", "participant_id": "reviewer"},
+          "message_kind": "collaboration.response",
+          "effect": "allow",
+          "retry_profile_id": "interactive"
+        },
+        {
           "rule_id": "reviewer-response",
           "sender": {"kind": "participant", "participant_id": "reviewer"},
           "receiver": {"kind": "participant", "participant_id": "analyst"},
@@ -154,6 +162,14 @@
           "retry_profile_id": "interactive"
         },
         {
+          "rule_id": "triad-reviewer-answer-analyst-review",
+          "sender": {"kind": "participant", "participant_id": "reviewer"},
+          "receiver": {"kind": "participant", "participant_id": "analyst"},
+          "message_kind": "collaboration.review-response",
+          "effect": "allow",
+          "retry_profile_id": "interactive"
+        },
+        {
           "rule_id": "triad-review-to-synthesis",
           "sender": {"kind": "participant", "participant_id": "reviewer"},
           "receiver": {"kind": "participant", "participant_id": "synthesizer"},
@@ -165,6 +181,30 @@
           "rule_id": "triad-synthesis-to-analysis",
           "sender": {"kind": "participant", "participant_id": "synthesizer"},
           "receiver": {"kind": "participant", "participant_id": "analyst"},
+          "message_kind": "collaboration.response",
+          "effect": "allow",
+          "retry_profile_id": "interactive"
+        },
+        {
+          "rule_id": "triad-reviewer-answer-analyst",
+          "sender": {"kind": "participant", "participant_id": "reviewer"},
+          "receiver": {"kind": "participant", "participant_id": "analyst"},
+          "message_kind": "collaboration.response",
+          "effect": "allow",
+          "retry_profile_id": "interactive"
+        },
+        {
+          "rule_id": "triad-synthesizer-answer-reviewer",
+          "sender": {"kind": "participant", "participant_id": "synthesizer"},
+          "receiver": {"kind": "participant", "participant_id": "reviewer"},
+          "message_kind": "collaboration.response",
+          "effect": "allow",
+          "retry_profile_id": "interactive"
+        },
+        {
+          "rule_id": "triad-analyst-answer-synthesizer",
+          "sender": {"kind": "participant", "participant_id": "analyst"},
+          "receiver": {"kind": "participant", "participant_id": "synthesizer"},
           "message_kind": "collaboration.response",
           "effect": "allow",
           "retry_profile_id": "interactive"

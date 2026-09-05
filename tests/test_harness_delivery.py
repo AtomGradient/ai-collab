@@ -71,6 +71,26 @@ PROJECT_DIGEST = PROJECT_RENDER["render_digest"]
 CAPABILITY_DIGEST = "b" * 64
 
 
+@pytest.mark.parametrize("template", _BUILTIN_COLLABORATION_REGISTRY["templates"],
+                         ids=lambda value: value["template_id"])
+def test_builtin_requests_have_reverse_reply_routes(template: dict[str, Any]) -> None:
+    reply_kinds = {
+        "collaboration.question": "collaboration.response",
+        "collaboration.review-request": "collaboration.review-response",
+    }
+    rules = template["route_rules"]
+    for request in rules:
+        if request["effect"] != "allow" or request["message_kind"] not in reply_kinds:
+            continue
+        assert any(
+            reply["effect"] == "allow"
+            and reply["sender"] == request["receiver"]
+            and reply["receiver"] == request["sender"]
+            and reply["message_kind"] == reply_kinds[request["message_kind"]]
+            for reply in rules
+        ), request["rule_id"]
+
+
 def _runtime_descriptor() -> dict[str, Any]:
     return {
         "driver_kind": "runtime",
@@ -2893,8 +2913,9 @@ def _remove_snapshot_project_files(project_root: Path) -> None:
     project_root.rmdir()
 
 
+@pytest.mark.parametrize("builtin", [False, True], ids=["project-registry", "builtin"])
 def test_policy_catalog_updates_without_rewriting_scenario_snapshots(
-    tmp_path: Path,
+    tmp_path: Path, builtin: bool,
 ) -> None:
     state_root = tmp_path / "state"
     project_root = tmp_path / "canonical"
@@ -2903,10 +2924,21 @@ def test_policy_catalog_updates_without_rewriting_scenario_snapshots(
     template_v2 = _versioned_policy_template(2)
     render_v1 = _snapshot_project_render(template_v1, version=1)
     render_v2 = _snapshot_project_render(template_v2, version=2)
+    if builtin:
+        for render in (render_v1, render_v2):
+            render["source"]["source_digest"] = "1" * 64
+            render["collaboration"].pop("relative_path")
+            render["collaboration"].update(
+                kind="builtin", profile_id="builtin.standard-v1"
+            )
+            render["render_digest"] = canonical_json_sha256(
+                {key: value for key, value in render.items()
+                 if key not in {"availability", "render_digest"}}
+            )
     _write_snapshot_project_files(project_root, template_v1)
     adapter = SnapshotProjectAdapter(project_root, render_v1)
 
-    with running_snapshot_policy_host(state_root, adapter) as (_, client):
+    with running_snapshot_policy_host(state_root, adapter) as (host, client):
         project = client.register_project(
             canonical_project_path=str(project_root),
             request_id="register-policy-snapshot-project",
@@ -2918,6 +2950,16 @@ def test_policy_catalog_updates_without_rewriting_scenario_snapshots(
             scenario_id="snapshot-a",
             project_binding_digest=render_v1["render_digest"],
         )
+        target_a = dict(
+            project_instance_id=project_id, scenario_id="snapshot-a",
+            scenario_generation=1, scenario_state_revision=opened_a["state_revision"],
+            template_id=template_v1["template_id"],
+        )
+        initial_plan = client.plan_policy(**target_a)["policy_plan"]
+        initial_policy = client.apply_policy_plan(
+            **target_a, plan_digest=initial_plan["plan_digest"]
+        )["policy"]
+        frozen = host.store.scenario_project_contract(project_id, "snapshot-a")
 
         _write_snapshot_project_files(project_root, template_v2)
         adapter.render = copy.deepcopy(render_v2)
@@ -2925,8 +2967,8 @@ def test_policy_catalog_updates_without_rewriting_scenario_snapshots(
             project_instance_id=project_id,
             request_id="observe-policy-v2",
         )
-        assert observed["reconciliation"]["binding_changed"] is True
-        accepted = client.accept_project_reconciliation(
+        assert observed["reconciliation"]["binding_changed"] is (not builtin)
+        accepted = observed if builtin else client.accept_project_reconciliation(
             project_instance_id=project_id,
             availability_fingerprint=observed["reconciliation"][
                 "availability_fingerprint"
@@ -2946,6 +2988,10 @@ def test_policy_catalog_updates_without_rewriting_scenario_snapshots(
         assert client.list_policy_templates(project_instance_id=project_id) == {
             "templates": [template_v2]
         }
+        assert host.store.scenario_project_contract(project_id, "snapshot-a") == frozen
+        assert client.show_policy(
+            project_instance_id=project_id, scenario_id="snapshot-a"
+        )["policy"] == initial_policy
         plan_a = client.plan_policy(
             project_instance_id=project_id,
             scenario_id="snapshot-a",
@@ -2961,7 +3007,7 @@ def test_policy_catalog_updates_without_rewriting_scenario_snapshots(
             template_id=template_v2["template_id"],
         )["policy_plan"]
         assert plan_a["template_snapshot"]["template_digest"] == (
-            canonical_json_sha256(template_v1)
+            canonical_json_sha256(template_v2 if builtin else template_v1)
         )
         assert plan_b["template_snapshot"]["template_digest"] == (
             canonical_json_sha256(template_v2)
@@ -2970,7 +3016,7 @@ def test_policy_catalog_updates_without_rewriting_scenario_snapshots(
             value
             for value in plan_a["policy_pack"]["assignments"]
             if value["participant"]["participant_id"] == RECEIVER_ID
-        )["task_id"] == "review-v1"
+        )["task_id"] == ("review-v2" if builtin else "review-v1")
         assert next(
             value
             for value in plan_b["policy_pack"]["assignments"]
@@ -2988,6 +3034,14 @@ def test_policy_catalog_updates_without_rewriting_scenario_snapshots(
             scenario_state_revision=opened_a["state_revision"],
             template_id=template_v1["template_id"],
         )["policy_plan"] == plan_a
+        reapplied = client.apply_policy_plan(
+            **target_a, plan_digest=plan_a["plan_digest"]
+        )["policy"]
+        assert reapplied["policy_version"] == initial_policy["policy_version"] + 1
+        assert next(
+            item for item in reapplied["assignments"]
+            if item["participant"]["participant_id"] == RECEIVER_ID
+        )["task_id"] == ("review-v2" if builtin else "review-v1")
         assert adapter.collaboration_calls == 0
 
 
