@@ -1685,9 +1685,17 @@ def _refresh_vendor_session_binding(
         binding = _stored_vendor_binding(private_root, launch_spec, provider)
         if binding is None:  # pragma: no cover - verification records it
             raise DriverError("vendor session binding is unavailable")
-        rebound = binding["vendor_session_id"] != expected_session_id
+        # From here on the proof must match a resumed session only if the
+        # vendor says this session was resumed (a resume launch, or a
+        # session selected inside the TUI). A newly materialized identity —
+        # the first session of a fresh or recreated colleague — still
+        # carries a startup proof, and close verifies that same proof again.
+        proof_path = _vendor_proof_path(private_root)
+        resumed_in_tui = (
+            proof_path.exists() and _read_private(proof_path).get("source") == "resume"
+        )
         state["expected_vendor_session_id"] = binding["vendor_session_id"]
-        state["vendor_resume_requested"] = resume_requested or rebound
+        state["vendor_resume_requested"] = resume_requested or resumed_in_tui
         state["vendor_session_identity_sha256"] = identity_digest
         _write_private(_state_path(private_root), state)
     return identity_digest

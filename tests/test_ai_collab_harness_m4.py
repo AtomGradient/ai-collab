@@ -4140,6 +4140,20 @@ def test_vendor_session_hook_captures_and_reuses_exact_identity(
         )
     assert identity_digest == hashlib.sha256(session_id.encode()).hexdigest()
     assert state["vendor_session_identity_sha256"] == identity_digest
+    # M2 build 55: a Codex colleague's first materialized identity (expected
+    # None -> first session) was treated as a rebind, which marked the
+    # running launch as resume-launched; close then rejected the still-valid
+    # startup proof and resume recreated the colleague. The same startup
+    # proof must verify again — that is what close does.
+    assert state["expected_vendor_session_id"] == session_id
+    assert state["vendor_resume_requested"] is False
+    assert (
+        participant_driver._refresh_vendor_session_binding(  # noqa: SLF001
+            private_root, launch_spec, state
+        )
+        == identity_digest
+    )
+    assert state["vendor_resume_requested"] is False
 
     resumed_argv, _, resumed_session_id, resumed = (
         participant_driver._prepare_runtime_launch(  # noqa: SLF001
@@ -4225,7 +4239,15 @@ def test_claude_adopts_a_prompt_proven_session_selected_inside_the_owned_tui(
 
     assert identity == hashlib.sha256(selected_session_id.encode()).hexdigest()
     assert state["expected_vendor_session_id"] == selected_session_id
-    assert state["vendor_resume_requested"] is True
+    # A compact proof is not a resume: later checks keep accepting it, and
+    # close's own refresh verifies the same proof again.
+    assert state["vendor_resume_requested"] is False
+    assert (
+        participant_driver._refresh_vendor_session_binding(  # noqa: SLF001
+            private_root, launch_spec, state
+        )
+        == identity
+    )
     binding = participant_driver._stored_vendor_binding(  # noqa: SLF001
         private_root, launch_spec, "claude"
     )
@@ -4277,7 +4299,15 @@ def test_codex_adopts_a_prompt_proven_session_selected_after_recreate(
 
     assert identity == hashlib.sha256(selected_session_id.encode()).hexdigest()
     assert state["expected_vendor_session_id"] == selected_session_id
+    # The vendor reported a resumed session, so later checks expect one;
+    # close's own refresh verifies the same proof again.
     assert state["vendor_resume_requested"] is True
+    assert (
+        participant_driver._refresh_vendor_session_binding(  # noqa: SLF001
+            private_root, launch_spec, state
+        )
+        == identity
+    )
     binding = participant_driver._stored_vendor_binding(  # noqa: SLF001
         private_root, launch_spec, "codex"
     )
