@@ -1802,6 +1802,12 @@ def test_adapter_command_receives_project_root_only_in_private_environment(
     adapter = ProjectAdapterCommand(config)
     result = adapter.call("register", {}, project_root=project_root)
     assert result == {"root_matches": True}
+    # Teardown names a root that may no longer exist; the transport forwards
+    # the recorded path as given instead of re-proving it.
+    project_root.rmdir()
+    assert adapter.call("status", {}, project_root=project_root) == {
+        "root_matches": True
+    }
 
 
 def test_adapter_command_rejects_render_too_large_for_process_environment(
@@ -3069,6 +3075,216 @@ def test_force_destroy_removes_ready_scenario_after_workspace_container_disappea
         evidence = history["unprovisioned_destroy_evidence"]
         assert evidence["binding_state_before"] == "ready"
         assert len(evidence["husk_digest"]) == 64
+
+
+class RootRecordingAdapter(FakeAdapter):
+    """Records the project root the Host hands to each adapter operation."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.roots: list[tuple[str, Path | None]] = []
+
+    def call(  # type: ignore[override]
+        self,
+        operation: str,
+        payload: Mapping[str, Any],
+        *,
+        project_root: Path | None = None,
+        project_render: Mapping[str, Any] | None = None,
+        progress_callback: Any = None,
+    ) -> dict[str, Any]:
+        del project_render, progress_callback
+        self.roots.append((operation, project_root))
+        return super().call(operation, payload)
+
+
+class RootRecordingSecurityAdapter(FakeSecurityAdapter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.roots: list[tuple[str, Path | None]] = []
+
+    def call(  # type: ignore[override]
+        self,
+        operation: str,
+        payload: Mapping[str, Any],
+        *,
+        project_root: Path | None = None,
+        timeout_seconds: float = 300,
+    ) -> dict[str, Any]:
+        self.roots.append((operation, project_root))
+        return super().call(operation, payload, timeout_seconds=timeout_seconds)
+
+
+def _registered_provisioned_room(
+    host: HarnessHost, client: HarnessClient, project_root: Path
+) -> tuple[str, dict[str, Any], RootRecordingAdapter, RootRecordingSecurityAdapter]:
+    """Register a real directory and wire root resolution as HarnessHost does."""
+
+    from test_harness_project import FakeProjectAdapter
+
+    host.projects.adapter = FakeProjectAdapter()  # type: ignore[assignment]
+    adapter = RootRecordingAdapter()
+    host.workspace = WorkspaceCoordinator(  # type: ignore[arg-type]
+        host.state_root,
+        adapter,
+        project_root_resolver=host.projects.canonical_root,
+        recorded_root_resolver=host.projects.recorded_root,
+        project_render_resolver=host._scenario_project_render,  # noqa: SLF001
+    )
+    security = RootRecordingSecurityAdapter()
+    host.security = SecurityCoordinator(  # type: ignore[arg-type]
+        host.state_root,
+        security,
+        project_root_resolver=host.projects.recorded_root,
+    )
+    project_id = client.register_project(
+        canonical_project_path=str(project_root)
+    )["project"]["project_instance_id"]
+    created = client.create_scenario(
+        project_instance_id=project_id,
+        scenario_id="room",
+        project_binding_digest=HOST_PROJECT_DIGEST,
+        request_id="room-create",
+    )["scenario"]
+    planned = client.plan_workspace(
+        project_instance_id=project_id,
+        scenario_id="room",
+        scenario_generation=created["scenario_generation"],
+        scenario_state_revision=created["state_revision"],
+        requested_component_ids=[],
+        project_payload={},
+        request_id="room-plan",
+    )["workspace"]
+    client.provision_workspace(
+        project_instance_id=project_id,
+        scenario_id="room",
+        scenario_generation=created["scenario_generation"],
+        scenario_state_revision=created["state_revision"],
+        plan_digest=planned["plan_digest"],
+        request_id="room-provision",
+    )
+    return project_id, created, adapter, security
+
+
+def test_missing_registered_root_still_allows_teardown_and_unregister(
+    tmp_path: Path,
+) -> None:
+    """A room whose registered source directory vanished can still be
+    previewed, force-destroyed with the usual approval, and its project
+    unregistered afterwards. Teardown locates the bundle by the recorded
+    root's name and never reads the source."""
+    state_root = tmp_path / "state"
+    project_root = tmp_path / "Codes" / "student-learning-assistant"
+    project_root.mkdir(parents=True)
+    with running_high_risk_host(state_root) as (host, client):
+        project_id, created, adapter, security = _registered_provisioned_room(
+            host, client, project_root
+        )
+        recorded = host.projects.recorded_root(project_id)
+        shutil.rmtree(project_root)
+        fence = {
+            "project_instance_id": project_id,
+            "scenario_id": "room",
+            "scenario_generation": created["scenario_generation"],
+            "scenario_state_revision": created["state_revision"],
+        }
+
+        preview = client.preview_destroy_scenario(**fence)["effect_preview"]
+        assert preview["eligible"] is True
+        assert preview["workspace"]["state"] == "aligned"
+
+        result = client.force_destroy_scenario(
+            **fence, request_id="room-force-destroy"
+        )
+        assert result["unregistered"] is True
+        assert client.list_scenarios(project_instance_id=project_id) == {
+            "scenarios": []
+        }
+        client.unregister_project(project_instance_id=project_id)
+        assert client.list_projects() == {"projects": []}
+
+        # Both adapters were handed the recorded path although it is gone.
+        assert not recorded.exists()
+        teardown = [root for op, root in adapter.roots if op in {"status", "destroy"}]
+        assert teardown and all(root == recorded for root in teardown)
+        assert ("observe", recorded) in security.roots
+
+
+def test_repair_with_missing_registered_root_is_refused_before_pending_state(
+    tmp_path: Path,
+) -> None:
+    """Repair re-reads the source, so without the directory it must be refused
+    at the preview while the binding is still ready - not after the binding
+    was published as repairing, which would close the destroy exit too."""
+    state_root = tmp_path / "state"
+    project_root = tmp_path / "Codes" / "student-learning-assistant"
+    project_root.mkdir(parents=True)
+    with running_high_risk_host(state_root) as (host, client):
+        project_id, _, _, _ = _registered_provisioned_room(
+            host, client, project_root
+        )
+        shutil.rmtree(project_root)
+        with host.store._lock:  # noqa: SLF001 - durable fault fixture
+            durable = host.store._read_state()  # noqa: SLF001
+            record = next(iter(durable["scenarios"].values()))["record"]
+            record["observed_state"] = "degraded"
+            record["degraded"] = {
+                "reason": "cleanup_pending",
+                "cleanup_pending": True,
+                "owned_resource_evidence_sha256": "e" * 64,
+                "repair_action": "scenario.repair",
+            }
+            record["state_revision"] += 1
+            durable["state_revision"] += 1
+            host.store._write_state(durable)  # noqa: SLF001
+        degraded = client.scenario_status(
+            project_instance_id=project_id, scenario_id="room"
+        )["scenario"]
+        fence = {
+            "project_instance_id": project_id,
+            "scenario_id": "room",
+            "scenario_generation": degraded["scenario_generation"],
+            "scenario_state_revision": degraded["state_revision"],
+        }
+
+        with pytest.raises(HarnessClientError) as refused:
+            client.repair_scenario(**fence, request_id="room-repair")
+        assert refused.value.code == "operation.precondition-failed"
+        assert "registered project root is unavailable" in str(refused.value)
+
+        workspace_state = json.loads(
+            (state_root / "workspace-execution.json").read_text(encoding="utf-8")
+        )
+        binding = next(iter(workspace_state["bindings"].values()))
+        assert binding["state"] == "ready"
+        assert "pending_operation_id" not in binding
+        current = client.scenario_status(
+            project_instance_id=project_id, scenario_id="room"
+        )["scenario"]
+        assert current["active_operation_id"] is None
+        # The destroy exit stays open.
+        preview = client.preview_destroy_scenario(**fence)["effect_preview"]
+        assert preview["workspace"]["state"] == "aligned"
+
+        # Planning a new room reads the source as well and is refused alike.
+        second = client.create_scenario(
+            project_instance_id=project_id,
+            scenario_id="room-2",
+            project_binding_digest=HOST_PROJECT_DIGEST,
+            request_id="room-2-create",
+        )["scenario"]
+        with pytest.raises(HarnessClientError) as blocked:
+            client.plan_workspace(
+                project_instance_id=project_id,
+                scenario_id="room-2",
+                scenario_generation=second["scenario_generation"],
+                scenario_state_revision=second["state_revision"],
+                requested_component_ids=[],
+                project_payload={},
+                request_id="room-2-plan",
+            )
+        assert blocked.value.code == "operation.precondition-failed"
+        assert "registered project root is unavailable" in str(blocked.value)
 
 
 def test_force_destroy_missing_ready_workspace_restarts_after_finalize_failure(

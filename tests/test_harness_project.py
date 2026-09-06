@@ -771,6 +771,8 @@ def test_private_canonical_root_is_revalidated_before_adapter_dispatch(
         project_root.rmdir()
         with pytest.raises(ProjectError, match="unavailable"):
             host.projects.canonical_root(project_id)
+        # Teardown dispatch needs only the recorded identity.
+        assert host.projects.recorded_root(project_id) == project_root.resolve()
 
 
 def test_unregister_removes_only_a_scenario_free_project(tmp_path: Path) -> None:

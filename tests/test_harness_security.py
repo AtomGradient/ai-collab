@@ -341,6 +341,35 @@ def test_security_adapter_preserves_home_for_git_workspace_observations(
     assert adapter.call("observe", {}, project_root=project)["status"] == " M asset\n"
 
 
+def test_security_adapter_command_forwards_the_recorded_root_as_given(
+    tmp_path: Path,
+) -> None:
+    """The security adapter observes the Workspace bundle named after the
+    registered root; the root itself may be gone by teardown time."""
+    script = tmp_path / "adapter.py"
+    script.write_text(
+        "import json, os, sys\n"
+        "json.load(sys.stdin)\n"
+        "json.dump({'security_adapter_protocol_version': 1, 'adapter_id': 'test-security',\n"
+        "    'outcome': 'completed', 'result': {'root': os.environ['AI_COLLAB_PROJECT_ROOT']}},\n"
+        "    sys.stdout)\n",
+        encoding="utf-8",
+    )
+    config = tmp_path / "security.json"
+    config.write_text(
+        json.dumps({
+            "schema_version": 1,
+            "adapter_id": "test-security",
+            "command": ["python3", "adapter.py"],
+            "working_directory": ".",
+        }),
+        encoding="utf-8",
+    )
+    adapter = security_module.SecurityAdapterCommand(config)
+    missing = tmp_path / "Codes" / "student-learning-assistant"
+    assert adapter.call("observe", {}, project_root=missing) == {"root": str(missing)}
+
+
 def test_default_security_adapter_proves_only_an_exact_empty_workspace_husk(
     tmp_path: Path,
 ) -> None:

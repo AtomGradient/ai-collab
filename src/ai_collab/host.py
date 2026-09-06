@@ -271,6 +271,7 @@ class HarnessHost:
                 self.state_root,
                 project_adapter,
                 project_root_resolver=self.projects.canonical_root,
+                recorded_root_resolver=self.projects.recorded_root,
                 project_render_resolver=self._scenario_project_render,
             )
             if project_adapter is not None
@@ -296,7 +297,7 @@ class HarnessHost:
             SecurityCoordinator(
                 self.state_root,
                 SecurityAdapterCommand(security_adapter_config),
-                project_root_resolver=self.projects.canonical_root,
+                project_root_resolver=self.projects.recorded_root,
             )
             if security_adapter_config is not None
             else None

@@ -187,9 +187,9 @@ class SecurityAdapterCommand:
             }
         }
         if project_root is not None:
-            environment["AI_COLLAB_PROJECT_ROOT"] = str(
-                Path(project_root).resolve(strict=True)
-            )
+            # Only the recorded identity is needed: the adapter observes the
+            # Workspace bundle named after it, never the source.
+            environment["AI_COLLAB_PROJECT_ROOT"] = str(project_root)
         try:
             completed = subprocess.run(
                 self.command,

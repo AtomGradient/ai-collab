@@ -1939,6 +1939,100 @@ def test_unsupported_present_checkout_storage_is_typed(
 
 
 @pytest.mark.slow
+def test_teardown_with_a_missing_source_uses_the_recorded_root_name(
+    tmp_path: Path,
+) -> None:
+    """status and destroy locate the bundle by the registered root's name and
+    never read the source, so a deleted source directory must not block
+    teardown; a different name still fails the ownership proof untouched."""
+    project = _build_project(tmp_path)
+    code, plan_reply, stderr = _call(
+        project,
+        "plan",
+        {
+            "operation_id": "wsop-missing-source",
+            "scenario": {"scenario_id": "room", "scenario_generation": 1},
+            "scenario_state_revision": 1,
+            "workspace_id": "workspace:missing-source",
+            "requested_component_ids": [],
+            "project_payload": {},
+        },
+    )
+    assert code == 0, stderr
+    plan = plan_reply["result"]["plan"]
+    scenario_root = tmp_path / "scenario"
+    scenario_root.mkdir(mode=0o700)
+    staging = scenario_root / "bundle"
+    code, provision_reply, stderr, _ = _call_with_progress(
+        project,
+        "provision",
+        {
+            "workspace_id": "workspace:missing-source",
+            "staging_path": str(staging),
+            "plan": plan,
+            "descriptors": plan_reply["result"]["descriptors"],
+        },
+    )
+    assert code == 0, stderr
+    receipt = provision_reply["result"]["receipt"]
+    marker_path = staging / ".ai-collab-harness-binding.json"
+    marker_path.write_text(
+        json.dumps(
+            {
+                "journal": provision_reply["result"]["journal"],
+                "receipt": receipt,
+                "review_snapshot": provision_reply["result"]["review_snapshot"],
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    os.chmod(marker_path, 0o600)
+    status_payload = {
+        "operation_id": "status-missing-source",
+        "bundle_path": str(staging),
+        "plan": plan,
+        "receipt": receipt,
+    }
+    _, before, _ = _call(project, "status", status_payload)
+    assert before is not None
+
+    shutil.rmtree(project)
+    _, after, stderr = _call(project, "status", status_payload)
+    assert after is not None and after["outcome"] == "completed", stderr
+    observation = after["result"]["observation"]
+    assert observation["state"] == "aligned"
+    assert (
+        observation["wip_summary_digest"]
+        == before["result"]["observation"]["wip_summary_digest"]
+    )
+
+    other_name = project.with_name("other-name")
+    _, wrong, _ = _call(other_name, "status", status_payload)
+    assert wrong is not None
+    assert "workspace.component-missing" in wrong["result"]["observation"]["drift_codes"]
+    destroy_payload = {
+        "operation_id": "destroy-missing-source",
+        "bundle_path": str(staging),
+        "plan": plan,
+        "receipt": receipt,
+        "expected_wip_summary_digest": observation["wip_summary_digest"],
+        "force": False,
+    }
+    _, refused, _ = _call(other_name, "destroy", destroy_payload)
+    assert refused is not None and refused["outcome"] == "failed"
+    assert refused["result"]["error"]["code"] == "workspace.destroy-outcome-unknown"
+    assert staging.is_dir()
+
+    _, destroyed, stderr = _call(project, "destroy", destroy_payload)
+    assert destroyed is not None and destroyed["outcome"] == "completed", stderr
+    assert not staging.exists()
+    assert list(scenario_root.iterdir()) == []
+
+
 def test_plan_provision_status_destroy_full_cycle(tmp_path: Path) -> None:
     project = _build_project(tmp_path)
     code, plan_reply, stderr = _call(

@@ -38,6 +38,9 @@ MAX_ADAPTER_PROGRESS_LINE_BYTES = 2 * 1024
 MAX_ADAPTER_PROGRESS_EVENTS = 4096
 ADAPTER_ERROR_CODE_RE = re.compile(r"^[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*)+$")
 PROGRESS_COMPONENT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+# Adapter operations that read the canonical source checkout.
+SOURCE_BOUND_OPERATIONS = frozenset({"plan", "provision", "repair"})
+
 ADAPTER_ENVIRONMENT_KEYS = {
     "HOME",
     "PATH",
@@ -192,9 +195,9 @@ class ProjectAdapterCommand:
             if key in ADAPTER_ENVIRONMENT_KEYS
         }
         if project_root is not None:
-            environment["AI_COLLAB_PROJECT_ROOT"] = str(
-                Path(project_root).resolve(strict=True)
-            )
+            # The resolver owns the root's identity; teardown may name a
+            # directory that no longer exists.
+            environment["AI_COLLAB_PROJECT_ROOT"] = str(project_root)
         if project_render is not None:
             encoded_render = canonical_json_bytes(dict(project_render))
             if len(encoded_render) > MAX_PROJECT_RENDER_ENV_BYTES:
@@ -521,6 +524,7 @@ class WorkspaceCoordinator:
         adapter: ProjectAdapterCommand,
         *,
         project_root_resolver: Callable[[str], Path] | None = None,
+        recorded_root_resolver: Callable[[str], Path] | None = None,
         project_render_resolver: Callable[
             [str, str | None, str | None], Mapping[str, Any] | None
         ]
@@ -530,6 +534,9 @@ class WorkspaceCoordinator:
         self.state_path = self.state_root / "workspace-execution.json"
         self.adapter = adapter
         self.project_root_resolver = project_root_resolver
+        # Operations that read the canonical source need the live root;
+        # status, destroy and recover only need its recorded identity.
+        self.recorded_root_resolver = recorded_root_resolver
         self.project_render_resolver = project_render_resolver
         self._lock = threading.RLock()
         # Initial high-risk execution and every exact recovery join share one
@@ -550,6 +557,7 @@ class WorkspaceCoordinator:
         *,
         project_binding_digest: str | None = None,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        source_required: bool = False,
     ) -> dict[str, Any]:
         adapter_progress = (
             progress_callback
@@ -583,8 +591,15 @@ class WorkspaceCoordinator:
             ):
                 scenario_id = scenario["scenario_id"]
                 break
+        root_resolver = self.project_root_resolver
+        if (
+            operation not in SOURCE_BOUND_OPERATIONS
+            and not source_required
+            and self.recorded_root_resolver is not None
+        ):
+            root_resolver = self.recorded_root_resolver
         adapter_arguments = {
-            "project_root": self.project_root_resolver(project_instance_id),
+            "project_root": root_resolver(project_instance_id),
             "project_render": (
                 self.project_render_resolver(
                     project_instance_id, scenario_id, project_binding_digest
@@ -1318,6 +1333,9 @@ class WorkspaceCoordinator:
                 "plan": plan,
                 "receipt": receipt,
             },
+            # Repair re-reads the source, and dispatching it resolves the root
+            # only after the binding has left "ready"; refuse here instead.
+            source_required=operation == "scenario.repair",
         )
         if set(external) != {"journal", "observation"}:
             raise WorkspaceError("adapter.invalid-reply", "workspace preview differs")

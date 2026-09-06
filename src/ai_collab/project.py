@@ -1131,6 +1131,20 @@ class ProjectRegistry:
             )
         return resolved
 
+    def recorded_root(self, project_instance_id: str) -> Path:
+        """The registered root as recorded, for dispatch that needs its identity only.
+
+        Teardown and observation locate the Workspace bundle by this path's
+        name and never read the source, so the directory need not exist.
+        """
+
+        with self._lock:
+            state = self._read_state()
+            item = state["projects"].get(project_instance_id)
+            if item is None:
+                raise ProjectError("project.not-found", "project is not registered")
+            return Path(item["canonical_root"])
+
     def resolved_render(
         self,
         project_instance_id: str,
